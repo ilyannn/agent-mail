@@ -467,15 +467,13 @@
       (println (json/generate-string th {:pretty true}))
       (print (render-thread th)))))
 
-(defn summary [th] (dissoc th :msgs))
-
 (defn cmd-list [opts]
   (ensure-numbers!)
   (let [me (caller opts)
         ths (if (:all opts) (all-threads) (open-for me))
         ths (map #(assoc % :unread (count (unread % me))) (sort-by :updated ths))]
     (if (:json opts)
-      (println (json/generate-string (map summary ths) {:pretty true}))
+      (println (json/generate-string (map core/summary ths) {:pretty true}))
       (doseq [t ths]
         (println (format "#%-3d %-34s %-14s %-5s %2d msgs %s  %s  %s"
                          (:number t) (:id t) (str (:last-from t) "→" (:owner t)) (:status t) (:count t)
@@ -496,10 +494,16 @@
               (do (write-duty! me session "idle") (System/exit 3))
               :else (do (Thread/sleep (* 1000 interval)) (recur)))))))
 
+(defn duty-view
+  "The duty records with what is derived for each: age, staleness, whether the
+   session that armed the wait lives, and whether it counts as on duty."
+  []
+  (map #(assoc % :age-s (core/age-s (:heartbeat %)) :stale (not (fresh? %))
+               :session-alive (session-alive? %) :on-duty (on-duty? %))
+       (duty-records)))
+
 (defn cmd-who [opts]
-  (let [recs (map #(assoc % :age-s (core/age-s (:heartbeat %)) :stale (not (fresh? %))
-                          :session-alive (session-alive? %) :on-duty (on-duty? %))
-                  (duty-records))]
+  (let [recs (duty-view)]
     (if (:json opts)
       (println (json/generate-string recs {:pretty true}))
       (doseq [r recs]
@@ -508,6 +512,36 @@
                                (and (:stale r) (= "waiting" (:state r))) "  (stale)"
                                (and (:stale r) (:on-duty r)) "  (session alive)"
                                :else "")))))))
+
+(defn cmd-status
+  "Everything at once, for UIs (a menu bar app calls it on every refresh): all
+   threads with per-reader unread counts, waiting time and listener, the duty
+   records, and the open threads nobody is listening for. A pure read: no
+   seen marker moves, nothing is written or committed (not even the thread
+   numbering that list and read catch up on)."
+  [opts]
+  (let [me (caller opts)
+        threads (all-threads)
+        readers (into #{me} (mapcat core/participants) threads)
+        st (core/status {:now (core/now-utc) :me me :threads threads
+                         :seen (into {} (map (juxt identity seen-map)) readers)
+                         :duty (duty-view)})]
+    (if (:json opts)
+      (println (json/generate-string st {:pretty true}))
+      (let [number-of (into {} (map (juxt :id :number)) (:threads st))
+            owner-of (into {} (map (juxt :id :owner)) (:threads st))
+            listening (distinct (map :repo (filter :on-duty (:duty st))))]
+        (doseq [t (:threads st)]
+          (println (format "#%-3d %-24s %-5s %-6s %-8s %-6s %s"
+                           (:number t) (str (:last-from t) "→" (:owner t)) (:status t)
+                           (if (:waiting-s t) (core/duration (:waiting-s t)) "")
+                           (or (:listener t) "")
+                           (if (pos? (:unread t)) (str (:unread t) " new") "")
+                           (:subject t))))
+        (println (str "on duty: " (if (seq listening) (str/join ", " listening) "nobody")))
+        (println (str "undelivered: " (if-let [u (seq (:undelivered st))]
+                                        (str/join ", " (map #(str "#" (number-of %) " " (owner-of %)) u))
+                                        "none")))))))
 
 (defn cmd-hook
   "SessionStart hook mode: one line listing the threads waiting on this repo;
@@ -541,6 +575,7 @@
   agent-mail open ID                          open what's new to you in your Markdown app
   agent-mail wait [--session NAME] [--timeout S] [--interval S]
   agent-mail who [--json]                     who is on duty
+  agent-mail status [--json]                  everything at once, for UIs
   agent-mail hook                             SessionStart hook output
   agent-mail whoami                           who the caller is
 
@@ -567,6 +602,7 @@ Store: $AGENT_MAIL_DIR, else ~/.local/share/agent-mail.")
         "list" (cmd-list opts)
         "wait" (cmd-wait opts)
         "who" (cmd-who opts)
+        "status" (cmd-status opts)
         "hook" (cmd-hook opts)
         "whoami" (println (caller opts))
         (nil "help") (println help)

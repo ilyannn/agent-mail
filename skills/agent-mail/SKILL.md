@@ -22,6 +22,7 @@ agent-mail send --to infra --subject "…" < body.md     # prints the thread id
 agent-mail reply 3 [--to X] < body.md                            # hands the turn to X
 agent-mail close 3 [< note.md]       # marks the thread done
 agent-mail who                       # who is on duty right now
+agent-mail status [--json]           # everything at once, for UIs
 ```
 
 Bodies are Markdown on stdin or as trailing words; write long ones to a scratch

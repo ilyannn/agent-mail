@@ -1,8 +1,8 @@
 ;; agent-mail.core: the pure half of agent-mail. Text, time, frontmatter,
-;; thread state, draft extraction and argv parsing; nothing here touches the
-;; store, the environment or a process. Loaded by agent-mail.bb (and test.bb)
-;; from the repo's src/ directory; refusals are thrown as ::usage ex-infos and
-;; turned into exit codes by the script.
+;; thread state, the status view, draft extraction and argv parsing; nothing
+;; here touches the store, the environment or a process. Loaded by
+;; agent-mail.bb (and test.bb) from the repo's src/ directory; refusals are
+;; thrown as ::usage ex-infos and turned into exit codes by the script.
 (ns agent-mail.core
   (:require [clj-yaml.core :as yaml]
             [clojure.string :as str]))
@@ -20,7 +20,17 @@
 (defn fmt-utc [^java.time.Instant i] (.format (.atZone i java.time.ZoneOffset/UTC) iso))
 (defn now-utc [] (fmt-utc (java.time.Instant/now)))
 (defn epoch-s [ts] (.getEpochSecond (java.time.Instant/parse ts)))
-(defn age-s [ts] (- (epoch-s (now-utc)) (epoch-s ts)))
+(defn age-s
+  "Whole seconds from stamp `ts` to stamp `now` (default: the current time)."
+  ([ts] (age-s ts (now-utc)))
+  ([ts now] (- (epoch-s now) (epoch-s ts))))
+(defn duration
+  "Seconds as one rounded-down unit: 45s, 12m, 3h, 2d."
+  [s]
+  (cond (< s 60) (str s "s")
+        (< s 3600) (str (quot s 60) "m")
+        (< s 86400) (str (quot s 3600) "h")
+        :else (str (quot s 86400) "d")))
 (defn stamp->name [ts] (str/replace ts ":" ""))
 (def ^:private local-fmt (java.time.format.DateTimeFormatter/ofPattern "yyyy-MM-dd HH:mm xxx"))
 (defn local-time
@@ -153,6 +163,70 @@
                   (when (seq (:attachments m))
                     (str "attachments: " (str/join ", " (map #(str files "/" (subs % 6)) (:attachments m))) "\n"))
                   "\n" (abs (:body m)) "\n")))))))
+
+;; ---------------------------------------------------------------- status
+
+(defn summary "A thread without its messages." [th] (dissoc th :msgs))
+
+(defn participants
+  "Every name the thread's messages come from or go to, sorted."
+  [th]
+  (vec (sort (distinct (keep identity (mapcat (juxt :from :to) (:msgs th)))))))
+
+(defn unread-by
+  "Unread count for each participant of `th`; `seen` maps a reader to their
+   seen markers (thread id -> last message file read)."
+  [th seen]
+  (into (sorted-map)
+        (for [p (participants th)]
+          [p (count (unread (:msgs th) p (get-in seen [p (:id th)])))])))
+
+(defn waiting-s
+  "Seconds an open thread has waited on its owner since its last message, as
+   of stamp `now`; nil once it is closed."
+  [th now]
+  (when (and (= "open" (:status th)) (:updated th))
+    (age-s (:updated th) now)))
+
+(defn listener
+  "Who picks up an open thread: \"user\" when it waits on the user, \"on-duty\"
+   when `on-duty?` (e.g. the set of repos with an on-duty record) holds for its
+   owner, else \"none\". nil for a closed thread, or one without messages yet."
+  [th on-duty?]
+  (when (and (= "open" (:status th)) (:owner th))
+    (cond (= "user" (:owner th)) "user"
+          (on-duty? (:owner th)) "on-duty"
+          :else "none")))
+
+(defn undelivered
+  "Ids of the threads nobody is listening for (listener \"none\"), longest
+   waiting first, then by number. No threshold: that is the reader's call."
+  [threads]
+  (->> threads
+       (filter #(= "none" (:listener %)))
+       (sort-by (juxt #(- (or (:waiting-s %) 0)) :number))
+       (mapv :id)))
+
+(defn status
+  "Everything at once, for a UI that must not re-derive anything: every thread
+   (closed ones too), newest-updated first, as a summary with the caller's
+   unread count, unread counts per participant, how long it has waited and who
+   will pick it up; the duty records as given; and the undelivered thread ids.
+   `seen` maps each reader (the caller and every participant) to their seen
+   markers; `duty` is the duty records with :on-duty already decided."
+  [{:keys [now me threads seen duty]}]
+  (let [on-duty-repos (set (map :repo (filter :on-duty duty)))
+        ths (->> threads
+                 (map (fn [th]
+                        (assoc (summary th)
+                               :unread (count (unread (:msgs th) me (get-in seen [me (:id th)])))
+                               :unread-by (unread-by th seen)
+                               :participants (participants th)
+                               :waiting-s (waiting-s th now)
+                               :listener (listener th on-duty-repos))))
+                 (sort-by :updated #(compare %2 %1))
+                 vec)]
+    {:now now :me me :threads ths :duty (vec duty) :undelivered (undelivered ths)}))
 
 ;; ---------------------------------------------------------------- drafts
 

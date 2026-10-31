@@ -202,6 +202,67 @@
     (is (= "no thread #2026" (refused "2026")) "digits are a number, not a fragment")
     (is (= "no thread matches nope" (refused "nope")))))
 
+;; ================================================================ unit: status
+
+(deftest status-derivations
+  (let [meta {:subject "S" :from "a" :created "2026-10-31T10:00:00.000Z" :number "1"}
+        now "2026-10-31T10:01:00.000Z"
+        open-th (core/thread-state meta "t1" [(msg 0 "a" "b") (msg 1 "b" "c") (msg 2 "c" "b")])
+        closed-th (core/thread-state (assoc meta :number "2") "t2" [(msg 0 "a" "b") (msg 1 "b" "a" :status "done")])
+        to-user (core/thread-state (assoc meta :number "3") "t3" [(msg 0 "a" "user")])
+        empty-th (core/thread-state meta "t0" [])]
+    (testing "participants: every from and to, distinct and sorted"
+      (is (= ["a" "b" "c"] (core/participants open-th)))
+      (is (= ["a" "user"] (core/participants to-user)))
+      (is (= [] (core/participants empty-th))))
+    (testing "unread-by: one count per participant, each from their own marker"
+      (is (= {"a" 2 "b" 2 "c" 2} (core/unread-by open-th {})) "nobody has read anything; own messages never count")
+      (is (= {"a" 2 "b" 0 "c" 1} (core/unread-by open-th {"a" {"other" "009.md"} "b" {"t1" "002.md"} "c" {"t1" "000.md"}}))
+          "a marker for another thread does not count")
+      (is (= ["a" "b" "c"] (keys (core/unread-by open-th {}))) "readers in name order")
+      (is (= {} (core/unread-by empty-th {}))))
+    (testing "waiting-s: since the last message, for open threads only"
+      (is (= 58 (core/waiting-s open-th now)))
+      (is (nil? (core/waiting-s closed-th now)))
+      (is (nil? (core/waiting-s empty-th now)))
+      (is (= 3600 (core/age-s "2026-10-31T10:00:00.000Z" "2026-10-31T11:00:00.000Z"))))
+    (testing "listener: the owner's duty state, the user apart, nothing for closed threads"
+      (is (= "on-duty" (core/listener open-th #{"b"})))
+      (is (= "none" (core/listener open-th #{"a" "c"})) "only the owner's duty counts")
+      (is (= "user" (core/listener to-user #{})))
+      (is (= "user" (core/listener to-user #{"user"})))
+      (is (nil? (core/listener closed-th #{"a" "b"})))
+      (is (nil? (core/listener empty-th #{}))))
+    (testing "undelivered: listener none only, longest waiting first, then by number"
+      (is (= ["old" "mid-1" "mid-2" "new"]
+             (core/undelivered [{:id "new" :number 1 :listener "none" :waiting-s 5}
+                                {:id "mid-2" :number 4 :listener "none" :waiting-s 60}
+                                {:id "old" :number 5 :listener "none" :waiting-s 600}
+                                {:id "mid-1" :number 2 :listener "none" :waiting-s 60}
+                                {:id "heard" :number 6 :listener "on-duty" :waiting-s 9000}
+                                {:id "mine" :number 7 :listener "user" :waiting-s 9000}
+                                {:id "closed" :number 8 :listener nil :waiting-s nil}])))
+      (is (= [] (core/undelivered []))))
+    (testing "status puts it together"
+      (let [duty [{:repo "b" :on-duty true} {:repo "c" :on-duty false}]
+            st (core/status {:now now :me "user" :threads [closed-th to-user open-th]
+                             :seen {"b" {"t1" "002.md"} "user" {"t3" "000.md"}} :duty duty})
+            [t1 t2 t3] (:threads st)]
+        (is (= #{:now :me :threads :duty :undelivered} (set (keys st))))
+        (is (= [now "user" duty] [(:now st) (:me st) (:duty st)]))
+        (is (= ["t1" "t2" "t3"] (map :id (:threads st))) "every thread, closed too, newest-updated first")
+        (is (not-any? :msgs (:threads st)) "summaries, no messages")
+        (is (= [3 2 0] (map :unread [t1 t2 t3])) "the caller's own count: a bystander on t1 and t2, read up on t3")
+        (is (= {"a" 2 "b" 0 "c" 2} (:unread-by t1)))
+        (is (= ["on-duty" nil "user"] (map :listener [t1 t2 t3])))
+        (is (= [58 nil 60] (map :waiting-s [t1 t2 t3])))
+        (is (= [] (:undelivered st)))
+        (is (= ["t3" "t1"] (:undelivered (core/status {:now now :me "x" :seen {} :duty []
+                                                     :threads [open-th (core/thread-state meta "t3" [(msg 0 "a" "d")]) closed-th]})))
+            "nobody on duty: every open thread not waiting on the user, longest waiting first")))
+    (testing "duration: one rounded-down unit"
+      (is (= ["0s" "59s" "1m" "59m" "1h" "23h" "1d" "40d"] (map core/duration [0 59 60 3599 3600 86399 86400 (* 40 86400)]))))))
+
 ;; ================================================================ unit: drafts
 
 (deftest draft-extraction
@@ -553,6 +614,94 @@
           (is (false? (:session-alive r)))))
       (is (str/includes? (err {:who "a"} "@user" "for you") "→ user: shown at every session start") "no notification in tests"))))
 
+(defn status-json [o] (json/parse-string (out o "status" "--json") true))
+
+(deftest status-for-uis
+  (with-store
+    (let [;; waits on billing, whose only duty record is stale; last written on 25 Oct
+          invoice (out {:who "website"} "send" "--to" "billing" "--subject" "Invoice" "--date" "2026-10-01" "Send the invoice.")
+          _ (out {:who "billing"} "reply" invoice "--date" "2026-10-02" "Which month?")
+          _ (out {:who "website"} "reply" invoice "--date" "2026-10-25" "October.")
+          ;; waits on website, which has no duty record at all; since 10 Oct
+          typo (out {:who "user"} "send" "--to" "website" "--subject" "Fix the typo" "--date" "2026-10-10" "On the front page.")
+          ;; closed
+          vault (out {:who "website"} "send" "--to" "infra" "--subject" "Vault" "Please add a vault.")
+          _ (out {:who "infra"} "reply" vault "Done.")
+          _ (out {:who "website"} "close" vault)
+          ;; waits on the user
+          cert (out {:who "infra"} "send" "--to" "user" "--subject" "Need your OK" "Buy a certificate?")
+          ;; waits on infra, which has a fresh record, and on docs, busy past its heartbeat with a live session
+          dns (out {:who "website"} "send" "--to" "infra" "--subject" "DNS record" "api.example.test, please.")
+          docs (out {:who "website"} "send" "--to" "docs" "--subject" "Docs page" "A page for the API.")
+          _ (out {:who "infra"} "read" dns)
+          duty! (fn [nm rec] (spit (str (fs/path *store* "duty" (str nm ".edn"))) (pr-str rec)))
+          _ (duty! "billing__old" {:repo "billing" :session "old" :state "waiting" :heartbeat "2020-01-01T00:00:00.000Z" :pid 1})
+          _ (duty! "docs__busy" {:repo "docs" :session "busy" :state "working" :heartbeat "2021-01-01T00:00:00.000Z" :pid 1
+                                 :session-pid (.pid (java.lang.ProcessHandle/current))})
+          _ (duty! "infra__fresh" {:repo "infra" :session "fresh" :state "waiting" :heartbeat (core/now-utc) :pid 1})
+          listed (into {} (map (juxt :id identity)) (json/parse-string (out {:env user-shell} "list" "--all" "--json") true))
+          seen-files (fn [] (into {} (for [f (fs/list-dir (fs/path *store* "seen"))]
+                                       [(str (fs/file-name f)) [(slurp (str f)) (str (fs/last-modified-time f))]])))
+          seen-before (seen-files)
+          head-before (store-git "rev-parse" "HEAD")
+          commits-before (commits)
+          ;; the menu bar app runs in the user's own shell, with no --as
+          st (status-json {:env user-shell})
+          who-json (json/parse-string (out {} "who" "--json") true)
+          th (into {} (map (juxt :id identity)) (:threads st))]
+      (testing "one object: the time, the caller, every thread, the duty records, the undelivered ids"
+        (is (= #{:now :me :threads :duty :undelivered} (set (keys st))))
+        (is (= "user" (:me st)))
+        (is (re-matches #"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z" (:now st))))
+      (testing "every thread, closed ones too, newest-updated first"
+        (is (= #{invoice typo vault cert dns docs} (set (keys th))))
+        (is (= [docs dns cert vault invoice typo] (map :id (:threads st))))
+        (is (= (sort #(compare %2 %1) (map :updated (:threads st))) (map :updated (:threads st)))))
+      (testing "each thread is what list --json gives, plus the derived fields"
+        (is (every? #(= #{:id :number :subject :from :last-from :created :owner :status :count :updated :unread
+                          :unread-by :participants :waiting-s :listener} (set (keys %))) (:threads st)))
+        (is (every? #(= (get listed (:id %)) (select-keys % (keys (get listed (:id %))))) (:threads st))
+            "same values as list --all --json for the same caller"))
+      (testing "unread counts for the caller and for every participant"
+        (is (= {:infra 1 :website 0} (:unread-by (th vault))) "website closed after infra's reply")
+        (is (= 3 (:unread (th vault))) "the user is a bystander there")
+        (is (= {:infra 0 :user 1} (:unread-by (th cert))))
+        (is (= 1 (:unread (th cert))))
+        (is (= {:infra 0 :website 0} (:unread-by (th dns))) "infra read it")
+        (is (= {:billing 1 :website 0} (:unread-by (th invoice))) "replying marks what came before as seen")
+        (is (= {:user 0 :website 1} (:unread-by (th typo))))
+        (is (= 0 (:unread (th typo))) "the user wrote it"))
+      (testing "participants, waiting time and listener"
+        (is (= ["billing" "website"] (:participants (th invoice))))
+        (is (= ["infra" "website"] (:participants (th vault))))
+        (is (= [nil nil] ((juxt :waiting-s :listener) (th vault))) "closed: neither")
+        (is (= (core/age-s "2026-10-25T00:00:00.000Z" (:now st)) (:waiting-s (th invoice))) "since its last message")
+        (is (= (core/age-s "2026-10-10T00:00:00.000Z" (:now st)) (:waiting-s (th typo))))
+        (is (every? #(<= 0 (:waiting-s (th %)) 300) [cert dns docs]))
+        (is (= {cert "user" dns "on-duty" docs "on-duty" invoice "none" typo "none"}
+               (into {} (for [id [cert dns docs invoice typo]] [id (:listener (th id))])))
+            "a stale waiting record is nobody; a working one whose session lives counts"))
+      (testing "undelivered: open, not the user's, nobody on duty; longest waiting first"
+        (is (= [typo invoice] (:undelivered st)) "not thread order, not number order"))
+      (testing "the duty records, as who --json gives them"
+        (is (= (map #(dissoc % :age-s) who-json) (map #(dissoc % :age-s) (:duty st))))
+        (is (= ["billing" "docs" "infra"] (map :repo (:duty st))))
+        (is (= [[true false] [true true] [false true]] (map (juxt :stale :on-duty) (:duty st))))
+        (is (every? #(contains? % :age-s) (:duty st))))
+      (testing "the short table without --json"
+        (let [h (out {:env user-shell} "status")]
+          (is (str/includes? h "#4   infra→user"))
+          (is (str/includes? h "on duty: docs, infra"))
+          (is (str/includes? h "undelivered: #2 website, #1 billing"))))
+      (testing "a participant's view counts its own unread"
+        (let [mine (into {} (map (juxt :id identity)) (:threads (status-json {:who "infra"})))]
+          (is (= [0 1 0 3] (map #(:unread (mine %)) [dns vault cert invoice])) "read, not yet read, written by infra, a bystander")))
+      (testing "status is a read: no seen marker moves, nothing is committed or left uncommitted"
+        (is (= seen-before (seen-files)))
+        (is (= head-before (store-git "rev-parse" "HEAD")))
+        (is (= commits-before (commits)))
+        (is (str/blank? (store-git "status" "--porcelain")))))))
+
 (deftest caller-identity
   (with-store
     (with-dir [d]
@@ -722,6 +871,7 @@
 (deftest the-store-is-a-git-repo
   (with-store
     (out {:who "a"} "list")
+    (is (= {:me "a" :threads [] :duty [] :undelivered []} (dissoc (status-json {:who "a"}) :now)) "status of an empty store")
     (is (not (fs/exists? (fs/path *store* ".git"))) "read-only commands do not create the store")
     (let [id (out {:who "a"} "send" "--to" "b" "--subject" "Git" "one")]
       (is (= 2 (commits)) "init plus the send")
@@ -733,7 +883,10 @@
       (out {} "read" id)
       (out {:who "a"} "list")
       (out {:who "a"} "hook")
+      (out {:who "a"} "status")
+      (out {} "status" "--json")
       (is (= 3 (commits)) "reading commits nothing")
+      (is (str/blank? (store-git "status" "--porcelain")) "nor leaves anything to commit")
       (out {:who "a"} "close" id)
       (is (= 4 (commits)))
       (is (= "✅ a → b: Git" (store-git "log" "-1" "--format=%s")))
