@@ -3,41 +3,81 @@
 ;; One write-once Markdown file per message; a thread's owner and status are
 ;; derived from its messages, never edited. Run `agent-mail help`.
 ;; Store: $AGENT_MAIL_DIR, else ~/.local/share/agent-mail (its own git repo).
+;; The pure functions live in src/agent_mail/core.clj next to this script.
 (ns agent-mail
-  (:require [babashka.fs :as fs]
+  (:require [babashka.classpath :as cp]
+            [babashka.fs :as fs]
             [babashka.process :as p]
             [cheshire.core :as json]
-            [clj-yaml.core :as yaml]
             [clojure.edn :as edn]
             [clojure.string :as str]))
+
+(def repo-dir (fs/parent (fs/absolutize *file*)))
+(cp/add-classpath (str (fs/path repo-dir "src")))
+(require '[agent-mail.core :as core])
 
 ;; ---------------------------------------------------------------- store
 
 (def store (fs/path (or (System/getenv "AGENT_MAIL_DIR") (fs/xdg-data-home "agent-mail"))))
 (def threads-dir (fs/path store "threads"))
 (def duty-dir (fs/path store "duty"))
+(def seen-dir (fs/path store "seen"))
+(def lock-dir (fs/path store ".lock"))
 (def stale-s 30)
 
-(defn fail [& msg]
-  (binding [*out* *err*] (println (str "agent-mail: " (str/join " " msg))))
-  (System/exit 1))
+(defn fail
+  "A refusal: thrown so that locks and other `finally` blocks are released,
+   reported by -main on stderr with exit code 1."
+  [& msg]
+  (throw (apply core/usage-error msg)))
 
 (defn git [& args]
   (apply p/shell {:dir (str store) :out :string :err :string :continue true} "git" args))
 
+(defn- lock-age-ms []
+  (try (- (System/currentTimeMillis) (.toMillis (fs/last-modified-time lock-dir)))
+       (catch java.io.IOException _ 0)))
+
+(defn locked
+  "Runs f holding <store>/.lock, a directory created atomically, so two
+   commands never pick the same thread number or commit over each other. A
+   lock older than `stale-s` is taken over as left behind by a dead process."
+  [f]
+  (loop [n 0]
+    (if (try (fs/create-dir lock-dir) true
+             (catch java.nio.file.FileAlreadyExistsException _ false))
+      (try (f) (finally (fs/delete-if-exists lock-dir)))
+      (do (when (> (lock-age-ms) (* 1000 stale-s))
+            (fs/delete-if-exists lock-dir))
+          (when (>= n 300) (fail "the store is locked by another agent-mail command (" (str lock-dir) ")"))
+          (Thread/sleep 100)
+          (recur (inc n))))))
+
 (declare ensure-numbers!)
+
+(defn ensure-identity!
+  "Commits need an author; use a local one when git has none configured (CI,
+   fresh machines) rather than failing silently."
+  []
+  (when-not (zero? (:exit (git "config" "user.email")))
+    (git "config" "user.name" "agent-mail")
+    (git "config" "user.email" "agent-mail@localhost")))
 
 (defn ensure-store! []
   (fs/create-dirs threads-dir)
   (fs/create-dirs duty-dir)
   (when-not (fs/exists? (fs/path store ".git"))
-    (git "init" "-q")
-    (spit (str (fs/path store ".gitignore")) "duty/\ndrafts/\nview/\nseen/\n")
-    (git "add" "-A")
-    (git "commit" "-q" "-m" "📬 init: agent-mail store"))
+    (locked (fn []
+              (when-not (fs/exists? (fs/path store ".git"))
+                (git "init" "-q")
+                (ensure-identity!)
+                (spit (str (fs/path store ".gitignore")) "duty/\ndrafts/\nview/\nseen/\n")
+                (git "add" "-A")
+                (git "commit" "-q" "-m" "📬 init: agent-mail store")))))
   (ensure-numbers!))
 
 (defn commit! [msg]
+  (ensure-identity!)
   (loop [n 0]
     (git "add" "-A")
     (let [r (git "commit" "-q" "-m" msg)]
@@ -46,69 +86,6 @@
                  (< n 20))
         (Thread/sleep 200)
         (recur (inc n))))))
-
-;; ---------------------------------------------------------------- time, text
-
-(def ^:private iso (java.time.format.DateTimeFormatter/ofPattern "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"))
-(defn fmt-utc [^java.time.Instant i] (.format (.atZone i java.time.ZoneOffset/UTC) iso))
-(defn now-utc [] (fmt-utc (java.time.Instant/now)))
-(defn epoch-s [ts] (.getEpochSecond (java.time.Instant/parse ts)))
-(defn age-s [ts] (- (epoch-s (now-utc)) (epoch-s ts)))
-(defn stamp->name [ts] (str/replace ts ":" ""))
-(def ^:private local-fmt (java.time.format.DateTimeFormatter/ofPattern "yyyy-MM-dd HH:mm xxx"))
-(defn local-time
-  "A stored UTC stamp shown in the machine's time zone, e.g. 2026-10-31 04:25 +01:00."
-  [ts]
-  (if ts (.format (.atZone (java.time.Instant/parse ts) (java.time.ZoneId/systemDefault)) local-fmt) ""))
-(defn after
-  "The later of `date` and one millisecond past `last-date`, so messages in a
-   thread always sort in the order they were written."
-  [date last-date]
-  (if (and last-date (<= (compare date last-date) 0))
-    (fmt-utc (.plusMillis (java.time.Instant/parse last-date) 1))
-    date))
-(defn rand-hex [] (format "%04x" (rand-int 65536)))
-
-(defn normalize-date
-  "Accepts 2026-10-31 or 2026-10-31T09:00:00Z; anything else is refused."
-  [d]
-  (cond (nil? d) nil
-        (re-matches #"\d{4}-\d{2}-\d{2}" d) (str d "T00:00:00.000Z")
-        (re-matches #"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z" d) (str (subs d 0 19) ".000Z")
-        :else (fail "--date must be YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ (UTC), got" d)))
-
-(defn slug [s]
-  (let [x (-> (str/lower-case s) (str/replace #"[^a-z0-9]+" "-") (str/replace #"^-+|-+$" ""))]
-    (cond (str/blank? x) "thread"
-          (<= (count x) 40) x
-          :else (let [cut (subs x 0 40)]
-                  (if-let [i (str/last-index-of cut "-")] (subs cut 0 i) cut)))))
-
-(defn first-line [s] (-> s str/trim str/split-lines first (or "")))
-
-(defn truncate [s n] (if (> (count s) n) (str (subs s 0 (dec n)) "…") s))
-
-;; ---------------------------------------------------------------- frontmatter
-
-(defn- yaml-scalar [v]
-  (str "\"" (-> (str v) (str/replace "\\" "\\\\") (str/replace "\"" "\\\"")) "\""))
-
-(defn fm-str
-  "Frontmatter with every scalar quoted, so dates stay strings when parsed."
-  [m]
-  (str "---\n"
-       (str/join (for [[k v] m :when (some? v)]
-                   (str (name k) ": "
-                        (if (sequential? v)
-                          (str "[" (str/join ", " (map yaml-scalar v)) "]")
-                          (yaml-scalar v))
-                        "\n")))
-       "---\n"))
-
-(defn parse-doc [s]
-  (if-let [[_ fm body] (re-matches #"(?s)---\n(.*?)\n---\n?(.*)" s)]
-    [(into {} (yaml/parse-string fm)) body]
-    [{} s]))
 
 ;; ---------------------------------------------------------------- threads
 
@@ -119,43 +96,26 @@
          (filter #(fs/exists? (fs/path % "thread.md")))
          (map #(str (fs/file-name %))) sort)))
 
-(declare fold)
-
-(defn resolve-id
-  "Exact id, a thread number (`7` or `#7`), or a unique fragment of an id."
-  [s]
-  (let [ids (thread-ids)]
-    (cond (some #{s} ids) s
-          (re-matches #"#?\d+" s)
-          (let [n (parse-long (str/replace s "#" ""))]
-            (or (some #(when (= n (:number (fold %))) %) ids) (fail "no thread" (str "#" n))))
-          :else (let [hits (filter #(str/includes? % s) ids)]
-                  (case (count hits)
-                    1 (first hits)
-                    0 (fail "no thread matches" s)
-                    (fail "ambiguous thread" s "matches" (str/join ", " hits)))))))
-
 (defn read-msg [f]
-  (let [[fm body] (parse-doc (slurp (str f)))]
+  (let [[fm body] (core/parse-doc (slurp (str f)))]
     (assoc fm :file (str (fs/file-name f)) :body (str/trim body))))
 
+(defn msg-files [id]
+  (let [dir (fs/path (thread-dir id) "msgs")]
+    (when (fs/exists? dir) (sort (fs/glob dir "*.md")))))
+
 (defn fold
-  "A thread's state, derived from its messages: owner is the `to` of the last
-   message, status the last `status` set (default open)."
+  "A thread's state, derived from its messages."
   [id]
-  (let [[meta _] (parse-doc (slurp (str (fs/path (thread-dir id) "thread.md"))))
-        msgs (map read-msg (sort (fs/glob (fs/path (thread-dir id) "msgs") "*.md")))
-        last-m (last msgs)]
-    (assoc meta :id id :msgs (vec msgs) :count (count msgs)
-           :number (some-> (:number meta) str parse-long)
-           :owner (:to last-m) :updated (:date last-m)
-           :status (or (some :status (reverse msgs)) "open"))))
+  (let [[meta _] (core/parse-doc (slurp (str (fs/path (thread-dir id) "thread.md"))))]
+    (core/thread-state meta id (map read-msg (msg-files id)))))
+
+(defn resolve-id [s] (core/resolve-id s (thread-ids) #(:number (fold %))))
 
 (defn all-threads [] (map fold (thread-ids)))
 
 ;; What each participant has seen: <store>/seen/<who>.edn maps thread id to the
 ;; last message file read. Not committed; losing it only means re-reading.
-(def seen-dir (fs/path store "seen"))
 (defn seen-map [who]
   (let [f (fs/path seen-dir (str who ".edn"))]
     (if (fs/exists? f) (edn/read-string (slurp (str f))) {})))
@@ -167,9 +127,9 @@
 (defn unread
   "Messages in `th` that `who` has not seen and did not write."
   [th who]
-  (let [mark (get (seen-map who) (:id th))]
-    (filter #(and (not= who (:from %)) (or (nil? mark) (pos? (compare (:file %) mark)))) (:msgs th))))
-(declare open-for)
+  (core/unread (:msgs th) who (get (seen-map who) (:id th))))
+
+(defn open-for [who] (filter #(and (= who (:owner %)) (= "open" (:status %))) (all-threads)))
 
 (defn pick-thread
   "No thread given: let the user choose. Candidates are the open threads whose
@@ -207,43 +167,45 @@
   []
   (doseq [id (thread-ids)
           :let [f (str (fs/path (thread-dir id) "thread.md"))
-                [meta _] (parse-doc (slurp f))]
+                [meta _] (core/parse-doc (slurp f))]
           :when (nil? (:number meta))]
-    (spit f (str (fm-str (assoc meta :number (next-number))) "\n"))))
-(defn open-for [who] (filter #(and (= who (:owner %)) (= "open" (:status %))) (all-threads)))
+    (spit f (str (core/fm-str (assoc meta :number (next-number))) "\n"))))
 
-(defn new-id [subject created]
-  (let [base (str (subs created 0 10) "-" (slug subject))
-        ids (set (thread-ids))]
-    (if-not (ids base) base
-            (some #(when-not (ids %) %) (map #(str base "-" %) (iterate inc 2))))))
+(defn check-attachments!
+  "Refuses before anything is written when an attachment is missing."
+  [paths]
+  (doseq [p paths :when (not (fs/regular-file? p))]
+    (fail "attachment not found:" (str p))))
 
-(defn attach! [id paths]
+(defn attach!
+  "Copies the files into the thread; a name already taken by different content
+   gets a short content-hash prefix. Returns the `files/<name>` references."
+  [id paths]
   (let [dir (fs/path (thread-dir id) "files")]
     (fs/create-dirs dir)
     (vec (for [p paths]
            (let [p (fs/path p)
-                 _ (when-not (fs/regular-file? p) (fail "attachment not found:" (str p)))
                  nm (str (fs/file-name p))
+                 content (slurp (str p))
                  nm (if (and (fs/exists? (fs/path dir nm))
-                             (not= (slurp (str p)) (slurp (str (fs/path dir nm)))))
-                      (str (subs (str (hash (slurp (str p)))) 0 6) "-" nm)
+                             (not= content (slurp (str (fs/path dir nm)))))
+                      (str (format "%06x" (bit-and (hash content) 0xffffff)) "-" nm)
                       nm)]
              (fs/copy p (fs/path dir nm) {:replace-existing true})
              (str "files/" nm))))))
 
 (defn write-msg! [id {:keys [from to date in-reply-to status attachments body]}]
   (let [dir (fs/path (thread-dir id) "msgs")
-        last-date (some-> (seq (sort (fs/glob dir "*.md"))) last read-msg :date)
-        date (after (or date (now-utc)) last-date)
-        nm (str (stamp->name date) "__" from "__" (rand-hex) ".md")
+        last-date (some-> (seq (msg-files id)) last read-msg :date)
+        date (core/after (or date (core/now-utc)) last-date)
+        nm (str (core/stamp->name date) "__" from "__" (format "%04x" (rand-int 65536)) ".md")
         tmp (fs/path dir (str "." nm ".tmp"))]
     (fs/create-dirs dir)
     (spit (str tmp)
-          (str (fm-str (cond-> {:from from :to to :date date}
-                         in-reply-to (assoc :in-reply-to in-reply-to)
-                         status (assoc :status status)
-                         (seq attachments) (assoc :attachments attachments)))
+          (str (core/fm-str (cond-> {:from from :to to :date date}
+                              in-reply-to (assoc :in-reply-to in-reply-to)
+                              status (assoc :status status)
+                              (seq attachments) (assoc :attachments attachments)))
                "\n" (str/trim body) "\n"))
     (fs/move tmp (fs/path dir nm))
     nm))
@@ -258,22 +220,31 @@
     (when (zero? (:exit r))
       (-> (:out r) str/trim fs/path fs/absolutize fs/normalize fs/parent fs/file-name str))))
 
-(defn caller [opts] (or (:as opts) (System/getenv "AGENT_MAIL_AS") (repo-name) "user"))
+(defn caller [opts]
+  (let [me (or (:as opts) (System/getenv "AGENT_MAIL_AS") (repo-name) "user")]
+    (when-not (core/valid-name? me) (fail "bad name for the caller:" (pr-str me)))
+    me))
+
+(defn recipient [opts]
+  (let [to (or (:to opts) (fail "send needs --to NAME (or `agent-mail @NAME text`)"))]
+    (when-not (core/valid-name? to) (fail "bad recipient name:" (pr-str to)))
+    to))
 
 (defn duty-records []
   (when (fs/exists? duty-dir)
     (->> (fs/glob duty-dir "*.edn") (map #(edn/read-string (slurp (str %)))) (sort-by :heartbeat))))
-(defn fresh? [rec] (< (age-s (:heartbeat rec)) stale-s))
+(defn fresh? [rec] (< (core/age-s (:heartbeat rec)) stale-s))
 (defn on-duty [who] (filter #(and (= who (:repo %)) (fresh? %) (= "waiting" (:state %))) (duty-records)))
 (defn write-duty! [who session state]
   (fs/create-dirs duty-dir)
   (spit (str (fs/path duty-dir (str who "__" session ".edn")))
-        (pr-str {:repo who :session session :state state :heartbeat (now-utc)
+        (pr-str {:repo who :session session :state state :heartbeat (core/now-utc)
                  :pid (.pid (java.lang.ProcessHandle/current))})))
 
 ;; ---------------------------------------------------------------- delivery notes
 
-(def launcher (str (fs/path (fs/parent (fs/absolutize *file*)) "bin" "agent-mail")))
+(def launcher (str (fs/path repo-dir "bin" "agent-mail")))
+(def macos? (str/includes? (System/getProperty "os.name") "Mac"))
 
 (defn notify-user!
   "macOS notification for mail to the user. With terminal-notifier installed and
@@ -320,29 +291,37 @@
 (defn cmd-send [opts args]
   (ensure-store!)
   (let [from (caller opts)
-        to (or (:to opts) (fail "send needs --to NAME (or `agent-mail @NAME text`)"))
+        to (recipient opts)
         _ (when (= from to) (fail "refusing to mail yourself (" from ")"))
         body (body-from args)
         _ (when (str/blank? body) (fail "empty body"))
-        subject (or (:subject opts) (truncate (first-line body) 70))
-        created (or (normalize-date (:date opts)) (now-utc))
-        id (or (:id opts) (new-id subject created))
-        number (next-number)]
-    (when (fs/exists? (thread-dir id)) (fail "thread exists:" id))
-    (fs/create-dirs (thread-dir id))
-    (spit (str (fs/path (thread-dir id) "thread.md"))
-          (str (fm-str {:subject subject :from from :created created :number number}) "\n"))
-    (let [atts (attach! id (:attach opts))]
-      (write-msg! id {:from from :to to :date created :attachments atts :body body}))
-    (commit! (str "📨 " from " → " to ": " subject))
-    (println id)
-    (delivered! from to id subject)))
-
-(defn other-party [th me]
-  (or (some #(when (not= me (:from %)) (:from %)) (reverse (:msgs th)))
-      (when (not= me (:owner th)) (:owner th))))
+        _ (check-attachments! (:attach opts))
+        subject (or (:subject opts) (core/truncate (core/first-line body) 70))
+        created (or (core/normalize-date (:date opts)) (core/now-utc))]
+    (locked
+     (fn []
+       (let [id (or (:id opts) (core/new-id subject created (thread-ids)))
+             number (next-number)]
+         (when (fs/exists? (thread-dir id)) (fail "thread exists:" id))
+         (fs/create-dirs (thread-dir id))
+         (spit (str (fs/path (thread-dir id) "thread.md"))
+               (str (core/fm-str {:subject subject :from from :created created :number number}) "\n"))
+         (let [atts (attach! id (:attach opts))]
+           (write-msg! id {:from from :to to :date created :attachments atts :body body}))
+         (commit! (str "📨 " from " → " to ": " subject))
+         (println id)
+         (delivered! from to id subject))))))
 
 (declare cmd-compose)
+
+(defn reply-to
+  "The recipient of a reply from `me` to `th`: --to, else whoever wrote last
+   that isn't me. Never me."
+  [opts th me]
+  (let [to (or (:to opts) (core/other-party th me) (fail "nobody to reply to; use --to NAME"))]
+    (when-not (core/valid-name? to) (fail "bad recipient name:" (pr-str to)))
+    (when (= to me) (fail "refusing to mail yourself (" me ")"))
+    to))
 
 (defn cmd-reply [opts args {:keys [close?]}]
   (ensure-store!)
@@ -351,80 +330,28 @@
     (System/exit 0))
   (let [me (caller opts)
         id (if (first args) (resolve-id (first args)) (pick-thread me))
-        th (fold id)
-        to (or (:to opts) (other-party th me) (fail "nobody to reply to; use --to NAME"))
         body (body-from (rest args))
         body (if (and close? (str/blank? body)) "Closed." body)
         _ (when (str/blank? body) (fail "empty body"))
-        atts (attach! id (:attach opts))
-        in-reply-to (:file (last (:msgs th)))]
-    (write-msg! id {:from me :to to :date (normalize-date (:date opts))
-                    :in-reply-to in-reply-to :status (when close? "done")
-                    :attachments atts :body body})
-    (commit! (str (if close? "✅ " "↩️ ") me " → " to ": " (:subject th)))
-    (mark-seen! me (fold id))
-    (println id)
-    (when-not close? (delivered! me to id (:subject th)))))
+        _ (check-attachments! (:attach opts))
+        date (core/normalize-date (:date opts))]
+    (locked
+     (fn []
+       (let [th (fold id)
+             to (reply-to opts th me)
+             atts (attach! id (:attach opts))]
+         (write-msg! id {:from me :to to :date date
+                         :in-reply-to (:file (last (:msgs th))) :status (when close? "done")
+                         :attachments atts :body body})
+         (commit! (str (if close? "✅ " "↩️ ") me " → " to ": " (:subject th)))
+         (mark-seen! me (fold id))
+         (println id)
+         (when-not close? (delivered! me to id (:subject th))))))))
 
+(defn files-dir [id] (str (fs/path (thread-dir id) "files")))
 (defn render-thread
-  "The thread as one Markdown document; with `msgs`, only those messages."
-  ([th] (render-thread th (:msgs th)))
-  ([th msgs]
-  (let [files (str (fs/path (thread-dir (:id th)) "files"))
-        abs #(str/replace % "](files/" (str "](" files "/"))]
-    (str "# " (:subject th) "\n"
-         "thread: #" (:number th) " " (:id th) " · from: " (:from th) " · owner: " (:owner th)
-         " · status: " (:status th) " · created: " (local-time (:created th)) "\n"
-         (when (< (count msgs) (:count th))
-           (str "showing " (count msgs) " of " (:count th) " messages; `agent-mail read " (:number th) "` for all\n"))
-         (str/join
-          (for [m msgs]
-            (str "\n## " (:from m) " → " (:to m) " · " (local-time (:date m))
-                 (when (:status m) (str " · " (:status m))) "\n"
-                 (when (seq (:attachments m))
-                   (str "attachments: " (str/join ", " (map #(str files "/" (subs % 6)) (:attachments m))) "\n"))
-                 "\n" (abs (:body m)) "\n")))))))
-
-(def reply-marker "<!-- agent-mail: the thread above is quoted with `>`; answer inline under any line, or write below this marker. Quoted text is kept only next to what you write. Sent when you close the editor; nothing is sent if you write nothing. -->")
-
-(defn quote-lines [text] (str/join "\n" (map #(if (str/blank? %) ">" (str "> " %)) (str/split-lines text))))
-
-(defn context-before
-  "Indexes of the quoted lines to keep above an inline answer: back from i,
-   up to two non-blank lines, never past what was already emitted."
-  [lines i last-emitted]
-  (loop [j (dec i), n 0, acc ()]
-    (if (or (<= j last-emitted) (>= n 2) (not (str/starts-with? (nth lines j) ">")))
-      (drop-while #(str/blank? (subs (nth lines %) 1)) acc)
-      (recur (dec j) (if (str/blank? (subs (nth lines j) 1)) n (inc n)) (conj acc j)))))
-
-(defn reply-from-draft
-  "What the user wrote in a draft: their lines, each preceded by up to two
-   quoted lines as context, with `> […]` where quoted text was skipped. Lines
-   after the marker are a plain reply with no context."
-  [text]
-  (let [lines (vec (str/split-lines text))
-        mi (or (first (keep-indexed #(when (= %2 reply-marker) %1) lines)) (count lines))
-        kind (fn [i l] (cond (= i mi) :quoted
-                             (> i mi) (if (str/blank? l) :blank :new)
-                             (str/starts-with? l ">") :quoted
-                             (str/blank? l) :blank
-                             (= l "---") :quoted
-                             :else :new))
-        kinds (map-indexed kind lines)
-        next-new? (fn [i] (= :new (some #(when (not= :blank (nth kinds %)) (nth kinds %)) (range (inc i) (count lines)))))]
-    (loop [i 0, out [], last-emitted -1]
-      (if (>= i (count lines))
-        (str/trim (str/join "\n" out))
-        (let [k (nth kinds i), l (nth lines i)]
-          (case k
-            :new (let [ctx (if (< i mi) (context-before lines i last-emitted) [])
-                       gap? (and (seq ctx) (> (first ctx) (inc last-emitted)) (pos? (first ctx)))
-                       out (cond-> out gap? (conj "> […]"))
-                       out (into out (map #(nth lines %) ctx))]
-                   (recur (inc i) (conj out l) i))
-            :blank (recur (inc i) (if (and (= last-emitted (dec i)) (= :new (nth kinds last-emitted)) (next-new? i)) (conj out l) out) (if (and (= last-emitted (dec i)) (next-new? i)) i last-emitted))
-            (recur (inc i) out last-emitted)))))))
+  ([th] (core/render-thread th (files-dir (:id th))))
+  ([th msgs] (core/render-thread th (files-dir (:id th)) msgs)))
 
 (defn editor-cmd
   "AGENT_MAIL_EDITOR, else $VISUAL, else $EDITOR, else on macOS `open -W` (the
@@ -432,7 +359,7 @@
   []
   (let [env #(let [v (System/getenv %)] (when-not (str/blank? v) v))]
     (str/split (or (env "AGENT_MAIL_EDITOR") (env "VISUAL") (env "EDITOR")
-                   (when (and (fs/which "open") (str/includes? (System/getProperty "os.name") "Mac")) "open -W")
+                   (when (and macos? (fs/which "open")) "open -W")
                    (fail "no editor: set AGENT_MAIL_EDITOR or EDITOR"))
                #"\s+")))
 
@@ -445,11 +372,14 @@
         id (if (first args) (resolve-id (first args)) (pick-thread me))
         th (fold id)
         dir (fs/path store "view")
-        f (str (fs/path dir (str id ".md")))]
+        f (str (fs/path dir (str id ".md")))
+        viewer (or (System/getenv "AGENT_MAIL_VIEWER") (when (and macos? (fs/which "open")) "open"))]
     (fs/create-dirs dir)
     (spit f (render-thread th (fresh-or-last th me)))
     (mark-seen! me th)
-    (p/shell {:continue true} (if-let [v (System/getenv "AGENT_MAIL_VIEWER")] v "open") f)
+    (if viewer
+      (p/shell {:continue true} viewer f)
+      (binding [*out* *err*] (println "agent-mail: no viewer (set AGENT_MAIL_VIEWER); rendered to" f)))
     (when (:json opts) (println f))))
 
 (defn cmd-compose
@@ -463,20 +393,23 @@
         dir (fs/path store "drafts")
         f (str (fs/path dir (str id ".md")))
         _ (fs/create-dirs dir)
-        _ (spit f (str (quote-lines (render-thread th (fresh-or-last th me))) "\n\n---\n" reply-marker "\n\n"))
+        _ (spit f (str (core/quote-lines (render-thread th (fresh-or-last th me))) "\n\n---\n" core/reply-marker "\n\n"))
         cmd (conj (editor-cmd) f)
         r (apply p/shell {:continue true} cmd)
         _ (when (pos? (:exit r)) (fail "editor failed:" (str/join " " cmd)))
-        body (reply-from-draft (slurp f))]
+        body (core/reply-from-draft (slurp f))]
     (if (str/blank? body)
       (binding [*out* *err*] (println "no reply written; nothing sent"))
-      (let [to (or (:to opts) (other-party th me) (fail "nobody to reply to; draft kept at" f))]
-        (write-msg! id {:from me :to to :in-reply-to (:file (last (:msgs th))) :body body})
-        (commit! (str "↩️ " me " → " to ": " (:subject th)))
-        (mark-seen! me (fold id))
-        (fs/delete f)
-        (println id)
-        (delivered! me to id (:subject th))))))
+      (locked
+       (fn []
+         (let [th (fold id)
+               to (or (:to opts) (core/other-party th me) (fail "nobody to reply to; draft kept at" f))]
+           (write-msg! id {:from me :to to :in-reply-to (:file (last (:msgs th))) :body body})
+           (commit! (str "↩️ " me " → " to ": " (:subject th)))
+           (mark-seen! me (fold id))
+           (fs/delete f)
+           (println id)
+           (delivered! me to id (:subject th))))))))
 
 (defn cmd-read [opts args]
   (ensure-numbers!)
@@ -500,7 +433,7 @@
         (println (format "#%-3d %-34s %-14s %-5s %2d msgs %s  %s  %s"
                          (:number t) (:id t) (str (:from t) "→" (:owner t)) (:status t) (:count t)
                          (if (pos? (:unread t)) (format "%d new" (:unread t)) "     ")
-                         (local-time (:updated t)) (:subject t)))))))
+                         (core/local-time (:updated t)) (:subject t)))))))
 
 (defn cmd-wait [opts]
   (ensure-store!)
@@ -512,12 +445,12 @@
       (write-duty! me session "waiting")
       (let [ids (map :id (open-for me))]
         (cond (seq ids) (do (write-duty! me session "working") (run! println ids) (System/exit 0))
-              (and deadline (> (System/currentTimeMillis) deadline))
+              (and deadline (>= (System/currentTimeMillis) deadline))
               (do (write-duty! me session "idle") (System/exit 3))
               :else (do (Thread/sleep (* 1000 interval)) (recur)))))))
 
 (defn cmd-who [opts]
-  (let [recs (map #(assoc % :age-s (age-s (:heartbeat %)) :stale (not (fresh? %))) (duty-records))]
+  (let [recs (map #(assoc % :age-s (core/age-s (:heartbeat %)) :stale (not (fresh? %))) (duty-records))]
     (if (:json opts)
       (println (json/generate-string recs {:pretty true}))
       (doseq [r recs]
@@ -569,50 +502,26 @@ copied into the thread and `read` prints their absolute paths. --date backfills
 a timestamp when importing old threads; otherwise the tool stamps time.
 Store: $AGENT_MAIL_DIR, else ~/.local/share/agent-mail.")
 
-(def value-opts #{"to" "subject" "as" "session" "date" "id" "timeout" "interval"})
-(def flag-opts #{"json" "all" "edit"})
-
-(defn parse-argv
-  "Options may appear anywhere: `--key value`, flags, repeated `--attach FILE`;
-   `--` ends option parsing. Everything else is positional."
-  [argv]
-  (loop [[a & more :as xs] argv, args [], opts {:attach []}]
-    (cond
-      (empty? xs) {:args args :opts (cond-> opts
-                                      (:timeout opts) (update :timeout parse-long)
-                                      (:interval opts) (update :interval parse-long))}
-      (= a "--") {:args (into args more) :opts opts}
-      (= a "--attach") (if (seq more)
-                         (recur (rest more) args (update opts :attach conj (first more)))
-                         (fail "--attach needs a file"))
-      (and (str/starts-with? a "--") (value-opts (subs a 2)))
-      (if (seq more)
-        (recur (rest more) args (assoc opts (keyword (subs a 2)) (first more)))
-        (fail a "needs a value"))
-      (and (str/starts-with? a "--") (flag-opts (subs a 2)))
-      (recur more args (assoc opts (keyword (subs a 2)) true))
-      (#{"-h" "--help"} a) (recur more (conj args "help") opts)
-      (str/starts-with? a "--") (fail "unknown option" a "(try `agent-mail help`)")
-      :else (recur more (conj args a) opts))))
-
 (defn -main [argv]
-  (let [argv (if (str/starts-with? (or (first argv) "") "@")
-               (concat ["send" "--to" (subs (first argv) 1)] (rest argv))
-               argv)
-        {:keys [args opts]} (parse-argv argv)
-        [cmd & args] args]
-    (case cmd
-      "send" (cmd-send opts args)
-      "reply" (cmd-reply opts args {})
-      "close" (cmd-reply opts args {:close? true})
-      "read" (cmd-read opts args)
-      "open" (cmd-open opts args)
-      "list" (cmd-list opts)
-      "wait" (cmd-wait opts)
-      "who" (cmd-who opts)
-      "hook" (cmd-hook opts)
-      "whoami" (println (caller opts))
-      (nil "help") (println help)
-      (fail "unknown command" cmd "(try `agent-mail help`)"))))
+  (try
+    (let [{:keys [args opts]} (core/parse-argv (core/expand-shorthand argv))
+          [cmd & args] args]
+      (case cmd
+        "send" (cmd-send opts args)
+        "reply" (cmd-reply opts args {})
+        "close" (cmd-reply opts args {:close? true})
+        "read" (cmd-read opts args)
+        "open" (cmd-open opts args)
+        "list" (cmd-list opts)
+        "wait" (cmd-wait opts)
+        "who" (cmd-who opts)
+        "hook" (cmd-hook opts)
+        "whoami" (println (caller opts))
+        (nil "help") (println help)
+        (fail "unknown command" cmd "(try `agent-mail help`)")))
+    (catch clojure.lang.ExceptionInfo e
+      (when-not (core/usage? e) (throw e))
+      (binding [*out* *err*] (println (str "agent-mail: " (ex-message e))))
+      (System/exit 1))))
 
 (-main *command-line-args*)

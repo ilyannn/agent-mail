@@ -1,4 +1,5 @@
 ;; Standalone scripts, not a classpath: file names can't match their ns names.
-;; with-temp-dir binds like let.
+;; with-temp-dir binds like let; the tests' with-dir binds its one name like fn.
 {:linters {:namespace-name-mismatch {:level :off}}
- :lint-as {babashka.fs/with-temp-dir clojure.core/let}}
+ :lint-as {babashka.fs/with-temp-dir clojure.core/let
+           test/with-dir clojure.core/fn}}

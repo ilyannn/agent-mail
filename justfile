@@ -4,9 +4,9 @@
 default:
     @just --list
 
-# Lint every bb script; fails on warnings
+# Lint src/ and every bb script; fails on warnings
 lint:
-    clj-kondo --fail-level warning --lint *.bb
+    clj-kondo --fail-level warning --lint src *.bb
 
 # Run the test suite against a temporary store
 test:
