@@ -110,8 +110,9 @@
     (is (str/blank? (out {:who "nobody"} "hook")) "silent when nothing waits")
     (let [id (out {:who "infra"} "send" "--to" "user" "--subject" "Need your OK" "Details.")]
       (is (= [id] (ids "user")))
-      (let [h (out {:who "website"} "hook")]
-        (is (str/includes? h "waiting on you (the user)"))
+      (is (str/blank? (out {:who "website"} "hook")) "other repos are not told about the user's mail")
+      (let [h (out {:who "user"} "hook")]
+        (is (str/includes? h "waiting on user"))
         (is (str/includes? h id))))))
 
 (deftest reply-from-the-editor

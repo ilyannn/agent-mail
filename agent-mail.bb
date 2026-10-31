@@ -525,8 +525,9 @@
                          (if (and (:stale r) (= "waiting" (:state r))) "  (stale)" "")))))))
 
 (defn cmd-hook
-  "SessionStart hook mode: one line per thread waiting on this repo, and on the
-   user; silent otherwise; never fails."
+  "SessionStart hook mode: one line listing the threads waiting on this repo;
+   silent otherwise; never fails. Mail for the user is the user's business (they
+   get notifications), so sessions are not told about it."
   [opts]
   (try
     (ensure-numbers!)
@@ -535,9 +536,7 @@
                  (println (format "agent-mail: %d thread%s waiting on %s: %s. Read with `agent-mail read <number>`."
                                   (count ths) (if (= 1 (count ths)) "" "s") who
                                   (str/join "; " (map #(format "#%d %s \"%s\" from %s" (:number %) (:id %) (:subject %) (:from %)) ths)))))]
-      (when-let [m (seq (open-for me))] (line me m))
-      (when (not= me "user")
-        (when-let [u (seq (open-for "user"))] (line "you (the user)" u))))
+      (when-let [m (seq (open-for me))] (line me m)))
     (catch Throwable _ nil))
   (System/exit 0))
 
