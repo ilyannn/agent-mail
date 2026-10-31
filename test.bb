@@ -871,7 +871,7 @@
 (deftest the-store-is-a-git-repo
   (with-store
     (out {:who "a"} "list")
-    (is (= {:me "a" :threads [] :duty [] :undelivered []} (dissoc (status-json {:who "a"}) :now)) "status of an empty store")
+    (is (= {:schema 1 :me "a" :threads [] :duty [] :undelivered []} (dissoc (status-json {:who "a"}) :now)) "status of an empty store")
     (is (not (fs/exists? (fs/path *store* ".git"))) "read-only commands do not create the store")
     (let [id (out {:who "a"} "send" "--to" "b" "--subject" "Git" "one")]
       (is (= 2 (commits)) "init plus the send")
