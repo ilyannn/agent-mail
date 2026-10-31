@@ -259,15 +259,31 @@
   (when (fs/exists? duty-dir)
     (->> (fs/glob duty-dir "*.edn") (map #(edn/read-string (slurp (str %)))) (sort-by :heartbeat))))
 (defn fresh? [rec] (< (core/age-s (:heartbeat rec)) stale-s))
-;; A fresh record in any state counts: "idle" or "working" with a recent
-;; heartbeat means the session's wait just exited (timeout or mail) and it is
-;; about to arm again, and the new wait sees this mail at once.
-(defn on-duty [who] (filter #(and (= who (:repo %)) (fresh? %)) (duty-records)))
-(defn write-duty! [who session state]
+(defn session-alive?
+  "Whether the agent session that armed this wait is still running: nil when
+   the record has no session pid (not started from Claude Code), else a boolean."
+  [rec]
+  (when-let [pid (:session-pid rec)]
+    (.isPresent (java.lang.ProcessHandle/of pid))))
+(defn on-duty?
+  "A fresh record in any state counts: \"idle\" or \"working\" with a recent
+   heartbeat means the wait just exited (timeout or mail) and the session is
+   about to arm again. A \"working\" record never heartbeats, so past 30 s it
+   counts as long as its session is still alive: it answers, then re-arms."
+  [rec]
+  (or (fresh? rec)
+      (and (= "working" (:state rec)) (true? (session-alive? rec)))))
+(defn on-duty [who] (filter #(and (= who (:repo %)) (on-duty? %)) (duty-records)))
+(defn write-duty!
+  "The duty record also carries the pid of the agent session that runs this
+   wait (Claude Code exports CLAUDE_PID), so others can tell a busy session
+   from a dead one."
+  [who session state]
   (fs/create-dirs duty-dir)
   (spit (str (fs/path duty-dir (str who "__" session ".edn")))
-        (pr-str {:repo who :session session :state state :heartbeat (core/now-utc)
-                 :pid (.pid (java.lang.ProcessHandle/current))})))
+        (pr-str (cond-> {:repo who :session session :state state :heartbeat (core/now-utc)
+                         :pid (.pid (java.lang.ProcessHandle/current))}
+                  (some-> (System/getenv "CLAUDE_PID") parse-long) (assoc :session-pid (parse-long (System/getenv "CLAUDE_PID")))))))
 
 ;; ---------------------------------------------------------------- delivery notes
 
@@ -304,7 +320,9 @@
                  "→ user: shown at every session start"))
       (if-let [d (seq (on-duty to))]
         (println (str "→ " to ": on duty (session "
-                      (str/join ", " (map #(str (:session %) (when (not= "waiting" (:state %)) ", between waits")) d))
+                      (str/join ", " (map #(str (:session %) (cond (= "waiting" (:state %)) ""
+                                                                     (fresh? %) ", between waits"
+                                                                     :else ", busy")) d))
                       "); nudge it with SendMessage carrying just the thread id"))
         (println (str "→ " to ": nobody on duty; it will see this at its next session start"))))))
 
@@ -479,12 +497,17 @@
               :else (do (Thread/sleep (* 1000 interval)) (recur)))))))
 
 (defn cmd-who [opts]
-  (let [recs (map #(assoc % :age-s (core/age-s (:heartbeat %)) :stale (not (fresh? %))) (duty-records))]
+  (let [recs (map #(assoc % :age-s (core/age-s (:heartbeat %)) :stale (not (fresh? %))
+                          :session-alive (session-alive? %) :on-duty (on-duty? %))
+                  (duty-records))]
     (if (:json opts)
       (println (json/generate-string recs {:pretty true}))
       (doseq [r recs]
         (println (format "%-20s %-28s %-8s %5ds ago%s" (:repo r) (:session r) (:state r) (:age-s r)
-                         (if (and (:stale r) (= "waiting" (:state r))) "  (stale)" "")))))))
+                         (cond (false? (:session-alive r)) "  (session gone)"
+                               (and (:stale r) (= "waiting" (:state r))) "  (stale)"
+                               (and (:stale r) (:on-duty r)) "  (session alive)"
+                               :else "")))))))
 
 (defn cmd-hook
   "SessionStart hook mode: one line listing the threads waiting on this repo;

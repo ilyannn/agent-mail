@@ -534,6 +534,23 @@
         (spit (str (fs/path *store* "duty" "infra__fresh.edn"))
               (pr-str {:repo "infra" :session "fresh" :state "idle" :heartbeat "2020-01-01T00:00:00.000Z" :pid 1}))
         (is (str/includes? (err {:who "a"} "@infra" "gone?") "infra: nobody on duty")))
+      (testing "a working record past the heartbeat window counts while its session lives"
+        (let [me (.pid (java.lang.ProcessHandle/current))]
+          (spit (str (fs/path *store* "duty" "infra__busy.edn"))
+                (pr-str {:repo "infra" :session "busy" :state "working" :heartbeat "2020-01-01T00:00:00.000Z" :pid 1 :session-pid me}))
+          (is (str/includes? (err {:who "a"} "@infra" "busy?") "infra: on duty (session busy, busy)"))
+          (is (str/includes? (out {} "who") "busy                         working") )
+          (is (str/includes? (out {} "who") "(session alive)"))
+          (spit (str (fs/path *store* "duty" "infra__busy.edn"))
+                (pr-str {:repo "infra" :session "busy" :state "working" :heartbeat "2020-01-01T00:00:00.000Z" :pid 1 :session-pid 4000000}))
+          (is (str/includes? (out {} "who") "(session gone)"))
+          (is (str/includes? (err {:who "a"} "@infra" "dead?") "infra: nobody on duty"))
+          (fs/delete (fs/path *store* "duty" "infra__busy.edn"))))
+      (testing "wait records the agent session's pid from CLAUDE_PID"
+        (am {:who "d" :env {"CLAUDE_PID" "4000001"}} "wait" "--session" "d-1" "--timeout" "0")
+        (let [r (first (filter #(= "d-1" (:session %)) (json/parse-string (out {} "who" "--json") true)))]
+          (is (= 4000001 (:session-pid r)))
+          (is (false? (:session-alive r)))))
       (is (str/includes? (err {:who "a"} "@user" "for you") "→ user: shown at every session start") "no notification in tests"))))
 
 (deftest caller-identity
