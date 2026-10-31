@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: just check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    env:
+      # Trust the repo's mise.toml and keep anything that could reach the
+      # desktop (notifications, viewers) out of the tests.
+      MISE_TRUSTED_CONFIG_PATHS: ${{ github.workspace }}
+      AGENT_MAIL_NO_NOTIFY: "1"
+    steps:
+      - uses: actions/checkout@v7
+      # Installs the exact babashka, clj-kondo and just pinned in mise.toml
+      # and puts them on PATH for the following steps.
+      - uses: jdx/mise-action@v5
+      - run: mise ls --current
+      - run: just check
