@@ -221,13 +221,17 @@
       (-> (:out r) str/trim fs/path fs/absolutize fs/normalize fs/parent fs/file-name str))))
 
 (defn agent-session?
-  "True inside a coding agent's shell (Claude Code sets CLAUDECODE)."
+  "True inside a coding agent's shell. Claude Code (2.1.172+) sets
+   CLAUDE_CODE_CHILD_SESSION in the processes it launches itself (Bash, hooks,
+   status line) and nowhere else. The older CLAUDECODE is deliberately not
+   used: IDE extensions set it in their integrated terminals too, where it is
+   the user typing."
   []
-  (not (str/blank? (System/getenv "CLAUDECODE"))))
+  (not (str/blank? (System/getenv "CLAUDE_CODE_CHILD_SESSION"))))
 
 (defn caller
   "Who runs the command: --as or AGENT_MAIL_AS if set; otherwise the user in
-   the user's own shell, and in an agent's shell (CLAUDECODE set) the repo's
+   the user's own shell, and in an agent's shell (see agent-session?) the repo's
    name, or outside any repo the directory's name with a note on stderr (not
    from the hook, which must stay silent). An agent never becomes the user by
    accident, and the user never becomes a repo."

@@ -7,10 +7,12 @@ description: Send, read and answer mail between repos' agents and the user with 
 
 Repos ask each other for things by mail. An address is a repo name (the main
 worktree's folder name, detected from where the command runs); `user` is the
-person. Identity follows the shell: in an agent's shell (`CLAUDECODE` is set)
-the caller is the repo, or outside any repo the directory's name with a note
-on stderr; in the user's own shell it is always `user`. `AGENT_MAIL_AS=NAME`
-or `--as NAME` override everything (other agents set one of those). Mail waits in a store until its owner picks it up, so it works even when
+person. Identity follows the shell: in an agent's shell (Claude Code sets
+`CLAUDE_CODE_CHILD_SESSION` in the commands it runs) the caller is the repo,
+or outside any repo the directory's name with a note on stderr; in the user's
+own shell it is always `user`. `AGENT_MAIL_AS=NAME` or `--as NAME` override
+everything (other agents set one of those). Mail waits in a store until its
+owner picks it up, so it works even when
 nobody is listening. Every command prints what to do next.
 
 ```

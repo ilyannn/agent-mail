@@ -18,9 +18,12 @@
 (def launcher (str (fs/path repo "bin" "agent-mail")))
 (def ^:dynamic *store* nil)
 
-;; Tests run as an agent's shell (CLAUDECODE set) unless a test says otherwise.
+;; Tests run as an agent's shell unless a test says otherwise; both variables
+;; are set explicitly so the result is the same under any launcher.
+(def agent-shell {"CLAUDE_CODE_CHILD_SESSION" "1" "CLAUDECODE" "1"})
+(def user-shell {"CLAUDE_CODE_CHILD_SESSION" "" "CLAUDECODE" ""})
 (defn env-for [{:keys [who env]}]
-  (cond-> (merge {"AGENT_MAIL_DIR" (str *store*) "AGENT_MAIL_NO_NOTIFY" "1" "CLAUDECODE" "1"} env)
+  (cond-> (merge {"AGENT_MAIL_DIR" (str *store*) "AGENT_MAIL_NO_NOTIFY" "1"} agent-shell env)
     who (assoc "AGENT_MAIL_AS" who)))
 
 (defn start
@@ -542,14 +545,18 @@
         (git-in repo "worktree" "add" "-q" wt "-b" "wt")
         (is (= "repo-x" (out {:dir repo} "whoami")))
         (is (= "repo-x" (out {:dir wt} "whoami")) "a worktree counts as its repo")
-        (is (= "user" (out {:dir d :env {"CLAUDECODE" ""}} "whoami")) "the user's own shell is the user")
-        (is (= "user" (out {:dir repo :env {"CLAUDECODE" ""}} "whoami")) "also inside a repo")
+        (is (= "user" (out {:dir d :env user-shell} "whoami")) "the user's own shell is the user")
+        (is (= "user" (out {:dir repo :env user-shell} "whoami")) "also inside a repo")
+        (is (= "user" (out {:dir repo :env (assoc user-shell "CLAUDECODE" "1")} "whoami"))
+            "an IDE's integrated terminal sets CLAUDECODE but not CLAUDE_CODE_CHILD_SESSION: still the user")
+        (is (= "repo-x" (out {:dir repo :env (assoc user-shell "CLAUDE_CODE_CHILD_SESSION" "1")} "whoami"))
+            "the child-session variable alone is enough")
         (testing "an agent's shell outside any repo is the directory, never the user"
-          (let [r (am {:dir d :env {"CLAUDECODE" "1"}} "whoami")]
+          (let [r (am {:dir d :env agent-shell} "whoami")]
             (is (= (str (fs/file-name d)) (str/trim (:out r))))
             (is (str/includes? (:err r) "not in a git repo; acting as")))
-          (is (str/blank? (:err (am {:dir d :env {"CLAUDECODE" "1"}} "hook"))) "the hook stays silent about it")
-          (is (= "user" (out {:dir d :who "user" :env {"CLAUDECODE" "1"}} "whoami")) "AGENT_MAIL_AS=user is explicit"))
+          (is (str/blank? (:err (am {:dir d :env agent-shell} "hook"))) "the hook stays silent about it")
+          (is (= "user" (out {:dir d :who "user" :env agent-shell} "whoami")) "AGENT_MAIL_AS=user is explicit"))
         (is (= "other" (out {:dir repo} "whoami" "--as" "other")))
         (is (= "env-name" (out {:who "env-name" :dir repo} "whoami")) "AGENT_MAIL_AS overrides the repo")
         (is (= 1 (:exit (am {:dir repo} "whoami" "--as" "a/b"))) "names must fit a file name")))))
