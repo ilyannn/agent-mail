@@ -18,8 +18,9 @@
 (def launcher (str (fs/path repo "bin" "agent-mail")))
 (def ^:dynamic *store* nil)
 
+;; Tests run as an agent's shell (CLAUDECODE set) unless a test says otherwise.
 (defn env-for [{:keys [who env]}]
-  (cond-> (merge {"AGENT_MAIL_DIR" (str *store*) "AGENT_MAIL_NO_NOTIFY" "1"} env)
+  (cond-> (merge {"AGENT_MAIL_DIR" (str *store*) "AGENT_MAIL_NO_NOTIFY" "1" "CLAUDECODE" "1"} env)
     who (assoc "AGENT_MAIL_AS" who)))
 
 (defn start
@@ -541,7 +542,8 @@
         (git-in repo "worktree" "add" "-q" wt "-b" "wt")
         (is (= "repo-x" (out {:dir repo} "whoami")))
         (is (= "repo-x" (out {:dir wt} "whoami")) "a worktree counts as its repo")
-        (is (= "user" (out {:dir d :env {"CLAUDECODE" ""}} "whoami")) "outside any repo the user's own shell is the user")
+        (is (= "user" (out {:dir d :env {"CLAUDECODE" ""}} "whoami")) "the user's own shell is the user")
+        (is (= "user" (out {:dir repo :env {"CLAUDECODE" ""}} "whoami")) "also inside a repo")
         (testing "an agent's shell outside any repo is the directory, never the user"
           (let [r (am {:dir d :env {"CLAUDECODE" "1"}} "whoami")]
             (is (= (str (fs/file-name d)) (str/trim (:out r))))

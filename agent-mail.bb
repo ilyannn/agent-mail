@@ -226,23 +226,23 @@
   (not (str/blank? (System/getenv "CLAUDECODE"))))
 
 (defn caller
-  "Who runs the command: --as, AGENT_MAIL_AS, the repo's name, and outside any
-   repo the user, unless this is an agent's shell: an agent never gets the
-   user's identity by accident, so there it is the directory's name, with a
-   note on stderr (not from the hook, which must stay silent)."
+  "Who runs the command: --as or AGENT_MAIL_AS if set; otherwise the user in
+   the user's own shell, and in an agent's shell (CLAUDECODE set) the repo's
+   name, or outside any repo the directory's name with a note on stderr (not
+   from the hook, which must stay silent). An agent never becomes the user by
+   accident, and the user never becomes a repo."
   [opts]
   (let [explicit (or (:as opts) (System/getenv "AGENT_MAIL_AS"))
-        repo (when-not explicit (repo-name))
-        fallback (when-not (or explicit repo)
-                   (if (agent-session?)
+        me (or explicit
+               (if-not (agent-session?)
+                 "user"
+                 (or (repo-name)
                      (let [dir (str (fs/file-name (fs/normalize (fs/absolutize "."))))]
                        (when-not (:quiet opts)
                          (binding [*out* *err*]
                            (println (str "agent-mail: not in a git repo; acting as " (pr-str dir)
                                          " (AGENT_MAIL_AS=NAME or --as NAME to choose)"))))
-                       dir)
-                     "user"))
-        me (or explicit repo fallback)]
+                       dir))))]
     (when-not (core/valid-name? me) (fail "bad name for the caller:" (pr-str me)))
     me))
 
