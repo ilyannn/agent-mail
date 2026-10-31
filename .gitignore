@@ -1,0 +1,4 @@
+.clj-kondo/.cache/
+# Private handoff threads; they live in the store once imported
+HANDOFF*.md
+.DS_Store

@@ -1,0 +1,13 @@
+#!/bin/sh
+# Launcher: runs agent-mail.bb with this repo's pinned babashka (via mise when
+# present, else `bb` on PATH), from the caller's directory so the caller's repo
+# is detected. ~/.local/bin/agent-mail is an absolute symlink to this file.
+src="$0"
+while [ -L "$src" ]; do src="$(readlink "$src")"; done
+repo="$(cd "$(dirname "$src")/.." && pwd)"
+if command -v mise >/dev/null 2>&1; then
+  bb="$(mise -C "$repo" which bb 2>/dev/null)"
+fi
+[ -n "$bb" ] || bb="$(command -v bb)"
+[ -n "$bb" ] || { echo "agent-mail: babashka not found (install mise or bb)" >&2; exit 127; }
+exec "$bb" "$repo/agent-mail.bb" "$@"
