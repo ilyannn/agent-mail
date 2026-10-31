@@ -274,7 +274,7 @@
         (let [r (out {} "read" "vault")]
           (is (str/includes? r "# Vault"))
           (is (< (str/index-of r "Please add a vault.") (str/index-of r "Done on my side.")))
-          (is (str/includes? r "owner: website"))))
+          (is (str/includes? r "waiting on: website"))))
       (testing "close marks it done and it leaves every list"
         (is (= id (out {:who "website"} "close" id)))
         (is (empty? (ids "infra")))
@@ -458,7 +458,7 @@
       (testing "list --json is one summary per thread, no messages"
         (let [[t :as ts] (list-json "--all")]
           (is (= 1 (count ts)))
-          (is (= #{:id :number :subject :from :created :owner :status :count :updated :unread} (set (keys t))))
+          (is (= #{:id :number :subject :from :last-from :created :owner :status :count :updated :unread} (set (keys t))))
           (is (= {:id id :number 1 :subject "Shape" :from "a" :owner "a" :status "open" :count 2} (select-keys t [:id :number :subject :from :owner :status :count])))
           (is (= 2 (:unread t)) "the caller here is a bystander, so both messages are new to it")))
       (testing "read --json is the thread with its messages"
@@ -523,6 +523,13 @@
       (let [e (err {:who "a"} "@infra" "anyone now?")]
         (is (str/includes? e "infra: on duty (session fresh)"))
         (is (str/includes? e "SendMessage")))
+      (testing "a listener between waits (timed out, re-arming) still counts as on duty"
+        (spit (str (fs/path *store* "duty" "infra__fresh.edn"))
+              (pr-str {:repo "infra" :session "fresh" :state "idle" :heartbeat (core/now-utc) :pid 1}))
+        (is (str/includes? (err {:who "a"} "@infra" "between waits?") "infra: on duty (session fresh, between waits)"))
+        (spit (str (fs/path *store* "duty" "infra__fresh.edn"))
+              (pr-str {:repo "infra" :session "fresh" :state "idle" :heartbeat "2020-01-01T00:00:00.000Z" :pid 1}))
+        (is (str/includes? (err {:who "a"} "@infra" "gone?") "infra: nobody on duty")))
       (is (str/includes? (err {:who "a"} "@user" "for you") "→ user: shown at every session start") "no notification in tests"))))
 
 (deftest caller-identity

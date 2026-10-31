@@ -106,7 +106,7 @@
   (let [msgs (vec msgs) last-m (peek msgs)]
     (assoc meta :id id :msgs msgs :count (count msgs)
            :number (some-> (:number meta) str parse-long)
-           :owner (:to last-m) :updated (:date last-m)
+           :owner (:to last-m) :last-from (:from last-m) :updated (:date last-m)
            :status (or (some :status (rseq msgs)) "open"))))
 
 (defn unread
@@ -142,7 +142,7 @@
   ([th files msgs]
    (let [abs #(str/replace % "](files/" (str "](" files "/"))]
      (str "# " (:subject th) "\n"
-          "thread: #" (:number th) " " (:id th) " · from: " (:from th) " · owner: " (:owner th)
+          "thread: #" (:number th) " " (:id th) " · started by: " (:from th) " · waiting on: " (:owner th)
           " · status: " (:status th) " · created: " (local-time (:created th)) "\n"
           (when (< (count msgs) (:count th))
             (str "showing " (count msgs) " of " (:count th) " messages; `agent-mail read " (:number th) "` for all\n"))

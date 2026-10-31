@@ -138,7 +138,7 @@
   [me]
   (let [cands (let [mine (open-for me)]
                 (if (seq mine) mine (filter #(= "open" (:status %)) (all-threads))))
-        line (fn [t] (format "#%d  %s  (%s, %d msgs%s)" (:number t) (:subject t) (:from t) (:count t)
+        line (fn [t] (format "#%d  %s  (from %s, %d msgs%s)" (:number t) (:subject t) (:last-from t) (:count t)
                              (let [u (count (unread t me))] (if (pos? u) (str ", " u " new") ""))))
         chosen (fn [out] (some-> out str/trim not-empty (str/split #"\s+") first (subs 1) parse-long))]
     (cond
@@ -234,7 +234,10 @@
   (when (fs/exists? duty-dir)
     (->> (fs/glob duty-dir "*.edn") (map #(edn/read-string (slurp (str %)))) (sort-by :heartbeat))))
 (defn fresh? [rec] (< (core/age-s (:heartbeat rec)) stale-s))
-(defn on-duty [who] (filter #(and (= who (:repo %)) (fresh? %) (= "waiting" (:state %))) (duty-records)))
+;; A fresh record in any state counts: "idle" or "working" with a recent
+;; heartbeat means the session's wait just exited (timeout or mail) and it is
+;; about to arm again, and the new wait sees this mail at once.
+(defn on-duty [who] (filter #(and (= who (:repo %)) (fresh? %)) (duty-records)))
 (defn write-duty! [who session state]
   (fs/create-dirs duty-dir)
   (spit (str (fs/path duty-dir (str who "__" session ".edn")))
@@ -275,7 +278,8 @@
                  :banner "→ user: notified; shown at every session start too"
                  "→ user: shown at every session start"))
       (if-let [d (seq (on-duty to))]
-        (println (str "→ " to ": on duty (session " (str/join ", " (map :session d))
+        (println (str "→ " to ": on duty (session "
+                      (str/join ", " (map #(str (:session %) (when (not= "waiting" (:state %)) ", between waits")) d))
                       "); nudge it with SendMessage carrying just the thread id"))
         (println (str "→ " to ": nobody on duty; it will see this at its next session start"))))))
 
@@ -431,7 +435,7 @@
       (println (json/generate-string (map summary ths) {:pretty true}))
       (doseq [t ths]
         (println (format "#%-3d %-34s %-14s %-5s %2d msgs %s  %s  %s"
-                         (:number t) (:id t) (str (:from t) "→" (:owner t)) (:status t) (:count t)
+                         (:number t) (:id t) (str (:last-from t) "→" (:owner t)) (:status t) (:count t)
                          (if (pos? (:unread t)) (format "%d new" (:unread t)) "     ")
                          (core/local-time (:updated t)) (:subject t)))))))
 
@@ -468,7 +472,7 @@
           line (fn [who ths]
                  (println (format "agent-mail: %d thread%s waiting on %s: %s. Read with `agent-mail read <number>`."
                                   (count ths) (if (= 1 (count ths)) "" "s") who
-                                  (str/join "; " (map #(format "#%d %s \"%s\" from %s" (:number %) (:id %) (:subject %) (:from %)) ths)))))]
+                                  (str/join "; " (map #(format "#%d %s \"%s\" from %s" (:number %) (:id %) (:subject %) (:last-from %)) ths)))))]
       (when-let [m (seq (open-for me))] (line me m)))
     (catch Throwable _ nil))
   (System/exit 0))
