@@ -248,7 +248,7 @@
             st (core/status {:now now :me "user" :threads [closed-th to-user open-th]
                              :seen {"b" {"t1" "002.md"} "user" {"t3" "000.md"}} :duty duty})
             [t1 t2 t3] (:threads st)]
-        (is (= #{:now :me :threads :duty :undelivered} (set (keys st))))
+        (is (= #{:schema :now :me :threads :duty :undelivered} (set (keys st))))
         (is (= [now "user" duty] [(:now st) (:me st) (:duty st)]))
         (is (= ["t1" "t2" "t3"] (map :id (:threads st))) "every thread, closed too, newest-updated first")
         (is (not-any? :msgs (:threads st)) "summaries, no messages")
@@ -650,7 +650,7 @@
           who-json (json/parse-string (out {} "who" "--json") true)
           th (into {} (map (juxt :id identity)) (:threads st))]
       (testing "one object: the time, the caller, every thread, the duty records, the undelivered ids"
-        (is (= #{:now :me :threads :duty :undelivered} (set (keys st))))
+        (is (= #{:schema :now :me :threads :duty :undelivered} (set (keys st))))
         (is (= "user" (:me st)))
         (is (re-matches #"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z" (:now st))))
       (testing "every thread, closed ones too, newest-updated first"

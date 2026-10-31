@@ -207,6 +207,10 @@
        (sort-by (juxt #(- (or (:waiting-s %) 0)) :number))
        (mapv :id)))
 
+;; Bump when a field of `status` changes meaning or goes away; adding fields
+;; is compatible. UIs refuse a schema they don't know.
+(def status-schema 1)
+
 (defn status
   "Everything at once, for a UI that must not re-derive anything: every thread
    (closed ones too), newest-updated first, as a summary with the caller's
@@ -226,7 +230,7 @@
                                :listener (listener th on-duty-repos))))
                  (sort-by :updated #(compare %2 %1))
                  vec)]
-    {:now now :me me :threads ths :duty (vec duty) :undelivered (undelivered ths)}))
+    {:schema status-schema :now now :me me :threads ths :duty (vec duty) :undelivered (undelivered ths)}))
 
 ;; ---------------------------------------------------------------- drafts
 
