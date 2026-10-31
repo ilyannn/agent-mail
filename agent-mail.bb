@@ -220,8 +220,29 @@
     (when (zero? (:exit r))
       (-> (:out r) str/trim fs/path fs/absolutize fs/normalize fs/parent fs/file-name str))))
 
-(defn caller [opts]
-  (let [me (or (:as opts) (System/getenv "AGENT_MAIL_AS") (repo-name) "user")]
+(defn agent-session?
+  "True inside a coding agent's shell (Claude Code sets CLAUDECODE)."
+  []
+  (not (str/blank? (System/getenv "CLAUDECODE"))))
+
+(defn caller
+  "Who runs the command: --as, AGENT_MAIL_AS, the repo's name, and outside any
+   repo the user, unless this is an agent's shell: an agent never gets the
+   user's identity by accident, so there it is the directory's name, with a
+   note on stderr (not from the hook, which must stay silent)."
+  [opts]
+  (let [explicit (or (:as opts) (System/getenv "AGENT_MAIL_AS"))
+        repo (when-not explicit (repo-name))
+        fallback (when-not (or explicit repo)
+                   (if (agent-session?)
+                     (let [dir (str (fs/file-name (fs/normalize (fs/absolutize "."))))]
+                       (when-not (:quiet opts)
+                         (binding [*out* *err*]
+                           (println (str "agent-mail: not in a git repo; acting as " (pr-str dir)
+                                         " (AGENT_MAIL_AS=NAME or --as NAME to choose)"))))
+                       dir)
+                     "user"))
+        me (or explicit repo fallback)]
     (when-not (core/valid-name? me) (fail "bad name for the caller:" (pr-str me)))
     me))
 
@@ -468,7 +489,7 @@
   [opts]
   (try
     (ensure-numbers!)
-    (let [me (caller opts)
+    (let [me (caller (assoc opts :quiet true))
           line (fn [who ths]
                  (println (format "agent-mail: %d thread%s waiting on %s: %s. Read with `agent-mail read <number>`."
                                   (count ths) (if (= 1 (count ths)) "" "s") who

@@ -541,7 +541,13 @@
         (git-in repo "worktree" "add" "-q" wt "-b" "wt")
         (is (= "repo-x" (out {:dir repo} "whoami")))
         (is (= "repo-x" (out {:dir wt} "whoami")) "a worktree counts as its repo")
-        (is (= "user" (out {:dir d} "whoami")) "outside any repo the caller is the user")
+        (is (= "user" (out {:dir d :env {"CLAUDECODE" ""}} "whoami")) "outside any repo the user's own shell is the user")
+        (testing "an agent's shell outside any repo is the directory, never the user"
+          (let [r (am {:dir d :env {"CLAUDECODE" "1"}} "whoami")]
+            (is (= (str (fs/file-name d)) (str/trim (:out r))))
+            (is (str/includes? (:err r) "not in a git repo; acting as")))
+          (is (str/blank? (:err (am {:dir d :env {"CLAUDECODE" "1"}} "hook"))) "the hook stays silent about it")
+          (is (= "user" (out {:dir d :who "user" :env {"CLAUDECODE" "1"}} "whoami")) "AGENT_MAIL_AS=user is explicit"))
         (is (= "other" (out {:dir repo} "whoami" "--as" "other")))
         (is (= "env-name" (out {:who "env-name" :dir repo} "whoami")) "AGENT_MAIL_AS overrides the repo")
         (is (= 1 (:exit (am {:dir repo} "whoami" "--as" "a/b"))) "names must fit a file name")))))
