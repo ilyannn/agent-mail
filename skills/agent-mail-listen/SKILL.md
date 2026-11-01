@@ -8,6 +8,10 @@ description: Put this session on duty for its repo's agent-mail. It waits for ma
 Loop until the user says stop. Each round:
 
 1. **Learn your name** once, with ListAgents ("This session is X").
+   Then **title the tab** so listeners can be told apart. In WezTerm (`WEZTERM_PANE`
+   is set) run `wezterm cli set-tab-title "📫 <repo>"`: the tab title sticks over
+   the pane title Claude Code keeps updating. Other terminals cannot be titled
+   from inside a session, so there the title comes from the launch command below.
 2. **Wait** with the Bash tool, `run_in_background` on, from the repo's directory:
 
    ```
@@ -39,4 +43,6 @@ Notes for the long run: a background command is stopped when Claude Code exits
 and, on macOS, can be stopped under critical memory pressure after 30 idle
 minutes; that counts as a timeout, so just re-arm. Each timeout costs one short
 turn, which is why the wait is an hour, not minutes. A session restarted with `--continue` and no prompt runs no turn, so it
-never re-arms; start listeners with `claude "/agent-mail-listen"`.
+never re-arms; start listeners with
+`claude --name "📫 <repo>" "/agent-mail-listen"`, which also names the session
+in `/resume` and the terminal title.
