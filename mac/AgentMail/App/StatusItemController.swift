@@ -1,5 +1,6 @@
-// The menu bar extra: a tray symbol with the unread count, opening a menu
-// (not a popover) that is rebuilt each time it opens.
+// The menu bar extra: the app's envelope glyph (a template image from
+// Icon/menubar.svg) with the unread count, opening a menu (not a popover)
+// that is rebuilt each time it opens.
 import AgentMailKit
 import AppKit
 import Observation
@@ -33,8 +34,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let unread = store.index.unreadInInbox
         let waiting = store.index.inbox.count
         let failing = store.refreshError != nil
-        let symbol = failing ? "exclamationmark.triangle" : (waiting > 0 ? "tray.full" : "tray")
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        let image = failing
+            ? NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil)
+            : NSImage(named: "MenuBarIcon")
         image?.isTemplate = true
         button.image = image
         button.title = unread > 0 ? "\(unread)" : ""

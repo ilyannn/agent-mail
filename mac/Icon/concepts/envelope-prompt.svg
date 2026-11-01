@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Concept 2: an envelope opening at the side, so its flap line is a
+       prompt chevron, followed by a block cursor. -->
+  <defs>
+    <linearGradient id="background-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0" stop-color="#5C85FF"/>
+      <stop offset="1" stop-color="#3D38CC"/>
+    </linearGradient>
+  </defs>
+  <rect id="background" width="1024" height="1024" fill="url(#background-gradient)"/>
+
+  <g id="envelope" fill="#FFFFFF" data-translucency="0.2">
+    <!-- The flap, on the left; its edges run at 3:4 and meet in a chevron. -->
+    <path d="M224 272 L512 488 Q544 512 512 536 L224 752 A72 72 0 0 1 152 680 V344 A72 72 0 0 1 224 272 Z"/>
+    <!-- The body, 64 to the right of the flap. -->
+    <path d="M316 272 H800 A72 72 0 0 1 872 344 V680 A72 72 0 0 1 800 752 H316 Q288 752 310.4 735.2 L576 536 Q608 512 576 488 L310.4 288.8 Q288 272 316 272 Z"/>
+  </g>
+
+  <g id="cursor" fill="#FFB020" data-translucency="0">
+    <rect x="672" y="400" width="120" height="224" rx="24"/>
+  </g>
+</svg>

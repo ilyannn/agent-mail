@@ -45,6 +45,9 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: Agent Mail
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
         INFOPLIST_KEY_NSHumanReadableCopyright: "MIT License"
+        # The Icon Composer document AgentMail/AppIcon.icon, written by
+        # `just icon` from Icon/concepts/ (see Icon/README.md).
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # Swift 6 with the app's code on the main actor unless it says otherwise.
         SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
         SWIFT_STRICT_CONCURRENCY: complete

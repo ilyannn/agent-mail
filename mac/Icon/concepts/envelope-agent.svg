@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Concept 1: an envelope sealed by a small agent, a robot head with an
+       antenna sitting on the tip of the flap. -->
+  <defs>
+    <linearGradient id="background-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0" stop-color="#5C85FF"/>
+      <stop offset="1" stop-color="#3D38CC"/>
+    </linearGradient>
+  </defs>
+  <rect id="background" width="1024" height="1024" fill="url(#background-gradient)"/>
+
+  <g id="envelope" fill="#FFFFFF" data-translucency="0.2">
+    <!-- The flap; its edges run at 3:4. -->
+    <path d="M152 344 A72 72 0 0 1 224 272 H800 A72 72 0 0 1 872 344 L544 590 Q512 614 480 590 Z"/>
+    <!-- The body, 32 below the flap: the gap between them is the flap line. -->
+    <path d="M171.2 398.4 L480 630 Q512 654 544 630 L852.8 398.4 Q872 384 872 408 V680 A72 72 0 0 1 800 752 H224 A72 72 0 0 1 152 680 V408 Q152 384 171.2 398.4 Z"/>
+  </g>
+
+  <g id="agent" fill="#FFB020" data-translucency="0">
+    <circle cx="512" cy="436" r="34"/>
+    <rect x="500" y="446" width="24" height="76" rx="12"/>
+    <rect x="396" y="510" width="232" height="184" rx="64"/>
+  </g>
+
+  <g id="eyes" fill="#241F6B" data-translucency="0" data-glass="false">
+    <circle cx="462" cy="602" r="28"/>
+    <circle cx="562" cy="602" r="28"/>
+  </g>
+</svg>

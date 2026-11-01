@@ -28,6 +28,10 @@ test: gen
 run *args: build
     "{{debug_app}}/Contents/MacOS/Agent Mail" {{args}}
 
+# Regenerate AgentMail/AppIcon.icon and the menu bar glyph from Icon/*.svg (--concept NAME, --previews DIR)
+icon *args:
+    bb scripts/icon.bb {{args}}
+
 # Create the self-signed code-signing identity "Agent Mail Local" in the login keychain (once)
 signing-cert *args:
     bb scripts/signing_cert.bb {{args}}

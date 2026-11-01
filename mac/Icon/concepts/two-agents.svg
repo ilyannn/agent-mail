@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Concept 3: two agents, the robot heads of concept 1, with letters
+       passing between them. -->
+  <defs>
+    <linearGradient id="background-gradient" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0" stop-color="#5C85FF"/>
+      <stop offset="1" stop-color="#3D38CC"/>
+    </linearGradient>
+  </defs>
+  <rect id="background" width="1024" height="1024" fill="url(#background-gradient)"/>
+
+  <!-- The letter on its way up, behind; each envelope is a flap over a body
+       with a gap between them, as in concept 1. -->
+  <g id="letter-back" fill="#FFFFFF" opacity="0.6" data-translucency="0">
+    <path d="M440 432 A32 32 0 0 1 472 400 H696 A32 32 0 0 1 728 432 L608 522 Q584 540 560 522 Z"/>
+    <path d="M454.4 472.8 L560 552 Q584 570 608 552 L713.6 472.8 Q728 462 728 480 V584 A32 32 0 0 1 696 616 H472 A32 32 0 0 1 440 584 V480 Q440 462 454.4 472.8 Z"/>
+  </g>
+
+  <g id="letter-front" fill="#FFFFFF" data-translucency="0.2">
+    <path d="M296 528 A32 32 0 0 1 328 496 H552 A32 32 0 0 1 584 528 L464 618 Q440 636 416 618 Z"/>
+    <path d="M310.4 568.8 L416 648 Q440 666 464 648 L569.6 568.8 Q584 558 584 576 V680 A32 32 0 0 1 552 712 H328 A32 32 0 0 1 296 680 V576 Q296 558 310.4 568.8 Z"/>
+  </g>
+
+  <!-- The agents, bottom left and top right. -->
+  <g id="agents" fill="#FFB020" data-translucency="0">
+    <circle cx="188" cy="548" r="22"/>
+    <rect x="178" y="556" width="20" height="56" rx="10"/>
+    <rect x="120" y="608" width="136" height="112" rx="40"/>
+    <circle cx="836" cy="332" r="22"/>
+    <rect x="826" y="340" width="20" height="56" rx="10"/>
+    <rect x="768" y="392" width="136" height="112" rx="40"/>
+  </g>
+
+  <g id="eyes" fill="#241F6B" data-translucency="0" data-glass="false">
+    <circle cx="162" cy="666" r="14"/>
+    <circle cx="214" cy="666" r="14"/>
+    <circle cx="810" cy="450" r="14"/>
+    <circle cx="862" cy="450" r="14"/>
+  </g>
+</svg>
