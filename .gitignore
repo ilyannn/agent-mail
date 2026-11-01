@@ -9,3 +9,6 @@ build/
 .swiftpm/
 DerivedData/
 xcuserdata/
+# Editor caches
+.lsp/
+.clj-kondo/.cache/
