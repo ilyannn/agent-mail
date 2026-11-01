@@ -2,3 +2,6 @@
 babashka = "1.13.226"
 clj-kondo = "2026.10.20"
 just = "1.59.0"
+# The Mac app (mac/); macOS only, so the Linux CI job skips them.
+xcodegen = { version = "2.46.0", os = ["macos"] }
+xcbeautify = { version = "3.2.1", os = ["macos"] }

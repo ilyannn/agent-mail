@@ -2,3 +2,10 @@
 # Private handoff threads; they live in the store once imported
 HANDOFF*.md
 .DS_Store
+# Mac app: the Xcode project is generated from mac/project.yml (`just mac gen`)
+*.xcodeproj/
+build/
+.build/
+.swiftpm/
+DerivedData/
+xcuserdata/
