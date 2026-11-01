@@ -10,7 +10,11 @@
             [babashka.process :as p]
             [cheshire.core :as json]
             [clojure.edn :as edn]
-            [clojure.string :as str]))
+            [clojure.string :as str])
+  (:import (java.net StandardProtocolFamily UnixDomainSocketAddress)
+           (java.nio ByteBuffer)
+           (java.nio.channels SocketChannel)
+           (java.nio.charset StandardCharsets)))
 
 (def repo-dir (fs/parent (fs/absolutize *file*)))
 (cp/add-classpath (str (fs/path repo-dir "src")))
@@ -266,10 +270,12 @@
   (when-let [pid (:session-pid rec)]
     (.isPresent (java.lang.ProcessHandle/of pid))))
 (defn on-duty?
-  "A fresh record in any state counts: \"idle\" or \"working\" with a recent
-   heartbeat means the wait just exited (timeout or mail) and the session is
-   about to arm again. A \"working\" record never heartbeats, so past 30 s it
-   counts as long as its session is still alive: it answers, then re-arms."
+  "A fresh record in any state counts. A wait posting into its session
+   heartbeats while \"waiting\" and \"working\" alike; \"idle\" with a recent
+   heartbeat means a wait just timed out and the session is about to arm
+   again, as does \"working\" from a wait that exited on mail (classic mode).
+   That record never heartbeats again, so past 30 s it counts as long as its
+   session is still alive: it answers, then re-arms."
   [rec]
   (or (fresh? rec)
       (and (= "working" (:state rec)) (true? (session-alive? rec)))))
@@ -320,9 +326,10 @@
                  "→ user: shown at every session start"))
       (if-let [d (seq (on-duty to))]
         (println (str "→ " to ": on duty (session "
-                      (str/join ", " (map #(str (:session %) (cond (= "waiting" (:state %)) ""
-                                                                     (fresh? %) ", between waits"
-                                                                     :else ", busy")) d))
+                      (str/join ", " (map #(str (:session %) (case (:state %)
+                                                               "waiting" ""
+                                                               "idle" ", between waits"
+                                                               ", busy")) d))
                       "); nudge it with SendMessage carrying just the thread id"))
         (println (str "→ " to ": nobody on duty; it will see this at its next session start"))))))
 
@@ -488,21 +495,64 @@
   (when (and (not (str/blank? (System/getenv "WEZTERM_PANE"))) (fs/which "wezterm"))
     (p/shell {:continue true :out :string :err :string} "wezterm" "cli" "set-tab-title" title)))
 
-(defn cmd-wait [opts]
+(defn session-socket
+  "The inbox of the Claude Code session running this command: Claude Code
+   exports its unix socket as CLAUDE_CODE_MESSAGING_SOCKET to the commands it
+   runs. nil when unset or when nothing is at that path."
+  []
+  (let [s (System/getenv "CLAUDE_CODE_MESSAGING_SOCKET")]
+    (when (and (not (str/blank? s)) (fs/exists? s)) s)))
+
+(defn post-to-session!
+  "Posts `text` into the session behind unix socket `path` as a user message:
+   an idle session starts a turn with it, a busy one reads it between tool
+   calls. The connection opens with an auth line carrying
+   CLAUDE_CODE_MESSAGING_TOKEN when that is set (optional on macOS and Linux,
+   but it lets the session verify its own child). True once written; false on
+   any failure. Never prints anything, so the token cannot leak."
+  [path text]
+  (try
+    (with-open [ch (SocketChannel/open StandardProtocolFamily/UNIX)]
+      (.connect ch (UnixDomainSocketAddress/of ^String path))
+      (let [token (System/getenv "CLAUDE_CODE_MESSAGING_TOKEN")
+            lines (cond->> [{:type "user" :message {:role "user" :content text}}]
+                    (not (str/blank? token)) (cons {:type "auth" :token token}))
+            buf (ByteBuffer/wrap (.getBytes (str/join (map #(str (json/generate-string %) "\n") lines))
+                                            StandardCharsets/UTF_8))]
+        (while (.hasRemaining buf) (.write ch buf))
+        true))
+    (catch Exception _ false)))
+
+(defn cmd-wait
+  "Waits for threads that are `me`'s turn. Classic mode (no session socket, or
+   --once) prints their ids and exits 0. Socket mode keeps running and posts
+   each thread into the session instead, again only when a newer message
+   arrives; a failed post falls back to the classic exit, so the session is
+   never left unreachable. Either way exit 3 on --timeout, duty \"idle\"."
+  [opts]
   (ensure-store!)
   (let [me (caller opts)
         session (or (:session opts) (str "pid" (.pid (java.lang.ProcessHandle/current))))
         interval (or (:interval opts) 3)
-        deadline (when-let [t (:timeout opts)] (+ (System/currentTimeMillis) (* 1000 t)))]
+        deadline (when-let [t (:timeout opts)] (+ (System/currentTimeMillis) (* 1000 t)))
+        sock (when-not (:once opts) (session-socket))
+        print-ids! (fn [pending] (run! println (map :id pending)) (System/exit 0))]
     (tab-title! (str "📪 " me))
-    (loop []
-      (write-duty! me session "waiting")
-      (let [ids (map :id (open-for me))]
-        (cond (seq ids) (do (write-duty! me session "working") (tab-title! (str "📬 " me))
-                            (run! println ids) (System/exit 0))
-              (and deadline (>= (System/currentTimeMillis) deadline))
-              (do (write-duty! me session "idle") (System/exit 3))
-              :else (do (Thread/sleep (* 1000 interval)) (recur)))))))
+    (loop [announced {}, titled-mail? false]
+      (let [pending (open-for me)
+            mail? (boolean (seq pending))
+            {:keys [fresh] :as next-state} (core/announce announced pending)]
+        (write-duty! me session (if mail? "working" "waiting"))
+        (when (not= titled-mail? mail?) (tab-title! (str (if mail? "📬 " "📪 ") me)))
+        (cond
+          (and mail? (not sock)) (print-ids! pending)
+          (and (seq fresh) (not (post-to-session! sock (core/announcement me fresh))))
+          (do (binding [*out* *err*]
+                (println "agent-mail: could not post to this session's socket; printing the thread ids instead"))
+              (print-ids! pending)))
+        (if (and deadline (>= (System/currentTimeMillis) deadline))
+          (do (write-duty! me session "idle") (System/exit 3))
+          (do (Thread/sleep (* 1000 interval)) (recur (:announced next-state) mail?)))))))
 
 (defn duty-view
   "The duty records with what is derived for each: age, staleness, whether the
@@ -583,7 +633,12 @@
   agent-mail read ID [--json]                 the whole thread; ID is the number from `list`
                                               (7 or #7), the full id, or a unique fragment
   agent-mail open ID                          open what's new to you in your Markdown app
-  agent-mail wait [--session NAME] [--timeout S] [--interval S]
+  agent-mail wait [--session NAME] [--timeout S] [--interval S] [--once]
+                                              waits for threads whose turn is mine. In a Claude
+                                              Code session it keeps running and posts each one
+                                              into the session, again only on a newer message;
+                                              elsewhere, with --once, or if a post fails, it
+                                              prints their ids and exits. Exit 3 on timeout
   agent-mail who [--json]                     who is on duty
   agent-mail status [--json]                  everything at once, for UIs
   agent-mail hook                             SessionStart hook output
@@ -597,6 +652,8 @@ Who am I: the repo I run in (main worktree name), `user` outside any repo;
 --as NAME or AGENT_MAIL_AS overrides. Bodies are Markdown; attachments are
 copied into the thread and `read` prints their absolute paths. --date backfills
 a timestamp when importing old threads; otherwise the tool stamps time.
+wait finds its session through CLAUDE_CODE_MESSAGING_SOCKET (and _TOKEN),
+which Claude Code exports to the commands it runs.
 Store: $AGENT_MAIL_DIR, else ~/.local/share/agent-mail.")
 
 (defn -main [argv]

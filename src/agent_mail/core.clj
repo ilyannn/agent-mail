@@ -1,5 +1,6 @@
 ;; agent-mail.core: the pure half of agent-mail. Text, time, frontmatter,
-;; thread state, the status view, draft extraction and argv parsing; nothing
+;; thread state, the status view, wait announcements, draft extraction and
+;; argv parsing; nothing
 ;; here touches the store, the environment or a process. Loaded by
 ;; agent-mail.bb (and test.bb) from the repo's src/ directory; refusals are
 ;; thrown as ::usage ex-infos and turned into exit codes by the script.
@@ -232,6 +233,35 @@
                  vec)]
     {:schema status-schema :now now :me me :threads ths :duty (vec duty) :undelivered (undelivered ths)}))
 
+;; ---------------------------------------------------------------- wait announcements
+
+(defn- newest-file [th] (:file (peek (vec (:msgs th)))))
+
+(defn announce
+  "What a waiting session must be told now. `announced` maps a thread id to the
+   newest message file already announced; `pending` are the threads that are
+   the session's turn. Returns the threads that are new or have a newer message
+   since (:fresh), and what to remember next (:announced), only for the threads
+   still pending: a thread changes hands only with a new message, so nothing
+   forgotten can come back unannounced."
+  [announced pending]
+  {:fresh (filterv #(not= (get announced (:id %)) (newest-file %)) pending)
+   :announced (into {} (map (juxt :id newest-file)) pending)})
+
+(defn announcement
+  "The text `wait` posts into its own session for `threads`, which are now
+   `me`'s turn: one line per thread, then where it comes from. Each line names
+   the newest message's position, so a thread announced again never repeats
+   the earlier text (Claude Code drops identical repeats arriving close together)."
+  [me threads]
+  (str/join "\n"
+            (concat
+             (for [t threads :let [handle (or (:number t) (:id t))]]
+               (str "agent-mail: new mail for " me ": #" handle " \"" (:subject t) "\" from " (:last-from t)
+                    " (" (:id t) ", message " (count (:msgs t)) "). Read it with `agent-mail read " handle
+                    "` and answer before moving on."))
+             ["(Posted by this session's own `agent-mail wait`, which keeps running: no need to re-arm it.)"])))
+
 ;; ---------------------------------------------------------------- drafts
 
 (def reply-marker "<!-- agent-mail: the thread above is quoted with `>`; answer inline under any line, or write below this marker. Quoted text is kept only next to what you write. Sent when you close the editor; nothing is sent if you write nothing. -->")
@@ -283,7 +313,7 @@
 ;; ---------------------------------------------------------------- argv
 
 (def value-opts #{"to" "subject" "as" "session" "date" "id" "timeout" "interval"})
-(def flag-opts #{"json" "all" "edit"})
+(def flag-opts #{"json" "all" "edit" "once"})
 (def ^:private number-opts #{:timeout :interval})
 
 (defn- finish-opts [opts]

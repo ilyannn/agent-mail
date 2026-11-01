@@ -9,7 +9,11 @@
             [babashka.process :as p]
             [cheshire.core :as json]
             [clojure.string :as str]
-            [clojure.test :as t :refer [deftest is testing]]))
+            [clojure.test :as t :refer [deftest is testing]])
+  (:import (java.io BufferedReader InputStreamReader)
+           (java.net StandardProtocolFamily UnixDomainSocketAddress)
+           (java.nio.channels Channels ServerSocketChannel)
+           (java.nio.charset StandardCharsets)))
 
 (def repo (fs/parent (fs/absolutize *file*)))
 (cp/add-classpath (str (fs/path repo "src")))
@@ -22,8 +26,11 @@
 ;; are set explicitly so the result is the same under any launcher.
 (def agent-shell {"CLAUDE_CODE_CHILD_SESSION" "1" "CLAUDECODE" "1"})
 (def user-shell {"CLAUDE_CODE_CHILD_SESSION" "" "CLAUDECODE" ""})
+;; Run from Claude Code, the tests inherit its session socket: cleared, so a
+;; wait never posts into the real session; a test sets its own fake one.
+(def no-session {"CLAUDE_CODE_MESSAGING_SOCKET" "" "CLAUDE_CODE_MESSAGING_TOKEN" ""})
 (defn env-for [{:keys [who env]}]
-  (cond-> (merge {"AGENT_MAIL_DIR" (str *store*) "AGENT_MAIL_NO_NOTIFY" "1"} agent-shell env)
+  (cond-> (merge {"AGENT_MAIL_DIR" (str *store*) "AGENT_MAIL_NO_NOTIFY" "1"} no-session agent-shell env)
     who (assoc "AGENT_MAIL_AS" who)))
 
 (defn start
@@ -263,6 +270,34 @@
     (testing "duration: one rounded-down unit"
       (is (= ["0s" "59s" "1m" "59m" "1h" "23h" "1d" "40d"] (map core/duration [0 59 60 3599 3600 86399 86400 (* 40 86400)]))))))
 
+;; ================================================================ unit: wait announcements
+
+(deftest wait-announcements
+  (let [th (fn [id n & files] {:id id :number n :subject (str "About " id) :last-from "web"
+                               :msgs (mapv #(hash-map :file %) files)})
+        t1 (th "t1" 1 "001.md")
+        t1' (th "t1" 1 "001.md" "002.md")
+        t2 (th "t2" 2 "001.md")]
+    (testing "announce: every thread at first, then only a newer message"
+      (is (= {:fresh [t1 t2] :announced {"t1" "001.md" "t2" "001.md"}} (core/announce {} [t1 t2])))
+      (is (= {:fresh [] :announced {"t1" "001.md" "t2" "001.md"}}
+             (core/announce {"t1" "001.md" "t2" "001.md"} [t1 t2])) "nothing new: nothing to say")
+      (is (= [t1'] (:fresh (core/announce {"t1" "001.md" "t2" "001.md"} [t1' t2]))) "a reply in t1 is news")
+      (is (= {:fresh [] :announced {"t2" "001.md"}} (core/announce {"t1" "001.md" "t2" "001.md"} [t2]))
+          "a thread handed on is forgotten")
+      (is (= {:fresh [] :announced {}} (core/announce {"t1" "001.md"} []))))
+    (testing "announcement: one line per thread, then where it comes from"
+      (let [lines (str/split-lines (core/announcement "infra" [t1 t2]))]
+        (is (= 3 (count lines)))
+        (is (= "agent-mail: new mail for infra: #1 \"About t1\" from web (t1, message 1). Read it with `agent-mail read 1` and answer before moving on."
+               (first lines)))
+        (is (str/starts-with? (second lines) "agent-mail: new mail for infra: #2 \"About t2\""))
+        (is (str/includes? (last lines) "`agent-mail wait`, which keeps running")))
+      (is (str/includes? (core/announcement "infra" [t1']) "(t1, message 2)")
+          "announced again, the text differs: identical repeats may be dropped")
+      (is (str/includes? (core/announcement "infra" [(assoc t1 :number nil)]) "#t1 \"About t1\"")
+          "a thread without a number is named by its id"))))
+
 ;; ================================================================ unit: drafts
 
 (deftest draft-extraction
@@ -305,6 +340,7 @@
   (is (= ["a" "b"] (:attach (:opts (core/parse-argv ["send" "--attach" "a" "--attach" "b"])))))
   (is (= 5 (:timeout (:opts (core/parse-argv ["wait" "--timeout" "5"])))))
   (is (= 2 (:interval (:opts (core/parse-argv ["wait" "--interval" "2" "--"])))) "numbers are parsed even when -- ends the options")
+  (is (true? (:once (:opts (core/parse-argv ["wait" "--once"])))))
   (is (= ["help" "read" "7"] (:args (core/parse-argv ["read" "7" "--help"]))) "help anywhere comes first")
   (is (= ["help"] (:args (core/parse-argv ["-h"]))))
   (is (usage-thrown? #(core/parse-argv ["wait" "--timeout" "soon"])))
@@ -629,6 +665,110 @@
           (fs/delete log)
           (am {:who "e" :env {"WEZTERM_PANE" "" "PATH" path}} "wait" "--session" "e-1" "--timeout" "0")
           (is (not (fs/exists? log)) "silent outside WezTerm"))))))
+
+(defn fake-session
+  "A unix socket at `path` standing in for a Claude Code session's inbox: the
+   lines of each connection, parsed as JSON, become one post in (:posts it).
+   (:close it) stops listening and leaves the socket file behind, as a session
+   that died would."
+  [path]
+  (let [server (doto (ServerSocketChannel/open StandardProtocolFamily/UNIX)
+                 (.bind (UnixDomainSocketAddress/of (str path))))
+        posts (atom [])]
+    (future
+      (try (loop []
+             (let [ch (.accept server)]
+               (future (with-open [r (BufferedReader. (InputStreamReader. (Channels/newInputStream ch) StandardCharsets/UTF_8))]
+                         (swap! posts conj (mapv #(json/parse-string % true) (line-seq r)))))
+               (recur)))
+           (catch java.io.IOException _ nil)))
+    {:path (str path) :posts posts :close #(.close server)}))
+
+(defn eventually
+  "Polls `f` every 50 ms for up to `ms`: its first truthy value, else nil."
+  [ms f]
+  (loop [n (quot ms 50)]
+    (or (f) (when (pos? n) (Thread/sleep 50) (recur (dec n))))))
+
+(deftest wait-posts-into-its-session
+  ;; A unix socket's path must stay under ~104 bytes: with-store's directory is
+  ;; too deep for that on macOS, so the socket gets a short one of its own.
+  (with-store
+    (let [sock-dir (fs/create-temp-dir {:prefix "am"})
+          sess (fake-session (fs/path sock-dir "s.sock"))
+          env {"CLAUDE_CODE_MESSAGING_SOCKET" (:path sess) "CLAUDE_CODE_MESSAGING_TOKEN" "tok-123"}
+          posts #(deref (:posts sess))
+          text (fn [post] (get-in (peek post) [:message :content]))
+          duty-state (fn [s] (:state (first (filter #(= s (:session %)) (json/parse-string (out {} "who" "--json") true)))))
+          ids-out (fn [r] (str/split-lines (str/trim (:out r))))]
+      (try
+        (testing "with nothing for it: quiet until the timeout, exit 3, idle"
+          (let [r (am {:who "b" :env env} "wait" "--session" "b-0" "--timeout" "1" "--interval" "1")]
+            (is (= 3 (:exit r)))
+            (is (str/blank? (:out r)))
+            (is (empty? (posts)))
+            (is (= "idle" (duty-state "b-0")))))
+        (let [id (out {:who "a"} "send" "--to" "b" "--subject" "Vault please" "Add a vault.")
+              n (:number (thread-json id))
+              w (start {:who "b" :env env} "wait" "--session" "b-1" "--timeout" "60" "--interval" "1")]
+          (try
+            (testing "mail is posted into the session, after an auth line with its token, and the wait goes on"
+              (is (eventually 5000 #(= 1 (count (posts)))))
+              (let [[auth msg :as post] (first (posts))]
+                (is (= 2 (count post)))
+                (is (= {:type "auth" :token "tok-123"} auth))
+                (is (= ["user" "user"] [(:type msg) (get-in msg [:message :role])]))
+                (is (str/starts-with? (text post) (str "agent-mail: new mail for b: #" n " \"Vault please\" from a (" id ", message 1)")))
+                (is (str/includes? (text post) (str "Read it with `agent-mail read " n "`"))))
+              (is (= "working" (duty-state "b-1")) "working while the thread is the repo's turn")
+              (is (p/alive? w)))
+            (testing "not announced again while nothing changes"
+              (Thread/sleep 2500)
+              (is (= 1 (count (posts))))
+              (is (p/alive? w)))
+            (testing "a newer message in the thread is announced again"
+              (out {:who "a"} "reply" id "And make it fast.")
+              (is (eventually 5000 #(= 2 (count (posts)))))
+              (is (str/includes? (text (second (posts))) (str "#" n " \"Vault please\" from a (" id ", message 2)"))))
+            (testing "handed on, the thread leaves the session waiting, unannounced"
+              (out {:who "b"} "reply" id "Done.")
+              (is (eventually 5000 #(= "waiting" (duty-state "b-1"))))
+              (is (= 2 (count (posts))))
+              (is (p/alive? w)))
+            (finally (p/destroy-tree w))))
+        (testing "several threads at once: one post, one line each"
+          (let [x (out {:who "a"} "send" "--to" "c" "--subject" "One" "first")
+                y (out {:who "a"} "send" "--to" "c" "--subject" "Two" "second")
+                before (count (posts))
+                r (am {:who "c" :env env} "wait" "--session" "c-1" "--timeout" "1" "--interval" "1")]
+            (is (= 3 (:exit r)) "the safety net still ends it")
+            (is (str/blank? (:out r)))
+            (is (eventually 2000 #(= (inc before) (count (posts)))))
+            (let [lines (str/split-lines (text (last (posts))))]
+              (is (= 3 (count lines)) "two threads, then where it comes from")
+              (is (str/includes? (first lines) (str "\"One\" from a (" x ", message 1)")))
+              (is (str/includes? (second lines) (str "\"Two\" from a (" y ", message 1)"))))))
+        (testing "--once prints the ids and exits even with the socket set"
+          (let [before (count (posts))
+                r (am {:who "c" :env env} "wait" "--once" "--session" "c-2" "--timeout" "5")]
+            (is (zero? (:exit r)))
+            (is (= 2 (count (ids-out r))))
+            (Thread/sleep 200)
+            (is (= before (count (posts))))))
+        (testing "nothing at the socket's path: the classic exit"
+          (let [r (am {:who "c" :env (assoc env "CLAUDE_CODE_MESSAGING_SOCKET" (str (fs/path sock-dir "none.sock")))}
+                      "wait" "--session" "c-3" "--timeout" "5")]
+            (is (zero? (:exit r)))
+            (is (= 2 (count (ids-out r))))))
+        (testing "a socket nobody listens on any more: the post fails and the ids are printed instead"
+          ((:close sess))
+          (let [r (am {:who "c" :env env} "wait" "--session" "c-4" "--timeout" "5")]
+            (is (zero? (:exit r)))
+            (is (= 2 (count (ids-out r))))
+            (is (str/includes? (:err r) "could not post"))
+            (is (not (str/includes? (str (:out r) (:err r)) "tok-123")) "the token is never printed")
+            (is (= "working" (duty-state "c-4")))))
+        (finally ((:close sess)) (fs/delete-tree sock-dir))))))
 
 (defn status-json [o] (json/parse-string (out o "status" "--json") true))
 

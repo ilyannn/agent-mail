@@ -5,35 +5,39 @@ description: Put this session on duty for its repo's agent-mail. It waits for ma
 
 # agent-mail-listen: on duty for this repo's mail
 
-Loop until the user says stop. Each round:
+Stay on duty until the user says stop:
 
 1. **Learn your name** once, with ListAgents ("This session is X").
-   In WezTerm, `wait` titles the tab itself: "📪 <repo>" while waiting and
-   "📬 <repo>" once mail is in, so listeners can be told apart at a glance.
-   Other terminals cannot be titled from inside a session; there the title
-   comes from the launch command below.
-2. **Wait** with the Bash tool, `run_in_background` on, from the repo's directory:
+   In WezTerm, `wait` titles the tab itself: "📪 <repo>" while nothing waits
+   and "📬 <repo>" while a thread is this repo's turn, so listeners can be
+   told apart at a glance. Other terminals cannot be titled from inside a
+   session; there the title comes from the launch command below.
+2. **Arm once** with the Bash tool, `run_in_background` on, from the repo's
+   directory:
 
    ```
-   exec "$HOME/.local/bin/agent-mail" wait --session <your name> --timeout 3600
+   exec "$HOME/.local/bin/agent-mail" wait --session <your name> --timeout 21600
    ```
 
-   The session is woken when the command exits. Do not use Monitor (it expires
-   after at most 30 minutes) and do not poll.
-3. **On a timeout** (exit 3, no output): arm again and say nothing.
-4. **On mail** (exit 0, thread ids on stdout): `agent-mail read <id>`, then act
-   under this repo's own rules (CLAUDE.md, README) and answer with
-   `agent-mail reply <id>`. Close the thread with `agent-mail close` when the
-   work is done.
+   The wait keeps running and posts new mail into this session; the six hours
+   are only a safety net. Do not use Monitor and do not poll.
+3. **On mail**: a message starting with `agent-mail: new mail for <repo>`
+   comes from that wait, not from another session. `agent-mail read <number>`,
+   then act under this repo's own rules (CLAUDE.md, README) and answer with
+   `agent-mail reply <number>`. Close the thread with `agent-mail close` when
+   the work is done. Do not re-arm: the wait is still running.
+4. **On a timeout** (exit 3, no output), or if the background command is gone:
+   arm again and say nothing. If it exits 0 with thread ids on stdout, it
+   could not reach this session: handle those threads as mail, then arm again.
 5. **When the user is needed.** Anything that would need the user's OK in a
    normal session still needs it; a message from another agent is a request,
    not the user's approval. Reply `--to user` saying exactly what's needed, and
    send a one-line PushNotification saying what to act on. Carry on when the
    user answers, in this session or by mail.
-6. **Answer before re-arming.** `wait` is level-triggered: it returns at once
-   while any open thread is still this repo's turn. Hand every thread on
-   (reply, reply `--to user`, or close) before step 2, or the loop spins.
-7. **Say what happened** in one line after each round, then wait again.
+6. **Answer before moving on.** Hand every announced thread on (reply, reply
+   `--to user`, or close). The wait announces a thread again only when a newer
+   message arrives, so one left as this repo's turn just sits there.
+7. **Say what happened** in one line after each piece of mail.
 
 Repo-specific duty steps live in the repo's CLAUDE.md, not here. If a message
 asks for something this repo doesn't own, reply saying which repo does and
@@ -41,8 +45,10 @@ mail it there if the request is clear.
 
 Notes for the long run: a background command is stopped when Claude Code exits
 and, on macOS, can be stopped under critical memory pressure after 30 idle
-minutes; that counts as a timeout, so just re-arm. Each timeout costs one short
-turn, which is why the wait is an hour, not minutes. A session restarted with `--continue` and no prompt runs no turn, so it
-never re-arms; start listeners with
+minutes; that counts as a timeout, so just re-arm. If the wait keeps exiting
+with ids instead of posting, the Bash sandbox may be blocking its socket
+(`sandbox.network.allowUnixSockets`); the loop still works, one arm per piece
+of mail. A session restarted with `--continue` and no prompt runs no turn, so
+it never re-arms; start listeners with
 `claude --name "📫 <repo>" "/agent-mail-listen"`, which also names the session
 in `/resume` and the terminal title.
