@@ -94,6 +94,9 @@
     (when (fs/exists? dest) (fs/move dest old))
     (fs/move staging dest)
     (fs/delete-tree old)
+    ;; ditto keeps the build's timestamps, so the Dock and Finder may keep the
+    ;; old icon for a bundle replaced at the same path; a fresh mtime invalidates it.
+    (fs/set-last-modified-time dest (System/currentTimeMillis))
     (println "installed" (str dest))
     ;; The build product would otherwise be a second registered copy.
     (p/shell {:continue true :out :string :err :string} lsregister "-u" (str (fs/absolutize built)))
