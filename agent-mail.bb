@@ -280,16 +280,58 @@
   (or (fresh? rec)
       (and (= "working" (:state rec)) (true? (session-alive? rec)))))
 (defn on-duty [who] (filter #(and (= who (:repo %)) (on-duty? %)) (duty-records)))
+
+(defn claude-pid
+  "The pid of the Claude Code session running this command, which Claude Code
+   exports as CLAUDE_PID to the commands it runs; nil elsewhere."
+  []
+  (some-> (System/getenv "CLAUDE_PID") str/trim parse-long))
+
+(defn registry-name
+  "The name Claude Code's session registry gives the session with process id
+   `pid`: \"name\" in <config>/sessions/<pid>.json, <config> being
+   CLAUDE_CONFIG_DIR, else ~/.claude. Unlike a name learned once, it follows
+   restarts and renames. nil when there is no such file or it does not parse;
+   never throws."
+  [pid]
+  (try
+    (let [config (let [d (System/getenv "CLAUDE_CONFIG_DIR")]
+                   (if (str/blank? d) (fs/path (fs/home) ".claude") (fs/path d)))
+          f (fs/path config "sessions" (str pid ".json"))
+          nm (when (fs/regular-file? f) (get (json/parse-string (slurp (str f))) "name"))]
+      (when (and (string? nm) (not (str/blank? nm))) nm))
+    (catch Exception _ nil)))
+
+(defn session-name
+  "The live name of the Claude Code session running this command, the one
+   SendMessage reaches it by (see registry-name); nil outside Claude Code or
+   when the registry has no readable entry for it."
+  []
+  (some-> (claude-pid) registry-name))
+
+(defn live-session
+  "The name to give for a duty record's session: the registry's name for its
+   session pid when there is one, since a record written by an older version
+   may carry a name the session has since lost; else the name recorded."
+  [rec]
+  (or (some-> (:session-pid rec) registry-name) (:session rec)))
+
+(defn duty-file
+  "Where `who`'s duty record for `session` lives. A slash in the name (Claude
+   Code session names are the user's to choose) must not make a subdirectory."
+  [who session]
+  (fs/path duty-dir (str who "__" (str/replace session "/" "_") ".edn")))
+
 (defn write-duty!
   "The duty record also carries the pid of the agent session that runs this
    wait (Claude Code exports CLAUDE_PID), so others can tell a busy session
    from a dead one."
   [who session state]
   (fs/create-dirs duty-dir)
-  (spit (str (fs/path duty-dir (str who "__" session ".edn")))
+  (spit (str (duty-file who session))
         (pr-str (cond-> {:repo who :session session :state state :heartbeat (core/now-utc)
                          :pid (.pid (java.lang.ProcessHandle/current))}
-                  (some-> (System/getenv "CLAUDE_PID") parse-long) (assoc :session-pid (parse-long (System/getenv "CLAUDE_PID")))))))
+                  (claude-pid) (assoc :session-pid (claude-pid))))))
 
 ;; ---------------------------------------------------------------- delivery notes
 
@@ -326,7 +368,7 @@
                  "→ user: shown at every session start"))
       (if-let [d (seq (on-duty to))]
         (println (str "→ " to ": on duty (session "
-                      (str/join ", " (map #(str (:session %) (case (:state %)
+                      (str/join ", " (map #(str (live-session %) (case (:state %)
                                                                "waiting" ""
                                                                "idle" ", between waits"
                                                                ", busy")) d))
@@ -528,20 +570,33 @@
    --once) prints their ids and exits 0. Socket mode keeps running and posts
    each thread into the session instead, again only when a newer message
    arrives; a failed post falls back to the classic exit, so the session is
-   never left unreachable. Either way exit 3 on --timeout, duty \"idle\"."
+   never left unreachable. Either way exit 3 on --timeout, duty \"idle\".
+   The duty record names the session by its live name, read again every
+   round (see session-name), so neither a restart nor a rename leaves a name
+   nobody answers to; --session names it only where there is no registry."
   [opts]
   (ensure-store!)
   (let [me (caller opts)
-        session (or (:session opts) (str "pid" (.pid (java.lang.ProcessHandle/current))))
+        given (:session opts)
+        fallback (str "pid" (.pid (java.lang.ProcessHandle/current)))
         interval (or (:interval opts) 3)
         deadline (when-let [t (:timeout opts)] (+ (System/currentTimeMillis) (* 1000 t)))
         sock (when-not (:once opts) (session-socket))
         print-ids! (fn [pending] (run! println (map :id pending)) (System/exit 0))]
     (tab-title! (str "📪 " me))
-    (loop [announced {}, titled-mail? false]
-      (let [pending (open-for me)
+    (loop [announced {}, titled-mail? false, prev-session nil, warned? false]
+      (let [live (session-name)
+            session (or live given fallback)
+            mismatch? (boolean (and live given (not= live given)))
+            pending (open-for me)
             mail? (boolean (seq pending))
             {:keys [fresh] :as next-state} (core/announce announced pending)]
+        (when (and mismatch? (not warned?))
+          (binding [*out* *err*]
+            (println (str "agent-mail: this session is named " (pr-str live) ", not " (pr-str given)
+                          "; using the live name"))))
+        (when (and prev-session (not= prev-session session))
+          (fs/delete-if-exists (duty-file me prev-session)))
         (write-duty! me session (if mail? "working" "waiting"))
         (when (not= titled-mail? mail?) (tab-title! (str (if mail? "📬 " "📪 ") me)))
         (cond
@@ -552,13 +607,16 @@
               (print-ids! pending)))
         (if (and deadline (>= (System/currentTimeMillis) deadline))
           (do (write-duty! me session "idle") (System/exit 3))
-          (do (Thread/sleep (* 1000 interval)) (recur (:announced next-state) mail?)))))))
+          (do (Thread/sleep (* 1000 interval))
+              (recur (:announced next-state) mail? session (or warned? mismatch?))))))))
 
 (defn duty-view
-  "The duty records with what is derived for each: age, staleness, whether the
-   session that armed the wait lives, and whether it counts as on duty."
+  "The duty records with what is derived for each: the session's live name
+   (see live-session), age, staleness, whether the session that armed the wait
+   lives, and whether it counts as on duty."
   []
-  (map #(assoc % :age-s (core/age-s (:heartbeat %)) :stale (not (fresh? %))
+  (map #(assoc % :session (live-session %)
+               :age-s (core/age-s (:heartbeat %)) :stale (not (fresh? %))
                :session-alive (session-alive? %) :on-duty (on-duty? %))
        (duty-records)))
 
@@ -638,7 +696,10 @@
                                               Code session it keeps running and posts each one
                                               into the session, again only on a newer message;
                                               elsewhere, with --once, or if a post fails, it
-                                              prints their ids and exits. Exit 3 on timeout
+                                              prints their ids and exits. Exit 3 on timeout.
+                                              --session NAME is needed only outside Claude
+                                              Code; inside, wait reads the session's live name
+                                              from Claude Code's session registry
   agent-mail who [--json]                     who is on duty
   agent-mail status [--json]                  everything at once, for UIs
   agent-mail hook                             SessionStart hook output
@@ -653,7 +714,8 @@ Who am I: the repo I run in (main worktree name), `user` outside any repo;
 copied into the thread and `read` prints their absolute paths. --date backfills
 a timestamp when importing old threads; otherwise the tool stamps time.
 wait finds its session through CLAUDE_CODE_MESSAGING_SOCKET (and _TOKEN),
-which Claude Code exports to the commands it runs.
+which Claude Code exports to the commands it runs, and the session's name in
+<config>/sessions/$CLAUDE_PID.json (CLAUDE_CONFIG_DIR, else ~/.claude).
 Store: $AGENT_MAIL_DIR, else ~/.local/share/agent-mail.")
 
 (defn -main [argv]

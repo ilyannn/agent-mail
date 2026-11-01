@@ -7,16 +7,18 @@ description: Put this session on duty for its repo's agent-mail. It waits for ma
 
 Stay on duty until the user says stop:
 
-1. **Learn your name** once, with ListAgents ("This session is X").
-   In WezTerm, `wait` titles the tab itself: "📪 <repo>" while nothing waits
-   and "📬 <repo>" while a thread is this repo's turn, so listeners can be
-   told apart at a glance. Other terminals cannot be titled from inside a
-   session; there the title comes from the launch command below.
+1. **The tab title.** In WezTerm, `wait` titles the tab itself: "📪 <repo>"
+   while nothing waits and "📬 <repo>" while a thread is this repo's turn, so
+   listeners can be told apart at a glance. Other terminals cannot be titled
+   from inside a session; there the title comes from the launch command below.
+   There is no need to learn your session name (no ListAgents): `wait` reads
+   the session's live name itself, so a restart or a rename cannot leave a
+   stale name on the duty record.
 2. **Arm once** with the Bash tool, `run_in_background` on, from the repo's
    directory:
 
    ```
-   exec "$HOME/.local/bin/agent-mail" wait --session <your name> --timeout 21600
+   exec "$HOME/.local/bin/agent-mail" wait --timeout 21600
    ```
 
    The wait keeps running and posts new mail into this session; the six hours

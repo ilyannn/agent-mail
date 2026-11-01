@@ -27,8 +27,9 @@
 (def agent-shell {"CLAUDE_CODE_CHILD_SESSION" "1" "CLAUDECODE" "1"})
 (def user-shell {"CLAUDE_CODE_CHILD_SESSION" "" "CLAUDECODE" ""})
 ;; Run from Claude Code, the tests inherit its session socket: cleared, so a
-;; wait never posts into the real session; a test sets its own fake one.
-(def no-session {"CLAUDE_CODE_MESSAGING_SOCKET" "" "CLAUDE_CODE_MESSAGING_TOKEN" ""})
+;; wait never posts into the real session; a test sets its own fake one. Its
+;; pid too, or a wait would take the real session's name from the registry.
+(def no-session {"CLAUDE_CODE_MESSAGING_SOCKET" "" "CLAUDE_CODE_MESSAGING_TOKEN" "" "CLAUDE_PID" ""})
 (defn env-for [{:keys [who env]}]
   (cond-> (merge {"AGENT_MAIL_DIR" (str *store*) "AGENT_MAIL_NO_NOTIFY" "1"} no-session agent-shell env)
     who (assoc "AGENT_MAIL_AS" who)))
@@ -769,6 +770,66 @@
             (is (not (str/includes? (str (:out r) (:err r)) "tok-123")) "the token is never printed")
             (is (= "working" (duty-state "c-4")))))
         (finally ((:close sess)) (fs/delete-tree sock-dir))))))
+
+(defn registry!
+  "Claude Code's session registry entry for `pid` in config dir `cfg`, written
+   in one move so a wait never reads half of it. `content` is a map, written as
+   JSON, or a raw string."
+  [cfg pid content]
+  (let [f (fs/path cfg "sessions" (str pid ".json"))
+        tmp (fs/path cfg "sessions" (str "." pid ".tmp"))]
+    (fs/create-dirs (fs/parent f))
+    (spit (str tmp) (if (string? content) content (json/generate-string content)))
+    (fs/move tmp f {:replace-existing true :atomic-move true})))
+
+(deftest wait-takes-the-live-session-name
+  (with-store
+    (with-dir [cfg]
+      (let [duty #(fs/path *store* "duty" (str % ".edn"))
+            records (fn [repo] (filter #(= repo (:repo %)) (json/parse-string (out {} "who" "--json") true)))
+            record (comp first records)
+            in-session (fn [pid] {"CLAUDE_PID" (str pid) "CLAUDE_CONFIG_DIR" cfg})]
+        (testing "the registry's name wins over a stale --session, said once on stderr"
+          (registry! cfg 4000002 {:pid 4000002 :name "live-1" :nameSource "derived"})
+          (let [r (am {:who "f" :env (in-session 4000002)} "wait" "--session" "old-1" "--timeout" "0")]
+            (is (= 3 (:exit r)))
+            (is (= "live-1" (:session (record "f"))))
+            (is (= 4000002 (:session-pid (record "f"))))
+            (is (str/includes? (:err r) "\"live-1\""))
+            (is (str/includes? (:err r) "\"old-1\""))
+            (is (not (fs/exists? (duty "f__old-1"))))))
+        (testing "without --session the registry names it too, silently"
+          (let [r (am {:who "g" :env (in-session 4000002)} "wait" "--timeout" "0")]
+            (is (= "live-1" (:session (record "g"))))
+            (is (str/blank? (:err r)))))
+        (testing "an entry that does not parse or has no name: --session, else the pid fallback"
+          (registry! cfg 4000003 "{not json")
+          (registry! cfg 4000004 {:pid 4000004})
+          (is (= 3 (:exit (am {:who "h" :env (in-session 4000003)} "wait" "--session" "h-1" "--timeout" "0"))))
+          (is (= "h-1" (:session (record "h"))))
+          (is (= 3 (:exit (am {:who "i" :env (in-session 4000004)} "wait" "--timeout" "0"))))
+          (is (str/starts-with? (:session (record "i")) "pid")))
+        (testing "a rename while waiting moves the record to the new name and warns only once"
+          (registry! cfg 4000005 {:pid 4000005 :name "live-2"})
+          (let [w (start {:who "j" :env (in-session 4000005)} "wait" "--session" "old-2" "--timeout" "4" "--interval" "1")]
+            (is (eventually 5000 #(fs/exists? (duty "j__live-2"))))
+            (registry! cfg 4000005 {:pid 4000005 :name "live-3"})
+            (is (eventually 5000 #(fs/exists? (duty "j__live-3"))))
+            (is (not (fs/exists? (duty "j__live-2"))))
+            (let [r @w]
+              (is (= 3 (:exit r)))
+              (is (= 1 (count (str/split-lines (str/trim (:err r)))))))
+            (is (= [["live-3" "idle"]] (map (juxt :session :state) (records "j"))))))
+        (testing "a delivery note names an older record's session by its live name"
+          (let [me (.pid (java.lang.ProcessHandle/current))]
+            (registry! cfg me {:pid me :name "fresh-9"})
+            (spit (str (duty "survey__stale"))
+                  (pr-str {:repo "survey" :session "stale" :state "waiting" :heartbeat (core/now-utc) :pid 1 :session-pid me}))
+            (is (str/includes? (err {:who "a" :env {"CLAUDE_CONFIG_DIR" cfg}} "@survey" "still there?")
+                               "survey: on duty (session fresh-9)"))
+            (is (str/includes? (err {:who "a" :env {"CLAUDE_CONFIG_DIR" (str (fs/path cfg "none"))}} "@survey" "and now?")
+                               "survey: on duty (session stale)")
+                "no registry entry: the recorded name")))))))
 
 (defn status-json [o] (json/parse-string (out o "status" "--json") true))
 
