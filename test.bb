@@ -612,7 +612,23 @@
         (let [r (first (filter #(= "d-1" (:session %)) (json/parse-string (out {} "who" "--json") true)))]
           (is (= 4000001 (:session-pid r)))
           (is (false? (:session-alive r)))))
-      (is (str/includes? (err {:who "a"} "@user" "for you") "→ user: shown at every session start") "no notification in tests"))))
+      (is (str/includes? (err {:who "a"} "@user" "for you") "→ user: shown at every session start") "no notification in tests")
+      (testing "wait titles a WezTerm tab: closed mailbox while waiting, open once mail is in"
+        (let [bin (fs/create-dirs (fs/path *store* "stub-bin"))
+              log (str (fs/path *store* "wezterm.log"))
+              stub (fs/path bin "wezterm")
+              path (str bin ":" (System/getenv "PATH"))]
+          (spit (str stub) (str "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" log "\"\n"))
+          (fs/set-posix-file-permissions stub "rwxr-xr-x")
+          (am {:who "e" :env {"WEZTERM_PANE" "7" "PATH" path}} "wait" "--session" "e-1" "--timeout" "0")
+          (is (= ["cli set-tab-title 📪 e"] (str/split-lines (slurp log))) "a timeout leaves the closed mailbox")
+          (out {:who "a"} "send" "--to" "e" "--subject" "Hi" "Mail for e.")
+          (am {:who "e" :env {"WEZTERM_PANE" "7" "PATH" path}} "wait" "--session" "e-1" "--timeout" "0")
+          (is (= ["cli set-tab-title 📪 e" "cli set-tab-title 📪 e" "cli set-tab-title 📬 e"]
+                 (str/split-lines (slurp log))))
+          (fs/delete log)
+          (am {:who "e" :env {"WEZTERM_PANE" "" "PATH" path}} "wait" "--session" "e-1" "--timeout" "0")
+          (is (not (fs/exists? log)) "silent outside WezTerm"))))))
 
 (defn status-json [o] (json/parse-string (out o "status" "--json") true))
 

@@ -8,10 +8,10 @@ description: Put this session on duty for its repo's agent-mail. It waits for ma
 Loop until the user says stop. Each round:
 
 1. **Learn your name** once, with ListAgents ("This session is X").
-   Then **title the tab** so listeners can be told apart. In WezTerm (`WEZTERM_PANE`
-   is set) run `wezterm cli set-tab-title "📫 <repo>"`: the tab title sticks over
-   the pane title Claude Code keeps updating. Other terminals cannot be titled
-   from inside a session, so there the title comes from the launch command below.
+   In WezTerm, `wait` titles the tab itself: "📪 <repo>" while waiting and
+   "📬 <repo>" once mail is in, so listeners can be told apart at a glance.
+   Other terminals cannot be titled from inside a session; there the title
+   comes from the launch command below.
 2. **Wait** with the Bash tool, `run_in_background` on, from the repo's directory:
 
    ```

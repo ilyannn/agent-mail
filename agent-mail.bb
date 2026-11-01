@@ -480,16 +480,26 @@
                          (if (pos? (:unread t)) (format "%d new" (:unread t)) "     ")
                          (core/local-time (:updated t)) (:subject t)))))))
 
+(defn tab-title!
+  "Titles the terminal tab when the command runs in a WezTerm pane, so listener
+   tabs show their repo and whether mail is in: an explicit tab title sticks
+   over the title Claude Code keeps rewriting. Silent elsewhere or on failure."
+  [title]
+  (when (and (not (str/blank? (System/getenv "WEZTERM_PANE"))) (fs/which "wezterm"))
+    (p/shell {:continue true :out :string :err :string} "wezterm" "cli" "set-tab-title" title)))
+
 (defn cmd-wait [opts]
   (ensure-store!)
   (let [me (caller opts)
         session (or (:session opts) (str "pid" (.pid (java.lang.ProcessHandle/current))))
         interval (or (:interval opts) 3)
         deadline (when-let [t (:timeout opts)] (+ (System/currentTimeMillis) (* 1000 t)))]
+    (tab-title! (str "📪 " me))
     (loop []
       (write-duty! me session "waiting")
       (let [ids (map :id (open-for me))]
-        (cond (seq ids) (do (write-duty! me session "working") (run! println ids) (System/exit 0))
+        (cond (seq ids) (do (write-duty! me session "working") (tab-title! (str "📬 " me))
+                            (run! println ids) (System/exit 0))
               (and deadline (>= (System/currentTimeMillis) deadline))
               (do (write-duty! me session "idle") (System/exit 3))
               :else (do (Thread/sleep (* 1000 interval)) (recur)))))))
