@@ -193,13 +193,16 @@ final class DebugHooks: NSObject {
             // Glass and vibrancy draw as transparent: put the window
             // background behind, then the web view's picture on top.
             guard let out = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+            // Only the rect goes into the appearance closure: Xcode 26 treats
+            // it as sending, and the bitmap rep isn't Sendable.
+            let bounds = NSRect(origin: .zero, size: out.size)
             NSGraphicsContext.saveGraphicsState()
             NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: out)
             window.effectiveAppearance.performAsCurrentDrawingAppearance {
                 NSColor.windowBackgroundColor.setFill()
-                NSRect(origin: .zero, size: out.size).fill()
+                bounds.fill()
             }
-            rep.draw(in: NSRect(origin: .zero, size: out.size), from: .zero, operation: .sourceOver, fraction: 1,
+            rep.draw(in: bounds, from: .zero, operation: .sourceOver, fraction: 1,
                      respectFlipped: false, hints: nil)
             image?.draw(in: frame)
             NSGraphicsContext.restoreGraphicsState()
