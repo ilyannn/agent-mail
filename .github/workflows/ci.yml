@@ -29,3 +29,31 @@ jobs:
       - uses: jdx/mise-action@v5
       - run: mise ls --current
       - run: just check
+
+  mac:
+    name: Mac app (macos-latest)
+    runs-on: macos-latest
+    env:
+      MISE_TRUSTED_CONFIG_PATHS: ${{ github.workspace }}
+    defaults:
+      run:
+        # bash with pipefail, so a failing xcodebuild fails the step even
+        # when piped through xcbeautify.
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      # xcodegen and xcbeautify at the versions pinned in mise.toml.
+      - uses: jdx/mise-action@v5
+      - run: xcodebuild -version && swift --version
+      - name: AgentMailKit tests
+        run: swift test --package-path mac/AgentMailKit
+      - name: Generate the Xcode project
+        working-directory: mac
+        run: xcodegen generate
+      - name: Build the app (unsigned)
+        working-directory: mac
+        run: >-
+          xcodebuild build -project AgentMail.xcodeproj -scheme AgentMail
+          -configuration Debug -destination platform=macOS
+          -derivedDataPath build/DerivedData CODE_SIGNING_ALLOWED=NO
+          | xcbeautify
