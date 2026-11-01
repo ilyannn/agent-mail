@@ -1,7 +1,7 @@
 // The thread list: one row per thread of the selected mailbox, keyed by
 // thread id in a diffable data source, so selection and scroll position
 // survive live refreshes. Rows show parties, subject, age, an unread dot and
-// a state badge; visible rows are refreshed in place after each snapshot.
+// a state icon; visible rows are refreshed in place after each snapshot.
 import AgentMailKit
 import AppKit
 import Observation
@@ -225,18 +225,52 @@ final class ThreadTableView: NSTableView {
     }
 }
 
-/// One thread: `from → to` and age on top, subject and badge below.
+/// One thread: `from → to` and age on top, subject and a state icon below
+/// (Your turn, Undelivered, Closed, On duty), in a fixed slot so subjects
+/// line up whether or not a row has one.
 final class ThreadCellView: NSTableCellView {
     private let dot = NSImageView()
     private let parties = NSTextField.label()
     private let age = NSTextField.label(font: .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular),
                                         color: .secondaryLabelColor)
     private let subject = NSTextField.label(color: .secondaryLabelColor)
-    private let badge = BadgeView()
+    private let stateIcon = NSImageView()
+    private var unread = false
+    private var state: RowState?
+
+    /// A row's state: what it says, its symbol and tint.
+    struct RowState: Equatable {
+        var label: String
+        var detail: String
+        var symbol: String
+        var color: NSColor
+        var pointSize: CGFloat = 12
+
+        static func of(_ t: ThreadSummary, me: String) -> RowState? {
+            let owner = t.owner ?? "?"
+            if t.isUndelivered {
+                return RowState(label: "Undelivered", detail: "Nobody is listening for \(owner)",
+                                symbol: "exclamationmark.circle", color: .systemOrange)
+            }
+            if t.isWaiting(on: me) {
+                return RowState(label: "Your turn", detail: "Waiting on you", symbol: "arrowshape.turn.up.left.fill",
+                                color: .controlAccentColor)
+            }
+            if !t.isOpen {
+                return RowState(label: "Closed", detail: "The thread is closed", symbol: "checkmark.circle",
+                                color: .secondaryLabelColor)
+            }
+            if t.listener == "on-duty" {
+                return RowState(label: "On duty", detail: "\(owner) is on duty and will pick it up", symbol: "circle.fill",
+                                color: .systemGreen, pointSize: 8)
+            }
+            return nil
+        }
+    }
 
     init() {
         super.init(frame: .zero)
-        for v in [dot, parties, age, subject, badge] as [NSView] {
+        for v in [dot, parties, age, subject, stateIcon] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
@@ -246,6 +280,8 @@ final class ThreadCellView: NSTableCellView {
         age.setContentHuggingPriority(.required, for: .horizontal)
         parties.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         subject.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        stateIcon.imageScaling = .scaleNone
+        stateIcon.imageAlignment = .alignCenter
         NSLayoutConstraint.activate([
             dot.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
             dot.centerYAnchor.constraint(equalTo: parties.centerYAnchor),
@@ -257,9 +293,11 @@ final class ThreadCellView: NSTableCellView {
             age.firstBaselineAnchor.constraint(equalTo: parties.firstBaselineAnchor),
             subject.leadingAnchor.constraint(equalTo: parties.leadingAnchor),
             subject.topAnchor.constraint(equalTo: parties.bottomAnchor, constant: 3),
-            badge.leadingAnchor.constraint(greaterThanOrEqualTo: subject.trailingAnchor, constant: 6),
-            badge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
-            badge.centerYAnchor.constraint(equalTo: subject.centerYAnchor),
+            stateIcon.leadingAnchor.constraint(equalTo: subject.trailingAnchor, constant: 6),
+            stateIcon.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -3),
+            stateIcon.centerYAnchor.constraint(equalTo: subject.centerYAnchor),
+            stateIcon.widthAnchor.constraint(equalToConstant: 18),
+            stateIcon.heightAnchor.constraint(equalToConstant: 16),
         ])
         setAccessibilityElement(true)
         setAccessibilityRole(.cell)
@@ -267,9 +305,27 @@ final class ThreadCellView: NSTableCellView {
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
+    /// A selected row is drawn in the accent colour: tints turn white there.
+    override var backgroundStyle: NSView.BackgroundStyle {
+        didSet { updateImages() }
+    }
+
+    private func updateImages() {
+        let selected = backgroundStyle == .emphasized
+        dot.image = unread ? NSImage.dot(selected ? .alternateSelectedControlTextColor : .controlAccentColor,
+                                         label: "Unread") : nil
+        guard let state else {
+            stateIcon.image = nil
+            return
+        }
+        let color = selected ? NSColor.alternateSelectedControlTextColor : state.color
+        stateIcon.image = NSImage(systemSymbolName: state.symbol, accessibilityDescription: state.label)?
+            .withSymbolConfiguration(.init(pointSize: state.pointSize, weight: .semibold)
+                .applying(.init(paletteColors: [color])))
+    }
+
     func configure(_ t: ThreadSummary, me: String, now: Date) {
-        let unread = t.unread > 0
-        dot.image = unread ? NSImage.dot(.controlAccentColor, label: "Unread") : nil
+        unread = t.unread > 0
         let from = t.lastFrom ?? t.from ?? "?"
         let to = t.owner ?? "?"
         parties.stringValue = "\(from) → \(to)"
@@ -279,21 +335,17 @@ final class ThreadCellView: NSTableCellView {
         let seconds = Int(now.timeIntervalSince(t.updated ?? t.created ?? now))
         age.stringValue = Formatting.age(seconds: seconds)
 
-        let state: (String, NSColor)? =
-            if t.isUndelivered { ("Undelivered", .systemOrange) }
-            else if t.isWaiting(on: me) { ("Your turn", .controlAccentColor) }
-            else if !t.isOpen { ("Closed", .secondaryLabelColor) }
-            else if t.listener == "on-duty" { ("On duty", .systemGreen) }
-            else { nil }
-        badge.text = state?.0 ?? ""
-        badge.color = state?.1 ?? .secondaryLabelColor
+        state = RowState.of(t, me: me)
+        updateImages()
+        stateIcon.toolTip = state.map { "\($0.label): \($0.detail)" }
+        stateIcon.setAccessibilityLabel(state?.label)
 
         var spoken = [String]()
         if unread { spoken.append("\(t.unread) unread") }
         spoken.append("from \(from) to \(to)")
         spoken.append(t.subject)
         spoken.append("\(Formatting.spokenAge(seconds: seconds)) ago")
-        if let s = state?.0 { spoken.append(s) }
+        if let s = state?.label { spoken.append(s) }
         setAccessibilityLabel(spoken.joined(separator: ", "))
         toolTip = "#\(t.number.map(String.init) ?? "?") \(t.id)\n\(t.count) message\(t.count == 1 ? "" : "s"), "
             + (t.isOpen ? "waiting on \(to)" : "closed")

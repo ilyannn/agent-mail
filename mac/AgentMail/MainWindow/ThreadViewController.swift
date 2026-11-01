@@ -1,7 +1,9 @@
 // The thread view: the whole thread rendered as one HTML document in a
-// WKWebView (content JavaScript off, strict CSP, links handed to the
-// system), the newest message scrolled into view, and an inline reply box
-// below it with the recipient, Close Thread and Send.
+// WKWebView (content JavaScript off, strict CSP, attachments served by a
+// scheme handler, every click decided by LinkPolicy), the newest message
+// scrolled into view, and an inline reply box below it with the
+// recipient, Close Thread and Send (⌘↩ or ⇧⌘D). The text size (View menu,
+// pinch) is a page zoom kept in AppSettings.
 import AgentMailKit
 import AppKit
 import Observation
@@ -9,13 +11,16 @@ import WebKit
 
 final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSplitViewDelegate, NSTextViewDelegate {
     private let store: MailStore
-    private var webView: WKWebView!
+    private var webView: ThreadWebView!
+    private let schemeHandler = AttachmentSchemeHandler()
     private let split = NSSplitView()
     private let replyPane = NSView()
     private let recipientPopup = NSPopUpButton()
     private let sendButton = NSButton(title: "Send", target: nil, action: nil)
     private let closeButton = NSButton(title: "Close Thread", target: nil, action: nil)
     private let statusLabel = NSTextField.label(font: .systemFont(ofSize: NSFont.smallSystemFontSize), color: .secondaryLabelColor)
+    private let sendHint = NSTextField.label("⌘↩ to send", font: .systemFont(ofSize: NSFont.smallSystemFontSize),
+                                             color: .tertiaryLabelColor)
     private var replyScroll: NSScrollView!
     private(set) var replyView: NSTextView!
     private let placeholder = NSTextField.label(font: .systemFont(ofSize: NSFont.systemFontSize + 4), color: .tertiaryLabelColor)
@@ -25,12 +30,21 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
     private var draftThreadID: String?
     /// Thread id and fingerprint of what the web view shows.
     private var rendered: (id: String, fingerprint: String)?
+    /// Messages that were unread when first shown, by thread: they stay
+    /// unfolded when the thread is rendered again this session.
+    private var expandedFiles: [String: Set<String>] = [:]
+    /// The zoom while a pinch is under way.
+    private var pinchZoom: Double?
     private lazy var css: String = {
         guard let url = Bundle.main.url(forResource: "thread", withExtension: "css"),
               let s = try? String(contentsOf: url, encoding: .utf8) else { return "" }
         return s
     }()
     private let dateStyle = Date.FormatStyle(date: .abbreviated, time: .shortened)
+
+    /// Hands files and links to other apps; the debug hooks record instead.
+    var openURL: (URL) -> Bool = { NSWorkspace.shared.open($0) }
+    var revealFiles: ([URL]) -> Void = { NSWorkspace.shared.activateFileViewerSelecting($0) }
 
     init(store: MailStore) {
         self.store = store
@@ -44,10 +58,14 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
         config.defaultWebpagePreferences.allowsContentJavaScript = false
         config.websiteDataStore = .nonPersistent()
         config.suppressesIncrementalRendering = true
-        webView = WKWebView(frame: .zero, configuration: config)
+        config.setURLSchemeHandler(schemeHandler, forURLScheme: AttachmentScheme.scheme)
+        webView = ThreadWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = self
         webView.allowsBackForwardNavigationGestures = false
-        webView.allowsMagnification = true
+        // Pinching sets the page zoom instead (ThreadWebView.onPinch).
+        webView.allowsMagnification = false
+        webView.pageZoom = store.settings.textZoom
+        webView.onPinch = { [weak self] step, ended in self?.pinch(step, ended: ended) }
         webView.underPageBackgroundColor = .textBackgroundColor
         webView.setAccessibilityLabel("Thread")
 
@@ -55,6 +73,7 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
         replyScroll = scroll
         replyView = text
         replyView.delegate = self
+        text.onCommandReturn = { [weak self] in self?.sendReply() }
         buildReplyPane()
 
         split.isVertical = false
@@ -81,12 +100,15 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
             split.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             placeholder.centerXAnchor.constraint(equalTo: container.centerXAnchor),
             placeholder.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            replyPane.heightAnchor.constraint(greaterThanOrEqualToConstant: 90),
+            replyPane.heightAnchor.constraint(greaterThanOrEqualToConstant: Self.minimumReplyHeight),
             webView.heightAnchor.constraint(greaterThanOrEqualToConstant: 120),
         ])
         view = container
     }
 
+    private static let minimumReplyHeight: CGFloat = 130
+
+    /// To and status on top, the text, then the hint, Close Thread and Send.
     private func buildReplyPane() {
         let toLabel = NSTextField.label("To:", color: .secondaryLabelColor)
         recipientPopup.translatesAutoresizingMaskIntoConstraints = false
@@ -95,45 +117,54 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
         recipientPopup.setAccessibilityLabel("Recipient")
         recipientPopup.target = self
         recipientPopup.action = #selector(recipientChanged(_:))
+        let top = NSStackView(views: [toLabel, recipientPopup, statusLabel, NSView()])
+        top.orientation = .horizontal
+        top.spacing = 8
+        top.edgeInsets = NSEdgeInsets(top: 6, left: 10, bottom: 6, right: 10)
+        statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
         closeButton.target = self
         closeButton.action = #selector(closeThreadClicked(_:))
-        closeButton.controlSize = .small
+        closeButton.bezelStyle = .push
         closeButton.toolTip = "Close the thread (⌃⌘A). Text in the reply box becomes the closing note."
+        closeButton.image = NSImage(systemSymbolName: "checkmark.circle", accessibilityDescription: nil)
+        closeButton.imagePosition = .imageLeading
         sendButton.target = self
         sendButton.action = #selector(sendClicked(_:))
-        sendButton.controlSize = .small
+        sendButton.bezelStyle = .push
+        sendButton.bezelColor = .controlAccentColor
         sendButton.keyEquivalent = ""
-        sendButton.toolTip = "Send the reply (⇧⌘D)"
-        if let image = NSImage(systemSymbolName: "paperplane", accessibilityDescription: nil) {
-            sendButton.image = image
-            sendButton.imagePosition = .imageLeading
-        }
-        let bar = NSStackView(views: [toLabel, recipientPopup, statusLabel, NSView(), closeButton, sendButton])
-        bar.orientation = .horizontal
-        bar.spacing = 8
-        bar.edgeInsets = NSEdgeInsets(top: 6, left: 10, bottom: 6, right: 10)
-        bar.translatesAutoresizingMaskIntoConstraints = false
-        bar.setHuggingPriority(.defaultHigh, for: .vertical)
-        statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        sendButton.toolTip = "Send the reply (⌘↩ or ⇧⌘D)"
+        sendButton.image = NSImage(systemSymbolName: "paperplane.fill", accessibilityDescription: nil)
+        sendButton.imagePosition = .imageLeading
+        sendHint.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let bottom = NSStackView(views: [sendHint, NSView(), closeButton, sendButton])
+        bottom.orientation = .horizontal
+        bottom.spacing = 8
+        bottom.edgeInsets = NSEdgeInsets(top: 6, left: 12, bottom: 8, right: 10)
 
         let separator = NSBox()
         separator.boxType = .separator
-        separator.translatesAutoresizingMaskIntoConstraints = false
-        replyScroll.translatesAutoresizingMaskIntoConstraints = false
-        replyPane.addSubview(bar)
-        replyPane.addSubview(separator)
-        replyPane.addSubview(replyScroll)
+        for v in [top, separator, replyScroll!, bottom] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            replyPane.addSubview(v)
+        }
+        top.setHuggingPriority(.defaultHigh, for: .vertical)
+        bottom.setHuggingPriority(.defaultHigh, for: .vertical)
         NSLayoutConstraint.activate([
-            bar.leadingAnchor.constraint(equalTo: replyPane.leadingAnchor),
-            bar.trailingAnchor.constraint(equalTo: replyPane.trailingAnchor),
-            bar.topAnchor.constraint(equalTo: replyPane.topAnchor),
+            top.leadingAnchor.constraint(equalTo: replyPane.leadingAnchor),
+            top.trailingAnchor.constraint(equalTo: replyPane.trailingAnchor),
+            top.topAnchor.constraint(equalTo: replyPane.topAnchor),
             separator.leadingAnchor.constraint(equalTo: replyPane.leadingAnchor),
             separator.trailingAnchor.constraint(equalTo: replyPane.trailingAnchor),
-            separator.topAnchor.constraint(equalTo: bar.bottomAnchor),
+            separator.topAnchor.constraint(equalTo: top.bottomAnchor),
             replyScroll.leadingAnchor.constraint(equalTo: replyPane.leadingAnchor),
             replyScroll.trailingAnchor.constraint(equalTo: replyPane.trailingAnchor),
             replyScroll.topAnchor.constraint(equalTo: separator.bottomAnchor),
-            replyScroll.bottomAnchor.constraint(equalTo: replyPane.bottomAnchor),
+            replyScroll.bottomAnchor.constraint(equalTo: bottom.topAnchor),
+            bottom.leadingAnchor.constraint(equalTo: replyPane.leadingAnchor),
+            bottom.trailingAnchor.constraint(equalTo: replyPane.trailingAnchor),
+            bottom.bottomAnchor.constraint(equalTo: replyPane.bottomAnchor),
         ])
     }
 
@@ -150,8 +181,9 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
 
     override func viewDidAppear() {
         super.viewDidAppear()
-        if split.subviews.count == 2, replyPane.frame.height < 90 || replyPane.frame.height > split.bounds.height * 0.6 {
-            split.setPosition(max(split.bounds.height - 170, 120), ofDividerAt: 0)
+        let h = replyPane.frame.height
+        if split.subviews.count == 2, h < Self.minimumReplyHeight || h > split.bounds.height * 0.45 {
+            split.setPosition(max(split.bounds.height - 200, 120), ofDividerAt: 0)
         }
     }
 
@@ -260,25 +292,81 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
             "thread.send: \(sendButton.isEnabled) close: \(closeButton.isEnabled)",
             "thread.reply: \(replyView.string.debugDescription) smartQuotes=\(replyView.isAutomaticQuoteSubstitutionEnabled) "
                 + "spelling=\(replyView.isContinuousSpellCheckingEnabled) undo=\(replyView.allowsUndo)",
+            "thread.zoom: page=\(webView.pageZoom) setting=\(store.settings.textZoom)",
+            "thread.expanded: \(expandedFiles[rendered?.id ?? ""].map { $0.sorted() } ?? [])",
+            "thread.schemeLog: \(schemeHandler.log.suffix(12))",
+            "thread.opened: \(debugOpened)",
         ]
     }
+
+    /// The thread's web view, for the debug hooks' scripts and clicks.
+    var debugWebView: WKWebView { webView }
+
+    /// Files and links the view handed to other apps, once recording.
+    private(set) var debugOpened: [String] = []
+
+    /// Records opens instead of launching other apps.
+    func debugRecordOpens() {
+        openURL = { [weak self] url in
+            self?.debugOpened.append("open \(url.isFileURL ? url.lastPathComponent : url.absoluteString)")
+            return true
+        }
+        revealFiles = { [weak self] urls in self?.debugOpened.append("reveal \(urls.map(\.lastPathComponent))") }
+    }
+
+    /// A whole pinch of `step`, as if the fingers had lifted.
+    func debugPinch(_ step: Double) { pinch(step, ended: true) }
     #endif
 
     // MARK: Rendering
 
     private func render(_ detail: ThreadDetail) {
-        let html = ThreadDocument.html(thread: detail, me: me, css: css,
-                                       filesDirectory: store.filesDirectory(detail.id)) { [dateStyle] in
+        let unread = detail.unreadFiles(me: me, count: store.index.thread(detail.id)?.unread ?? 0)
+        let expanded = expandedFiles[detail.id, default: []].union(unread)
+        expandedFiles[detail.id] = expanded
+        let files = store.filesDirectory(detail.id)
+        schemeHandler.thread = (detail.id, files)
+        let html = ThreadDocument.html(thread: detail, me: me, css: css + Self.systemColorsCSS(), expanded: expanded,
+                                       readAttachment: { Self.readText(named: $0, in: files) }) { [dateStyle] in
             $0.formatted(dateStyle)
         }
         rendered = (detail.id, detail.contentFingerprint)
         webView.loadHTMLString(html, baseURL: nil)
     }
 
+    /// The accent and link colours, which WebKit doesn't take from the
+    /// system (its AccentColor is always blue), for light and dark.
+    private static func systemColorsCSS() -> String {
+        func css(_ color: NSColor, _ name: NSAppearance.Name) -> String {
+            var out = ""
+            NSAppearance(named: name)?.performAsCurrentDrawingAppearance {
+                let c = color.usingColorSpace(.sRGB) ?? color
+                out = "rgb(\(Int(c.redComponent * 255)) \(Int(c.greenComponent * 255)) \(Int(c.blueComponent * 255)))"
+            }
+            return out
+        }
+        func vars(_ name: NSAppearance.Name) -> String {
+            ":root { --accent: \(css(.controlAccentColor, name)); --link: \(css(.linkColor, name)); }"
+        }
+        return "\n\(vars(.aqua))\n@media (prefers-color-scheme: dark) { \(vars(.darkAqua)) }\n"
+    }
+
+    /// A Markdown attachment's text, unless it is too big to show inline.
+    private static func readText(named name: String, in files: URL) -> String? {
+        guard let url = AttachmentScheme.file(named: name, in: files),
+              let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, size <= 256_000 else { return nil }
+        return try? String(contentsOf: url, encoding: .utf8)
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard rendered != nil else { return }
         // App-injected script; runs even with content JavaScript disabled.
-        webView.evaluateJavaScript("var n = document.getElementById('newest'); if (n) { n.scrollIntoView({block: 'start'}); } !!n") { result, error in
+        // The first unread message, else the newest; the top when that is the
+        // first message, so the subject shows.
+        let js = "var n = document.querySelector('article.unread') || document.getElementById('newest');"
+            + " if (n && n.previousElementSibling && n.previousElementSibling.matches('article')) {"
+            + " n.scrollIntoView({block: 'start'}); } else { window.scrollTo(0, 0); } !!n"
+        webView.evaluateJavaScript(js) { result, error in
             if let error {
                 Timing.note("scroll to newest failed: \(error.localizedDescription)")
             } else {
@@ -288,12 +376,69 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction) async -> WKNavigationActionPolicy {
-        // The document itself loads; every link goes to the system.
-        if action.navigationType == .other, action.request.url?.absoluteString == "about:blank" { return .allow }
-        if action.navigationType == .linkActivated, let url = action.request.url {
-            NSWorkspace.shared.open(url)
+        let link = LinkPolicy.classify(action.request.url, isLinkClick: action.navigationType == .linkActivated,
+                                       thread: rendered?.id)
+        Timing.note("link \(action.request.url?.absoluteString ?? "-"): \(link)")
+        switch link {
+        case .loadDocument: return .allow
+        case let .openExternally(url): _ = openURL(url)
+        case let .openAttachment(name): openAttachment(name, reveal: false)
+        case let .revealAttachment(name): openAttachment(name, reveal: true)
+        case let .openMessage(file): openMessage(file)
+        case let .reply(file): reply(toMessage: file)
+        case .ignore: break
         }
         return .cancel
+    }
+
+    // MARK: Opening files
+
+    private func openAttachment(_ name: String, reveal: Bool) {
+        guard let id = rendered?.id, let file = AttachmentScheme.file(named: name, in: store.filesDirectory(id)),
+              FileManager.default.fileExists(atPath: file.path) else {
+            NSSound.beep()
+            return
+        }
+        // Executables, scripts and apps are shown, never run.
+        if reveal || !LinkPolicy.isSafeToOpen(file) || !openURL(file) {
+            revealFiles([file])
+        }
+    }
+
+    /// The message's file in the default app for Markdown.
+    private func openMessage(_ file: String) {
+        guard let id = rendered?.id, store.detail?.msgs.contains(where: { $0.file == file }) == true else { return }
+        let url = store.threadDirectory(id).appending(path: "msgs").appending(path: file)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            NSSound.beep()
+            return
+        }
+        if !openURL(url) { revealFiles([url]) }
+    }
+
+    // MARK: Text size
+
+    var textZoom: Double { store.settings.textZoom }
+
+    func setTextZoom(_ zoom: Double) {
+        let z = TextZoom.clamp(zoom)
+        store.settings.textZoom = z
+        webView.pageZoom = z
+    }
+
+    func makeTextBigger() { setTextZoom(TextZoom.bigger(than: textZoom)) }
+    func makeTextSmaller() { setTextZoom(TextZoom.smaller(than: textZoom)) }
+    func makeTextActualSize() { setTextZoom(TextZoom.actualSize) }
+
+    /// Live while pinching, saved when the fingers lift.
+    private func pinch(_ step: Double, ended: Bool) {
+        let z = TextZoom.clamp((pinchZoom ?? webView.pageZoom) * (1 + step))
+        pinchZoom = z
+        webView.pageZoom = z
+        if ended {
+            pinchZoom = nil
+            setTextZoom(z)
+        }
     }
 
     // MARK: Actions
@@ -321,16 +466,31 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
         recipientWasChosen = true
     }
 
-    /// ⌘R: focus the reply box, quoting what is selected in the thread.
-    func focusReply() {
+    /// ⌘R: focus the reply box, quoting what is selected in the thread
+    /// (or, from a card's Reply button, what was selected before the click).
+    func focusReply(fallbackSelection: String = "") {
         guard store.selectedThreadID != nil else { return }
         view.window?.makeFirstResponder(replyView)
         webView.evaluateJavaScript("window.getSelection().toString()") { [weak self] result, _ in
-            guard let self, let selection = result as? String else { return }
-            let quoted = Quoting.replyPrefill(selection: selection)
+            guard let self else { return }
+            let current = result as? String ?? ""
+            let quoted = Quoting.replyPrefill(selection: current.isEmpty ? fallbackSelection : current)
             guard !quoted.isEmpty else { return }
             replyView.insertText(quoted, replacementRange: replyView.selectedRange())
         }
+    }
+
+    /// A card's Reply: address the reply to that message's sender (or, for
+    /// my own message, to whom I wrote), then as ⌘R.
+    func reply(toMessage file: String?) {
+        let selection = webView.selectionAtMouseDown
+        if let file, let m = store.detail?.msgs.first(where: { $0.file == file }),
+           let to = m.from == me ? m.to : m.from, to != me {
+            if recipientPopup.item(withTitle: to) == nil { recipientPopup.addItem(withTitle: to) }
+            recipientPopup.selectItem(withTitle: to)
+            recipientWasChosen = true
+        }
+        focusReply(fallbackSelection: selection)
     }
 
     /// Space in the thread list: page down the thread.
@@ -415,6 +575,6 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
     }
 
     func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposed: CGFloat, ofSubviewAt index: Int) -> CGFloat {
-        min(proposed, splitView.bounds.height - 90)
+        min(proposed, splitView.bounds.height - Self.minimumReplyHeight)
     }
 }

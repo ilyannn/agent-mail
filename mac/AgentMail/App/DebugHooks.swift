@@ -13,6 +13,12 @@
 //   {"cmd": "statusmenu", "out": "..."}             (the status item's menu)
 //   {"cmd": "show" | "close" | "settings" | "compose" | "dock", "arg": ...}
 //   {"cmd": "visible", "arg": "on"}                 (treat the thread as seen)
+//   {"cmd": "js", "arg": "document.title"}          (in the thread's web view)
+//   {"cmd": "clickweb", "arg": "#m1 a.button"}      (a real click on an element)
+//   {"cmd": "recordopens"}                          (log opens, launch nothing)
+//   {"cmd": "appearance", "arg": "dark|light|system"} (this app only)
+//   {"cmd": "pinch", "arg": "0.25"}                 (a finished pinch)
+//   {"cmd": "frame", "arg": "x,y,w,h"}              (the main window's frame)
 // mac/scripts/debug.bb sends them.
 #if DEBUG
 import AgentMailKit
@@ -69,6 +75,27 @@ final class DebugHooks: NSObject {
                 write("action \(arg) target=\(target) handled=\(handled)\n", to: out)
             }
             return
+        case "js":
+            guard let web = app.debugMain?.thread.debugWebView else { break }
+            web.evaluateJavaScript(arg) { [self] result, error in
+                let text = error.map { "error: \($0.localizedDescription)" } ?? String(describing: result ?? "nil")
+                write(text + "\n", to: out)
+            }
+            return
+        case "clickweb":
+            whenActive { [self] in clickWeb(arg, out: out) }
+            return
+        case "recordopens": app.debugMain?.thread.debugRecordOpens()
+        case "appearance":
+            NSApp.appearance = switch arg {
+            case "dark": NSAppearance(named: .darkAqua)
+            case "light": NSAppearance(named: .aqua)
+            default: nil
+            }
+        case "pinch": app.debugMain?.thread.debugPinch(Double(arg) ?? 0)
+        case "frame":
+            let v = arg.split(separator: ",").compactMap { Double($0) }
+            if v.count == 4 { app.debugMain?.window?.setFrame(NSRect(x: v[0], y: v[1], width: v[2], height: v[3]), display: true) }
         case "statusmenu": write(app.debugStatusMenu(), to: out)
         case "show": app.showMainWindow(nil)
         case "close": app.debugMain?.window?.performClose(nil)
@@ -86,7 +113,7 @@ final class DebugHooks: NSObject {
             }
         default: break
         }
-        if let out, cmd["cmd"] != "dump", cmd["cmd"] != "snapshot", cmd["cmd"] != "statusmenu" {
+        if let out, !["dump", "snapshot", "statusmenu", "js"].contains(cmd["cmd"] ?? "") {
             write("ok \(cmd["cmd"] ?? "")\n", to: out)
         }
     }
@@ -132,7 +159,7 @@ final class DebugHooks: NSObject {
         }
         let window = NSApp.keyWindow ?? NSApp.mainWindow
         let codes: [String: UInt16] = ["\r": 36, " ": 49, "r": 15, "d": 2, "a": 0, "n": 45, "1": 18, "2": 19, "3": 20,
-                                       "0": 29, "w": 13, ",": 43, "\u{1b}": 53, "\t": 48]
+                                       "0": 29, "w": 13, ",": 43, "\u{1b}": 53, "\t": 48, "=": 24, "+": 24, "-": 27]
         let chars2 = flags.contains(.shift) ? chars.uppercased() : chars
         for type in [NSEvent.EventType.keyDown, .keyUp] {
             guard let e = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: flags, timestamp: ProcessInfo.processInfo.systemUptime,
@@ -143,20 +170,72 @@ final class DebugHooks: NSObject {
         }
     }
 
+    /// The window as a PNG; with a visible web view, its snapshot is also
+    /// written to .web.png and drawn into the window image (which can't
+    /// capture web content itself).
     private func snapshot(to url: URL?, title: String?) {
         let titled = NSApp.windows.filter { $0.isVisible && $0.styleMask.contains(.titled) }
         let named = title.flatMap { t in titled.first { $0.title == t } }
         guard let url, let window = named ?? NSApp.keyWindow.flatMap({ titled.contains($0) ? $0 : nil }) ?? titled.first,
-              let view = window.contentView else { return }
-        if let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
-            view.cacheDisplay(in: view.bounds, to: rep)
+              let view = window.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+        view.cacheDisplay(in: view.bounds, to: rep)
+        guard let web = Self.find(WKWebView.self, in: view), !web.isHiddenOrHasHiddenAncestor else {
             try? rep.representation(using: .png, properties: [:])?.write(to: url)
+            return
         }
-        if let web = Self.find(WKWebView.self, in: view) {
-            web.takeSnapshot(with: nil) { image, _ in
-                guard let image, let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff) else { return }
-                try? rep.representation(using: .png, properties: [:])?.write(to: url.deletingPathExtension().appendingPathExtension("web.png"))
+        var frame = web.convert(web.bounds, to: view)
+        if view.isFlipped { frame.origin.y = view.bounds.height - frame.maxY }
+        web.takeSnapshot(with: nil) { image, _ in
+            if let image, let tiff = image.tiffRepresentation, let webRep = NSBitmapImageRep(data: tiff) {
+                try? webRep.representation(using: .png, properties: [:])?
+                    .write(to: url.deletingPathExtension().appendingPathExtension("web.png"))
             }
+            // Glass and vibrancy draw as transparent: put the window
+            // background behind, then the web view's picture on top.
+            guard let out = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: out)
+            window.effectiveAppearance.performAsCurrentDrawingAppearance {
+                NSColor.windowBackgroundColor.setFill()
+                NSRect(origin: .zero, size: out.size).fill()
+            }
+            rep.draw(in: NSRect(origin: .zero, size: out.size), from: .zero, operation: .sourceOver, fraction: 1,
+                     respectFlipped: false, hints: nil)
+            image?.draw(in: frame)
+            NSGraphicsContext.restoreGraphicsState()
+            try? out.representation(using: .png, properties: [:])?.write(to: url)
+        }
+    }
+
+    /// Scrolls the first element matching `selector` into view and clicks
+    /// its middle with real mouse events, so WebKit decides what the click
+    /// does (link activation, <details> toggling).
+    private func clickWeb(_ selector: String, out: URL?) {
+        guard let web = app?.debugMain?.thread.debugWebView, let window = web.window,
+              let quoted = try? JSONSerialization.data(withJSONObject: [selector]),
+              let list = String(data: quoted, encoding: .utf8) else {
+            write("no web view\n", to: out)
+            return
+        }
+        let js = "(function(){var e=document.querySelector(\(list)[0]); if(!e) return null; e.scrollIntoView({block:'center'});"
+            + " var r=e.getBoundingClientRect(); return [r.left + r.width/2, r.top + r.height/2];})()"
+        web.evaluateJavaScript(js) { [self] result, _ in
+            guard let xy = result as? [Double], xy.count == 2 else {
+                write("no element \(selector)\n", to: out)
+                return
+            }
+            let z = web.pageZoom
+            var p = NSPoint(x: xy[0] * z, y: xy[1] * z)
+            if !web.isFlipped { p.y = web.bounds.height - p.y }
+            let location = web.convert(p, to: nil)
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                guard let e = NSEvent.mouseEvent(with: type, location: location, modifierFlags: [],
+                                                 timestamp: ProcessInfo.processInfo.systemUptime,
+                                                 windowNumber: window.windowNumber, context: nil, eventNumber: 0,
+                                                 clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0) else { continue }
+                window.sendEvent(e)
+            }
+            write("clicked \(selector) at \(location)\n", to: out)
         }
     }
 

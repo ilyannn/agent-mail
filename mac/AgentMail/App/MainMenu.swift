@@ -1,6 +1,8 @@
 // The menu bar, with Mail's shortcuts where Mail has the command: New ⌘N,
 // Reply ⌘R, Send ⇧⌘D, Close Thread ⌃⌘A (Mail's Archive), Get New Mail ⇧⌘N;
-// mailboxes ⌘1–3 and the sidebar ⌃⌘S. Every command is here, so it can be
+// mailboxes ⌘1–3 and the sidebar ⌃⌘S. Text size has Safari's: Actual Size
+// ⌘0, Make Text Bigger ⌘+ (and ⌘=), Make Text Smaller ⌘−, so the main
+// window is ⌥⌘0. ⌘↩ also sends from the reply box (ThreadViewController). Every command is here, so it can be
 // rebound in System Settings › Keyboard › Keyboard Shortcuts. Actions go
 // down the responder chain (nil target).
 import AppKit
@@ -19,6 +21,9 @@ import AppKit
     func closeThread(_ sender: Any?)
     func copyThreadID(_ sender: Any?)
     func revealThreadInFinder(_ sender: Any?)
+    func increaseTextSize(_ sender: Any?)
+    func decreaseTextSize(_ sender: Any?)
+    func resetTextSize(_ sender: Any?)
 }
 
 enum MainMenu {
@@ -149,6 +154,15 @@ enum MainMenu {
         let m = NSMenu(title: "View")
         m.addItem(item("Show Sidebar", #selector(NSSplitViewController.toggleSidebar(_:)), "s", [.command, .control]))
         m.addItem(.separator())
+        m.addItem(item("Actual Size", #selector(MailActions.resetTextSize(_:)), "0"))
+        m.addItem(item("Make Text Bigger", #selector(MailActions.increaseTextSize(_:)), "+"))
+        // ⌘= without Shift, as in Safari: a hidden twin that keeps its shortcut.
+        let bigger = item("Make Text Bigger", #selector(MailActions.increaseTextSize(_:)), "=")
+        bigger.isHidden = true
+        bigger.allowsKeyEquivalentWhenHidden = true
+        m.addItem(bigger)
+        m.addItem(item("Make Text Smaller", #selector(MailActions.decreaseTextSize(_:)), "-"))
+        m.addItem(.separator())
         m.addItem(item("Inbox", #selector(MailActions.showInbox(_:)), "1"))
         m.addItem(item("Undelivered", #selector(MailActions.showUndelivered(_:)), "2"))
         m.addItem(item("All Mail", #selector(MailActions.showAllMail(_:)), "3"))
@@ -180,7 +194,7 @@ enum MainMenu {
         m.addItem(item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"))
         m.addItem(item("Zoom", #selector(NSWindow.performZoom(_:))))
         m.addItem(.separator())
-        m.addItem(item("Agent Mail", #selector(MailActions.showMainWindow(_:)), "0"))
+        m.addItem(item("Agent Mail", #selector(MailActions.showMainWindow(_:)), "0", [.command, .option]))
         m.addItem(.separator())
         m.addItem(item("Bring All to Front", #selector(NSApplication.arrangeInFront(_:))))
         return m

@@ -173,13 +173,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MailActions, NSMenuIte
     @objc func showUndelivered(_ sender: Any?) { open(mailbox: .undelivered) }
     @objc func showAllMail(_ sender: Any?) { open(mailbox: .allMail) }
 
-    // Thread commands reach the app delegate only when the main window
-    // isn't key; they are disabled then.
+    // Thread and text size commands reach the app delegate only when the
+    // main window isn't key; they are disabled then.
     @objc func replyToThread(_ sender: Any?) {}
     @objc func sendReply(_ sender: Any?) {}
     @objc func closeThread(_ sender: Any?) {}
     @objc func copyThreadID(_ sender: Any?) {}
     @objc func revealThreadInFinder(_ sender: Any?) {}
+    @objc func increaseTextSize(_ sender: Any?) {}
+    @objc func decreaseTextSize(_ sender: Any?) {}
+    @objc func resetTextSize(_ sender: Any?) {}
 
     /// The docs: the README of the agent-mail checkout the CLI runs from,
     /// else its agent-mail skill, which documents every command.
@@ -199,7 +202,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MailActions, NSMenuIte
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
         case #selector(replyToThread(_:)), #selector(sendReply(_:)), #selector(closeThread(_:)),
-             #selector(copyThreadID(_:)), #selector(revealThreadInFinder(_:)):
+             #selector(copyThreadID(_:)), #selector(revealThreadInFinder(_:)),
+             #selector(increaseTextSize(_:)), #selector(decreaseTextSize(_:)), #selector(resetTextSize(_:)):
             false
         default:
             true

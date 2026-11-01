@@ -33,6 +33,34 @@ import Testing
         }
     }
 
+    @Test func textZoomIsKeptWithinItsLevels() {
+        withSettings { s in
+            #expect(s.textZoom == 1)
+            s.textZoom = 1.5
+            #expect(s.textZoom == 1.5)
+            s.textZoom = 10
+            #expect(s.textZoom == 3)
+            s.textZoom = 0
+            #expect(s.textZoom == 0.5)
+        }
+    }
+
+    @Test func listRowsShowTheirStateAsIcons() {
+        func state(_ t: ThreadSummary) -> ThreadCellView.RowState? { ThreadCellView.RowState.of(t, me: "user") }
+        let mine = ThreadSummary(id: "a", subject: "s", owner: "user", listener: "user")
+        #expect(state(mine)?.symbol == "arrowshape.turn.up.left.fill")
+        #expect(state(mine)?.label == "Your turn")
+        let lost = ThreadSummary(id: "b", subject: "s", owner: "docs", listener: "none")
+        #expect(state(lost)?.symbol == "exclamationmark.circle")
+        #expect(state(lost)?.detail == "Nobody is listening for docs")
+        let done = ThreadSummary(id: "c", subject: "s", owner: "infra", status: "done")
+        #expect(state(done)?.symbol == "checkmark.circle")
+        let duty = ThreadSummary(id: "d", subject: "s", owner: "website", listener: "on-duty")
+        #expect(state(duty)?.symbol == "circle.fill")
+        #expect(state(duty)?.color == .systemGreen)
+        #expect(state(ThreadSummary(id: "e", subject: "s", owner: "infra", listener: nil)) == nil)
+    }
+
     @Test func storeLocationPrefersTheEnvironment() {
         withSettings { s in
             s.storePath = "/tmp/from-settings"

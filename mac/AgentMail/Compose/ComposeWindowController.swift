@@ -1,6 +1,7 @@
 // New Message (⌘N): a separate window, as in Mail, with To (a combo box of
 // known agents), Subject (optional: the CLI uses the first line) and a
-// plain-text body. ⇧⌘D sends; the window closes once the CLI succeeded.
+// plain-text body. ⌘↩ or ⇧⌘D sends; the window closes once the CLI
+// succeeded.
 import AgentMailKit
 import AppKit
 
@@ -55,13 +56,14 @@ final class ComposeWindowController: NSWindowController, NSWindowDelegate, NSMen
         let (scroll, text) = PlainTextEditor.make(accessibilityLabel: "Message")
         bodyView = text
         bodyView.delegate = self
+        text.onCommandReturn = { [weak self] in self?.sendReply(nil) }
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.borderType = .lineBorder
 
         sendButton.target = self
         sendButton.action = #selector(sendReply(_:))
         sendButton.bezelStyle = .push
-        sendButton.toolTip = "Send (⇧⌘D)"
+        sendButton.toolTip = "Send (⌘↩ or ⇧⌘D)"
         sendButton.translatesAutoresizingMaskIntoConstraints = false
         let hint = NSTextField.label("Markdown. The recipient sees it in its next session, or now if it’s on duty.",
                                      font: .systemFont(ofSize: NSFont.smallSystemFontSize), color: .secondaryLabelColor)

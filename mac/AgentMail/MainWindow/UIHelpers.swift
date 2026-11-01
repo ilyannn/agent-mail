@@ -1,14 +1,14 @@
 // Small AppKit pieces shared by the windows: the plain-text editor used for
-// replies and new messages, a count/state badge, and label shorthands.
+// replies and new messages, label shorthands and the dot image.
 import AppKit
 
 enum PlainTextEditor {
     /// An NSTextView for Markdown bodies: plain text, undo and spelling on,
     /// smart quotes and dashes off (curly quotes break code; Edit ›
     /// Substitutions still turns them on), and the find bar.
-    static func make(accessibilityLabel: String) -> (NSScrollView, NSTextView) {
-        let scroll = NSTextView.scrollableTextView()
-        let tv = scroll.documentView as! NSTextView
+    static func make(accessibilityLabel: String) -> (NSScrollView, EditorTextView) {
+        let scroll = EditorTextView.scrollableTextView()
+        let tv = scroll.documentView as! EditorTextView
         tv.isRichText = false
         tv.importsGraphics = false
         tv.allowsUndo = true
@@ -29,50 +29,6 @@ enum PlainTextEditor {
     }
 }
 
-/// A rounded, tinted label: "Undelivered", "Your turn", "Closed".
-final class BadgeView: NSView {
-    private let label = NSTextField(labelWithString: "")
-    var color: NSColor = .secondaryLabelColor {
-        didSet {
-            label.textColor = color
-            needsDisplay = true
-        }
-    }
-    var text: String = "" {
-        didSet {
-            label.stringValue = text
-            isHidden = text.isEmpty
-        }
-    }
-
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        wantsLayer = true
-        layer?.cornerRadius = 4
-        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize - 1, weight: .semibold)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.setContentCompressionResistancePriority(.required, for: .horizontal)
-        addSubview(label)
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 5),
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -5),
-            label.topAnchor.constraint(equalTo: topAnchor, constant: 1),
-            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -1),
-        ])
-        setContentCompressionResistancePriority(.required, for: .horizontal)
-        setContentHuggingPriority(.required, for: .horizontal)
-    }
-
-    required init?(coder: NSCoder) { fatalError("not used") }
-
-    override var wantsUpdateLayer: Bool { true }
-
-    override func updateLayer() {
-        // Resolved here so the tint follows light and dark appearance.
-        layer?.backgroundColor = color.withAlphaComponent(0.16).cgColor
-    }
-}
-
 extension NSTextField {
     static func label(_ text: String = "", font: NSFont = .systemFont(ofSize: NSFont.systemFontSize),
                       color: NSColor = .labelColor) -> NSTextField {
@@ -90,6 +46,29 @@ extension NSTextField {
         l.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         l.translatesAutoresizingMaskIntoConstraints = false
         return l
+    }
+}
+
+/// The editor's text view: ⌘↩ while it has focus runs `onCommandReturn`
+/// (Send). It comes as a key equivalent, before the text system sees it.
+final class EditorTextView: NSTextView {
+    var onCommandReturn: (() -> Void)?
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if let onCommandReturn, event.isCommandReturn, window?.firstResponder === self {
+            onCommandReturn()
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
+extension NSEvent {
+    /// ⌘↩ (Return or Enter with Command alone), which sends from the reply
+    /// box and the compose window.
+    var isCommandReturn: Bool {
+        type == .keyDown && (keyCode == 36 || keyCode == 76)
+            && modifierFlags.intersection([.command, .shift, .option, .control]) == .command
     }
 }
 

@@ -1,63 +1,207 @@
 /* The thread view's stylesheet, inlined into each rendered thread (the CSP
-   allows inline styles only). System fonts and colours, light and dark. */
+   allows inline styles only). The system font at 17px on a measure of
+   about 75 characters; type scale, block spacing, code, tables and quotes
+   follow GitHub's Markdown CSS (sindresorhus/github-markdown-css), with the
+   looser line height of Typora's GitHub theme and MacDown's GitHub2 style.
+   System colours (WebKit's -apple-system-* keywords; the app appends
+   --accent and --link, which WebKit can't know), light and dark. View ›
+   Make Text Bigger/Smaller is a page zoom on top of these sizes. */
 :root {
   color-scheme: light dark;
-  --accent: AccentColor;
-  --rule: color-mix(in srgb, CanvasText 12%, transparent);
-  --muted: color-mix(in srgb, CanvasText 55%, transparent);
-  --code-bg: color-mix(in srgb, CanvasText 6%, transparent);
-  --mine-bg: color-mix(in srgb, AccentColor 7%, transparent);
+  --text: -apple-system-label;
+  --muted: -apple-system-secondary-label;
+  --faint: -apple-system-tertiary-label;
+  --rule: -apple-system-separator;
+  --rule-strong: -apple-system-container-border;
+  --card: color-mix(in srgb, CanvasText 2%, Canvas);
+  --card-mine: color-mix(in srgb, var(--accent, -apple-system-control-accent) 7%, Canvas);
+  --code-bg: color-mix(in srgb, CanvasText 6%, Canvas);
+  --stripe: color-mix(in srgb, CanvasText 3.5%, Canvas);
+  --table-rule: color-mix(in srgb, CanvasText 16%, Canvas);
+  --button: Canvas;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
 }
+@media (prefers-color-scheme: dark) {
+  :root {
+    --rule: color-mix(in srgb, CanvasText 14%, Canvas);
+    --card: color-mix(in srgb, CanvasText 5%, Canvas);
+    --card-mine: color-mix(in srgb, var(--accent, -apple-system-control-accent) 10%, Canvas);
+    --code-bg: color-mix(in srgb, CanvasText 10%, Canvas);
+    --stripe: color-mix(in srgb, CanvasText 4%, Canvas);
+    --table-rule: color-mix(in srgb, CanvasText 22%, Canvas);
+    --button: color-mix(in srgb, CanvasText 8%, Canvas);
+  }
+}
+
 html { background: Canvas; }
 body {
-  font: -apple-system-body;
-  color: CanvasText;
-  background: Canvas;
   margin: 0;
-  padding: 18px 22px 32px;
-  line-height: 1.45;
-  word-wrap: break-word;
+  font-family: -apple-system, system-ui, sans-serif;
+  font-size: 17px;
+  line-height: 1.6;
+  color: CanvasText;
+  color: var(--text);
+  background: Canvas;
+  overflow-wrap: break-word;
   -webkit-text-size-adjust: none;
+  text-rendering: optimizeLegibility;
 }
-header.thread h1 { font: -apple-system-title2; font-weight: 600; margin: 0 0 4px; }
-header.thread .meta { color: var(--muted); font: -apple-system-footnote; margin: 0 0 16px; }
+/* 38em of text (about 75 characters) plus the cards' padding. */
+main { max-width: calc(38em + 50px); margin: 0 auto; padding: 22px 24px 48px; }
 
-article.msg {
-  border-top: 1px solid var(--rule);
-  padding: 12px 0 4px;
-  scroll-margin-top: 8px;
+/* The thread: subject, state, Reply. */
+header.thread { margin: 0 0 20px; }
+header.thread h1 { font-size: 1.6em; line-height: 1.2; font-weight: 700; letter-spacing: -0.01em; margin: 0 0 8px; }
+header.thread .meta {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px 14px;
+  color: var(--muted); font-size: 0.82em; margin: 0;
 }
-article.msg.mine { background: var(--mine-bg); border-radius: 8px; padding: 12px 12px 4px; border-top-color: transparent; margin: 6px -12px; }
-article.msg > header { font: -apple-system-subheadline; color: var(--muted); margin-bottom: 6px; }
-article.msg > header .from { color: CanvasText; font-weight: 600; }
-article.msg > header time { margin-left: 6px; }
+
+/* One card per message. */
+article.msg {
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+  padding: 12px 24px 20px;
+  margin: 0 0 16px;
+  scroll-margin-top: 12px;
+}
+article.msg.mine { background: var(--card-mine); }
+article.msg.unread { border-color: color-mix(in srgb, var(--accent) 45%, Canvas); }
+article.msg > header {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px;
+  font-size: 0.82em; line-height: 1.4; color: var(--muted);
+  padding-bottom: 10px; margin: 0 0 16px;
+  border-bottom: 1px solid var(--rule);
+}
+article.msg > header .who { color: var(--text); font-size: 1.1em; }
+article.msg > header .from { font-weight: 600; }
+article.msg > header .arrow { color: var(--faint); }
+article.msg > header .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
 article.msg > header .status {
-  margin-left: 6px; padding: 0 5px; border-radius: 4px;
-  font: -apple-system-caption1; font-weight: 600;
+  padding: 0 8px; border-radius: 999px; font-weight: 600; font-size: 0.92em; background: var(--code-bg);
+}
+article.msg > header .actions { margin-left: auto; display: flex; gap: 6px; }
+a.button {
+  display: inline-block;
+  padding: 1px 11px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 999px;
+  background: var(--button);
+  color: var(--text);
+  font-size: 0.95em; font-weight: 500; line-height: 1.6;
+  text-decoration: none;
+  -webkit-user-select: none; user-select: none;
+}
+a.button:hover { background: var(--code-bg); text-decoration: none; }
+a.button:active { background: var(--rule); }
+
+/* Markdown. */
+.body > :first-child { margin-top: 0 !important; }
+.body > :last-child { margin-bottom: 0 !important; }
+p, blockquote, ul, ol, dl, table, pre { margin: 0 0 1em; }
+h1, h2, h3, h4, h5, h6 { margin: 1.5em 0 0.6em; font-weight: 600; line-height: 1.25; }
+.body h1 { font-size: 1.6em; padding-bottom: 0.25em; border-bottom: 1px solid var(--rule); }
+.body h2 { font-size: 1.35em; padding-bottom: 0.25em; border-bottom: 1px solid var(--rule); }
+.body h3 { font-size: 1.15em; }
+.body h4 { font-size: 1em; }
+.body h5 { font-size: 0.9em; }
+.body h6 { font-size: 0.85em; color: var(--muted); }
+strong { font-weight: 600; }
+a { color: var(--link, LinkText); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.local-path { border-bottom: 1px dotted var(--faint); }
+
+ul, ol { padding-left: 1.75em; }
+li + li { margin-top: 0.3em; }
+li > p { margin: 0; }
+li > p + p, li > p + pre, li > p + blockquote { margin-top: 0.6em; }
+li > ul, li > ol { margin: 0.3em 0 0; }
+li.task { list-style: none; }
+li.task .box { display: inline-block; width: 1.4em; margin-left: -1.4em; }
+li.task > p:first-of-type { display: inline; }
+
+blockquote {
+  margin-left: 0; margin-right: 0;
+  padding: 0 1em;
+  color: var(--muted);
+  border-left: 0.25em solid var(--rule-strong);
+}
+blockquote > :last-child { margin-bottom: 0; }
+
+code, pre { font-family: var(--mono); }
+code {
+  font-size: 0.85em;
+  padding: 0.15em 0.4em;
+  border-radius: 5px;
   background: var(--code-bg);
 }
-.attachments { font: -apple-system-footnote; color: var(--muted); margin: 0 0 6px; }
-.attachments::before { content: "📎 "; }
-
-.body > :first-child { margin-top: 0; }
-.body > :last-child { margin-bottom: 8px; }
-a { color: LinkText; }
-code, pre { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.92em; }
-code { background: var(--code-bg); padding: 0.1em 0.3em; border-radius: 4px; }
-pre { background: var(--code-bg); padding: 10px 12px; border-radius: 6px; overflow-x: auto; white-space: pre; }
-pre code { background: none; padding: 0; }
+pre {
+  font-size: 0.84em;
+  line-height: 1.5;
+  padding: 14px 16px;
+  border-radius: 8px;
+  background: var(--code-bg);
+  overflow-x: auto;
+  white-space: pre;
+  tab-size: 4;
+}
+pre code { font-size: 1em; padding: 0; border-radius: 0; background: none; }
 pre.raw-html { white-space: pre-wrap; color: var(--muted); }
-blockquote { margin: 0.6em 0; padding: 0 0 0 12px; border-left: 3px solid var(--rule); color: var(--muted); }
-table { border-collapse: collapse; margin: 0.6em 0; }
-th, td { border: 1px solid var(--rule); padding: 4px 8px; text-align: left; }
-th { background: var(--code-bg); }
+
+table {
+  display: block; width: max-content; max-width: 100%; overflow: auto;
+  border-collapse: collapse; border-spacing: 0;
+  font-size: 0.94em; font-variant-numeric: tabular-nums;
+}
+th, td { padding: 6px 13px; border: 1px solid var(--table-rule); text-align: left; }
+th { font-weight: 600; background: var(--code-bg); }
+tbody tr:nth-child(2n) { background: var(--stripe); }
 th.center, td.center { text-align: center; }
 th.right, td.right { text-align: right; }
-hr { border: none; border-top: 1px solid var(--rule); }
-li.task { list-style: none; margin-left: -1.2em; }
-li.task .box { display: inline-block; width: 1.2em; }
-h1, h2, h3, h4, h5, h6 { line-height: 1.25; margin: 1em 0 0.4em; }
-.body h1 { font-size: 1.3em; }
-.body h2 { font-size: 1.15em; }
-.body h3 { font-size: 1.05em; }
+
+hr { height: 1px; border: 0; background: var(--rule-strong); margin: 1.6em 0; }
+
+img { max-width: 100%; }
+a.inline-image { display: inline-block; line-height: 0; vertical-align: top; }
+a.inline-image img { max-height: 28em; border-radius: 6px; border: 1px solid var(--rule); }
 a.image { font-style: italic; }
+
+/* A long read message: first and last lines, the middle behind a
+   <details> (no JavaScript involved). */
+details.fold { margin: 0 0 1em; }
+details.fold > summary {
+  display: flex; align-items: center; gap: 12px;
+  list-style: none; cursor: pointer;
+  color: var(--link, LinkText); font-size: 0.85em; font-weight: 500;
+  -webkit-user-select: none; user-select: none;
+}
+details.fold > summary::-webkit-details-marker { display: none; }
+details.fold > summary::before,
+details.fold > summary::after { content: ""; flex: 1; border-top: 1px dashed var(--rule-strong); }
+details.fold > summary .less,
+details.fold[open] > summary .more { display: none; }
+details.fold[open] > summary .less { display: inline; }
+details.fold[open] > summary { margin-bottom: 1em; }
+
+/* Attachments: the list, image thumbnails, Markdown files. */
+footer.attachments { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--rule); }
+ul.files {
+  list-style: none; padding: 0; margin: 0;
+  display: flex; flex-wrap: wrap; gap: 4px 18px;
+  font-size: 0.85em;
+}
+ul.files li + li { margin-top: 0; }
+ul.files a.file::before { content: "📎\00a0"; }
+ul.files a.reveal { color: var(--muted); font-size: 0.92em; margin-left: 4px; }
+.thumbs { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 10px; margin-top: 12px; }
+a.thumb {
+  display: block; line-height: 0;
+  border: 1px solid var(--rule); border-radius: 8px; overflow: hidden;
+  background: var(--code-bg);
+}
+a.thumb img { display: block; max-width: 240px; max-height: 180px; object-fit: contain; }
+details.attachment-doc { margin-top: 12px; border: 1px solid var(--rule); border-radius: 8px; background: Canvas; }
+details.attachment-doc > summary { padding: 6px 14px; cursor: pointer; font-size: 0.85em; font-weight: 600; }
+details.attachment-doc[open] > summary { border-bottom: 1px solid var(--rule); }
+details.attachment-doc > .body { padding: 12px 18px 16px; }

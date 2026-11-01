@@ -1,6 +1,7 @@
 // Notifications: whether they are allowed and in which style (inline Reply
-// needs Alerts), a way to ask or to open System Settings, and whether mail
-// between agents notifies too.
+// needs Persistent, UNAlertStyle.alert, which older macOS calls Alerts;
+// Temporary is .banner, once Banners), a way to ask or to open System
+// Settings, and whether mail between agents notifies too.
 import AppKit
 import Observation
 import UserNotifications
@@ -86,7 +87,8 @@ final class NotificationSettingsViewController: NSViewController {
     }
 
     private func update() {
-        let replyHint = "To reply from a notification, choose the Alerts style for Agent Mail in System Settings › Notifications. Banners disappear before you can type."
+        let replyHint = "To reply from a notification, choose the Persistent style (Alerts on older macOS) for Agent Mail "
+            + "in System Settings › Notifications. Temporary notifications disappear before you can type."
         switch notifications.authorization {
         case .notDetermined:
             statusLabel.stringValue = "Not requested yet"
@@ -100,13 +102,13 @@ final class NotificationSettingsViewController: NSViewController {
             askButton.isHidden = true
             switch notifications.alertStyle {
             case .alert:
-                statusLabel.stringValue = "On, as alerts"
-                hint.stringValue = "Alerts stay until you act on them, so you can reply or close the thread from the notification."
+                statusLabel.stringValue = "On, Persistent (Alerts on older macOS)"
+                hint.stringValue = "Persistent notifications stay until you act on them, so you can reply or close the thread from the notification."
             case .banner:
-                statusLabel.stringValue = "On, as banners"
+                statusLabel.stringValue = "On, Temporary (Banners on older macOS)"
                 hint.stringValue = replyHint
             default:
-                statusLabel.stringValue = "On, without banners or alerts"
+                statusLabel.stringValue = "On, in Notification Center only"
                 hint.stringValue = "Notifications go to Notification Center only. " + replyHint
             }
         }

@@ -1,7 +1,7 @@
 // The main window: sidebar, thread list and thread view in a split view
 // controller, a unified toolbar whose sections track the split dividers, and
-// the thread commands (Reply, Send, Close Thread, mailboxes) for the menus
-// and toolbar. Closing it leaves the app running in the menu bar.
+// the thread commands (Reply, Send, Close Thread, mailboxes, text size) for
+// the menus and toolbar. Closing it leaves the app running in the menu bar.
 import AgentMailKit
 import AppKit
 import Observation
@@ -154,6 +154,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     @objc func replyToThread(_ sender: Any?) { thread.focusReply() }
     @objc func sendReply(_ sender: Any?) { thread.sendReply() }
     @objc func closeThread(_ sender: Any?) { thread.closeThread() }
+    @objc func increaseTextSize(_ sender: Any?) { thread.makeTextBigger() }
+    @objc func decreaseTextSize(_ sender: Any?) { thread.makeTextSmaller() }
+    @objc func resetTextSize(_ sender: Any?) { thread.makeTextActualSize() }
 
     @objc func copyThreadID(_ sender: Any?) {
         guard let id = store.selectedThreadID else { return }
@@ -174,6 +177,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             thread.canSendReply
         case #selector(closeThread(_:)):
             thread.canCloseThread
+        case #selector(increaseTextSize(_:)):
+            thread.textZoom < TextZoom.levels.last!
+        case #selector(decreaseTextSize(_:)):
+            thread.textZoom > TextZoom.levels.first!
+        case #selector(resetTextSize(_:)):
+            thread.textZoom != TextZoom.actualSize
         default:
             nil
         }

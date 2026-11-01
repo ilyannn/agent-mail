@@ -7,7 +7,8 @@
 	     regular activation policy (Settings › General › Dock icon). -->
 	<key>LSUIElement</key>
 	<true/>
-	<!-- Ask for the Alerts style, which inline Reply needs. -->
+	<!-- Ask for the Persistent style (Alerts on older macOS), which inline
+	     Reply needs. -->
 	<key>NSUserNotificationAlertStyle</key>
 	<string>alert</string>
 	<key>NSSupportsAutomaticTermination</key>

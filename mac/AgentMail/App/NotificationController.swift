@@ -102,7 +102,7 @@ final class NotificationController: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
-    /// The thread was read, replied to or closed: its banners are stale.
+    /// The thread was read, replied to or closed: its notifications are stale.
     func removeDelivered(for thread: ThreadDetail) {
         center.removeDeliveredNotifications(withIdentifiers: thread.msgs.map(\.file))
     }
@@ -171,18 +171,22 @@ enum FirstRun {
         alert.addButton(withTitle: "Not Now")
         guard await run(alert, over: window) == .alertFirstButtonReturn else { return }
         guard await notifications.requestAuthorization() else { return }
+        // UNAlertStyle.alert is the Persistent style (Alerts before macOS 26).
         if notifications.alertStyle != .alert {
             await offerAlertStyle(over: window, notifications: notifications)
         }
     }
 
-    /// Inline Reply needs the Alerts style; banners vanish before you can type.
+    /// Inline Reply needs the Persistent style (UNAlertStyle.alert, called
+    /// Alerts on older macOS); Temporary ones (Banners) vanish before you can
+    /// type.
     static func offerAlertStyle(over window: NSWindow?, notifications: NotificationController) async {
         let alert = NSAlert()
-        alert.messageText = "Choose the Alerts style to reply from notifications"
+        alert.messageText = "Choose the Persistent style to reply from notifications"
         alert.informativeText = """
-            Banners disappear before you can type a reply. In System Settings › Notifications › \
-            Agent Mail, set the alert style to Alerts so notifications stay until you act on them.
+            Temporary notifications (Banners on older macOS) disappear before you can type a reply. \
+            In System Settings › Notifications › Agent Mail, set the alert style to Persistent \
+            (Alerts on older macOS) so notifications stay until you act on them.
             """
         alert.addButton(withTitle: "Open System Settings")
         alert.addButton(withTitle: "Later")

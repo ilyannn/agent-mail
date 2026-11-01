@@ -29,6 +29,7 @@ final class AppSettings {
             Key.dockPolicy: DockIconPolicy.whileWindowOpen.rawValue,
             Key.mainWindowWasOpen: true,
             Key.notifyAgentTraffic: false,
+            Key.textZoom: TextZoom.actualSize,
         ])
     }
 
@@ -42,6 +43,7 @@ final class AppSettings {
         static let skipFirstRun = "skipFirstRun"
         static let settingsPane = "settingsPane"
         static let mailbox = "mailbox"
+        static let textZoom = "textZoom"
     }
 
     /// Path of the agent-mail executable; empty means "find it".
@@ -76,6 +78,12 @@ final class AppSettings {
     var firstRunDone: Bool {
         get { defaults.bool(forKey: Key.firstRunDone) || defaults.bool(forKey: Key.skipFirstRun) }
         set { defaults.set(newValue, forKey: Key.firstRunDone) }
+    }
+
+    /// The thread view's text size as a page zoom factor (View menu, pinch).
+    var textZoom: Double {
+        get { TextZoom.clamp(defaults.double(forKey: Key.textZoom)) }
+        set { defaults.set(TextZoom.clamp(newValue), forKey: Key.textZoom) }
     }
 
     var settingsPane: Int {

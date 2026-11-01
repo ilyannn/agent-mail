@@ -7,6 +7,10 @@
 ;;   bb scripts/debug.bb select 2026-10-31-deploy-the-new-site
 ;;   bb scripts/debug.bb key r --mods cmd      (also: tab, return, space, esc)
 ;;   bb scripts/debug.bb snapshot /tmp/window.png [--window General]
+;;   bb scripts/debug.bb js "document.title"      (in the thread's web view)
+;;   bb scripts/debug.bb clickweb "#m1 a.button"  (a real click on an element)
+;;   bb scripts/debug.bb recordopens              (log opens, launch nothing)
+;;   bb scripts/debug.bb appearance dark          (also: light, system)
 (ns debug
   (:require [babashka.fs :as fs]
             [babashka.process :as p]

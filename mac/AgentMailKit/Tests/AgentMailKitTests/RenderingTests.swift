@@ -3,7 +3,7 @@ import Testing
 @testable import AgentMailKit
 
 @Suite struct MarkdownTests {
-    let files = URL(filePath: "/store/threads/t1/files")
+    let thread = "2026-10-31-t1"
 
     @Test func rawHTMLIsShownAsText() {
         let html = MarkdownHTML.render("Hi <script>alert(1)</script> there\n\n<div onclick=\"x()\">block</div>\n")
@@ -31,27 +31,44 @@ import Testing
     @Test func linksAreFiltered() {
         let html = MarkdownHTML.render("""
             [ok](https://example.com/a?b=1&c="2") [bad](javascript:alert(1)) [data](data:text/html,x)
-            [att](files/report.txt) [abs](/tmp/x.log) [mail](mailto:a@example.com) <https://example.org>
-            """, filesDirectory: files)
+            [att](files/report%20v2.txt) [abs](/tmp/x.log) [file](file:///etc/hosts) [mail](mailto:a@example.com)
+            <https://example.org>
+            """, thread: thread)
         #expect(html.contains("<a href=\"https://example.com/a?b=1&amp;c=%222%22\">ok</a>"))
         #expect(!html.contains("javascript:"))
         #expect(!html.contains("data:text"))
         #expect(html.contains(">bad<") || html.contains(" bad "))
-        #expect(html.contains("<a href=\"file:///store/threads/t1/files/report.txt\">att</a>"))
-        #expect(html.contains("<a href=\"file:///tmp/x.log\">abs</a>"))
+        #expect(html.contains("<a href=\"agent-mail-file:///2026-10-31-t1/report%20v2.txt\">att</a>"))
+        // Local paths are text with a tooltip: the view opens no file:// links.
+        #expect(html.contains("<span class=\"local-path\" title=\"/tmp/x.log\">abs</span>"))
+        #expect(html.contains("<span class=\"local-path\" title=\"file:///etc/hosts\">file</span>"))
+        #expect(!html.contains("href=\"file:"))
         #expect(html.contains("<a href=\"mailto:a@example.com\">mail</a>"))
         #expect(html.contains("<a href=\"https://example.org\">https://example.org</a>"))
     }
 
     @Test func attachmentsCannotEscapeTheirDirectory() {
-        #expect(MarkdownHTML.safeDestination("files/../../etc/passwd", filesDirectory: files) == nil)
-        #expect(MarkdownHTML.safeDestination("files/x", filesDirectory: nil) == nil)
+        #expect(MarkdownHTML.safeDestination("files/../../etc/passwd", thread: thread) == nil)
+        #expect(MarkdownHTML.safeDestination("files/..%2F..%2Fetc%2Fpasswd", thread: thread) == nil)
+        #expect(MarkdownHTML.safeDestination("files/sub/x.png", thread: thread) == nil)
+        #expect(MarkdownHTML.safeDestination("files/x", thread: nil) == nil)
     }
 
-    @Test func imagesBecomeLinks() {
-        let html = MarkdownHTML.render("![chart](files/chart.png) ![t](https://t.example/p.gif)", filesDirectory: files)
-        #expect(!html.contains("<img"))
-        #expect(html.contains("<a class=\"image\" href=\"file:///store/threads/t1/files/chart.png\">[chart]</a>"))
+    @Test func attachmentImagesAreShownInline() {
+        let r = MarkdownHTML.renderBody("![chart](files/chart.png) ![t](https://t.example/p.gif) ![x](files/notes.md)",
+                                        thread: thread)
+        #expect(r.html.contains("<a class=\"inline-image\" href=\"agent-mail-file:///2026-10-31-t1/chart.png\" "
+            + "title=\"chart.png\"><img src=\"agent-mail-file:///2026-10-31-t1/chart.png\" alt=\"chart\"></a>"))
+        #expect(r.inlineImages == ["chart.png"])
+        // Remote images stay links (nothing loads from the network), and a
+        // non-image attachment is a link too.
+        #expect(r.html.contains("<a class=\"image\" href=\"https://t.example/p.gif\">[t]</a>"))
+        #expect(r.html.contains("<a class=\"image\" href=\"agent-mail-file:///2026-10-31-t1/notes.md\">[x]</a>"))
+        #expect(r.html.components(separatedBy: "<img").count == 2)
+        // Without a thread there is nothing to load from.
+        #expect(!MarkdownHTML.render("![c](files/c.png)").contains("<img"))
+        // Alt text is escaped.
+        #expect(MarkdownHTML.render("![a\"b<c](files/c.png)", thread: thread).contains("alt=\"a&quot;b&lt;c\""))
     }
 
     @Test func gfmTablesAndTasks() {
@@ -81,11 +98,68 @@ import Testing
     }
 }
 
+@Suite struct FoldingTests {
+    static let paragraphs = (1...30).map { "Paragraph \($0)." }.joined(separator: "\n\n")
+
+    @Test func longReadMessagesFoldUnlessUnreadOrNewest() {
+        let long = Self.paragraphs
+        #expect(MessageFolding.isLong(long))
+        #expect(MessageFolding.startsFolded(body: long, isUnread: false, isNewest: false))
+        #expect(!MessageFolding.startsFolded(body: long, isUnread: true, isNewest: false))
+        #expect(!MessageFolding.startsFolded(body: long, isUnread: false, isNewest: true))
+        #expect(!MessageFolding.startsFolded(body: "short", isUnread: false, isNewest: false))
+        // Over the character limit on few lines is long too.
+        #expect(MessageFolding.isLong(String(repeating: "x", count: 3001)))
+        #expect(!MessageFolding.isLong(String(repeating: "x\n", count: 39)))
+    }
+
+    @Test func foldKeepsTheStartAndTheEnd() throws {
+        let f = try #require(MarkdownHTML.renderFolded(Self.paragraphs, thread: nil))
+        #expect(f.head.hasPrefix("<p>Paragraph 1.</p>"))
+        #expect(f.head.contains("Paragraph 12.") && !f.head.contains("Paragraph 13."))
+        #expect(f.hidden.hasPrefix("<p>Paragraph 13.</p>"))
+        #expect(f.tail.hasSuffix("<p>Paragraph 30.</p>\n"))
+        #expect(f.tail.contains("Paragraph 25.") && !f.tail.contains("Paragraph 24."))
+        #expect(f.hiddenLines == 12)
+    }
+
+    @Test func foldSplitsListsAndCodeBlocksCleanly() throws {
+        let list = (1...40).map { "\($0). item" }.joined(separator: "\n")
+        let f = try #require(MarkdownHTML.renderFolded(list, thread: nil))
+        #expect(f.head.hasPrefix("<ol>\n<li>"))
+        #expect(f.head.hasSuffix("</ol>\n"))
+        #expect(f.hidden.hasPrefix("<ol start=\"13\">\n<li>"))
+        #expect(f.tail.hasPrefix("<ol start=\"35\">\n"))
+
+        let code = "Intro.\n\n```sh\n" + (1...50).map { "echo \($0)" }.joined(separator: "\n") + "\n```\n\nBye."
+        let c = try #require(MarkdownHTML.renderFolded(code, thread: nil))
+        #expect(c.head.hasPrefix("<p>Intro.</p>\n<pre><code class=\"language-sh\">echo 1\n"))
+        #expect(c.head.hasSuffix("</code></pre>\n"))
+        #expect(c.hidden.hasPrefix("<pre><code class=\"language-sh\">echo 12\n"))
+        #expect(c.tail.hasSuffix("echo 50\n</code></pre>\n<p>Bye.</p>\n"))
+    }
+
+    @Test func shortBodiesDontFold() {
+        #expect(MarkdownHTML.renderFolded("one\n\ntwo\n\nthree", thread: nil) == nil)
+    }
+
+    @Test func unreadFilesAreTheLastFromOthers() {
+        let th = ThreadDetail(id: "t", subject: "s", msgs: [
+            Message(file: "1.md", from: "infra", to: "user", date: nil, body: "a"),
+            Message(file: "2.md", from: "infra", to: "user", date: nil, body: "b"),
+            Message(file: "3.md", from: "user", to: "infra", date: nil, body: "c"),
+            Message(file: "4.md", from: "infra", to: "user", date: nil, body: "d"),
+        ])
+        #expect(th.unreadFiles(me: "user", count: 2) == ["2.md", "4.md"])
+        #expect(th.unreadFiles(me: "user", count: 0) == [])
+    }
+}
+
 @Suite struct ThreadDocumentTests {
     @Test func wholeThreadIsOneSafeDocument() throws {
         let th = try AgentMailJSON.decodeThread(Fixture.data("read"))
-        let html = ThreadDocument.html(thread: th, me: "user", css: "body{}", filesDirectory: nil) { _ in "today" }
-        #expect(html.contains("content=\"default-src 'none'; style-src 'unsafe-inline'; img-src data:\""))
+        let html = ThreadDocument.html(thread: th, me: "user", css: "body{}") { _ in "today" }
+        #expect(html.contains("content=\"default-src 'none'; style-src 'unsafe-inline'; img-src data: agent-mail-file:\""))
         #expect(html.contains("<meta name=\"color-scheme\" content=\"light dark\">"))
         #expect(!html.contains("<script"))
         #expect(html.contains("&lt;script&gt;"))
@@ -94,19 +168,173 @@ import Testing
         #expect(html.contains("id=\"m1\""))
         #expect(html.contains("waiting on you"))
         #expect(html.contains("<table>"))
+        #expect(html.contains("href=\"agent-mail-action:///reply/2026-10-31-deploy-the-new-site\""))
     }
 
-    @Test func myMessagesAreMarked() {
+    @Test func cardsHaveOpenAndReplyButtons() {
         let th = ThreadDetail(id: "t", subject: "S <x>", from: "user", owner: "infra", msgs: [
             Message(file: "a.md", from: "user", to: "infra", date: nil, body: "hi"),
-            Message(file: "b.md", from: "infra", to: "user", date: nil, status: "done",
-                    attachments: ["files/log.txt"], body: "done"),
+            Message(file: "b.md", from: "infra", to: "user", date: nil, status: "done", body: "done"),
         ])
-        let html = ThreadDocument.html(thread: th, me: "user", css: "", filesDirectory: URL(filePath: "/s/files")) { _ in "" }
+        let html = ThreadDocument.html(thread: th, me: "user", css: "") { _ in "" }
         #expect(html.contains("<h1>S &lt;x&gt;</h1>"))
         #expect(html.contains("class=\"msg mine\""))
         #expect(html.contains("<span class=\"status done\">closed</span>"))
-        #expect(html.contains("<a href=\"file:///s/files/log.txt\">log.txt</a>"))
+        #expect(html.contains("<a class=\"button\" href=\"agent-mail-action:///open/t/a.md\""))
+        #expect(html.contains("href=\"agent-mail-action:///reply/t/b.md\" title=\"Reply to infra\">Reply</a>"))
+        // My own message: Reply goes to whom I wrote.
+        #expect(html.contains("href=\"agent-mail-action:///reply/t/a.md\" title=\"Reply to infra\">Reply</a>"))
+    }
+
+    @Test func attachmentsAreListedShownAndRendered() {
+        let th = ThreadDetail(id: "t", subject: "s", msgs: [
+            Message(file: "a.md", from: "infra", to: "user", date: nil,
+                    attachments: ["files/shot.png", "files/inline.png", "files/notes.md", "files/log.txt"],
+                    body: "See ![the chart](files/inline.png)."),
+        ])
+        let html = ThreadDocument.html(thread: th, me: "user", css: "",
+                                       readAttachment: { $0 == "notes.md" ? "# Notes\n\n<b>x</b> [s](files/shot.png)" : nil }) { _ in "" }
+        #expect(html.contains("<a class=\"file\" href=\"agent-mail-file:///t/shot.png\" title=\"Open shot.png\">shot.png</a>"))
+        #expect(html.contains("<a class=\"reveal\" href=\"agent-mail-action:///reveal/t/log.txt\""))
+        // A thumbnail for the attached image, none for the one shown inline.
+        #expect(html.contains("<a class=\"thumb\" href=\"agent-mail-file:///t/shot.png\" title=\"shot.png\">"
+            + "<img src=\"agent-mail-file:///t/shot.png\" alt=\"shot.png\"></a>"))
+        #expect(!html.contains("class=\"thumb\" href=\"agent-mail-file:///t/inline.png\""))
+        #expect(html.contains("<img src=\"agent-mail-file:///t/inline.png\" alt=\"the chart\">"))
+        // The Markdown attachment, rendered and escaped, open on the newest message.
+        #expect(html.contains("<details class=\"attachment-doc\" open><summary>notes.md</summary>"))
+        #expect(html.contains("<h1>Notes</h1>"))
+        #expect(html.contains("&lt;b&gt;x&lt;/b&gt;"))
+        #expect(!html.contains("thumb\" href=\"agent-mail-file:///t/log.txt"))
+    }
+
+    @Test func longReadMessagesStartFolded() {
+        let long = FoldingTests.paragraphs
+        let th = ThreadDetail(id: "t", subject: "s", msgs: [
+            Message(file: "1.md", from: "infra", to: "user", date: nil, body: long),
+            Message(file: "2.md", from: "infra", to: "user", date: nil, body: long),
+            Message(file: "3.md", from: "infra", to: "user", date: nil, body: long),
+        ])
+        let html = ThreadDocument.html(thread: th, me: "user", css: "", expanded: ["2.md"]) { _ in "" }
+        #expect(html.contains("<article class=\"msg folded\" id=\"m1\">"))
+        #expect(html.contains("<article class=\"msg unread\" id=\"m2\">"))
+        #expect(html.contains("<article class=\"msg newest\" id=\"newest\">"))
+        #expect(html.components(separatedBy: "<details class=\"fold\">").count == 2)
+        #expect(html.contains("<summary><span class=\"more\">Show 12 more lines</span><span class=\"less\">Hide 12 lines</span></summary>"))
+    }
+}
+
+@Suite struct LinkTests {
+    let files = URL(filePath: "/store/threads/t1/files")
+
+    @Test func attachmentURLsMapIntoTheThreadsFiles() throws {
+        let url = try #require(AttachmentScheme.url(thread: "t1", name: "a b?#.png"))
+        #expect(url.absoluteString == "agent-mail-file:///t1/a%20b%3F%23.png")
+        #expect(AttachmentScheme.name(in: url, thread: "t1") == "a b?#.png")
+        #expect(AttachmentScheme.fileURL(for: url, thread: "t1", filesDirectory: files)?.path
+            == "/store/threads/t1/files/a b?#.png")
+    }
+
+    @Test func traversalAndOtherThreadsAreRejected() {
+        let bad = [
+            "agent-mail-file:///t1/../x",
+            "agent-mail-file:///t1/..%2F..%2Fsecret",
+            "agent-mail-file:///t1/%2E%2E",
+            "agent-mail-file:///t1/sub/x.png",
+            "agent-mail-file:///t1/",
+            "agent-mail-file:///t2/x.png",
+            "agent-mail-file://host/t1/x.png",
+            "agent-mail-file:///t1/x%00.png",
+            "file:///store/threads/t1/files/x.png",
+            "agent-mail-file:t1/x.png",
+        ]
+        for s in bad {
+            let url = URL(string: s)
+            #expect(url.flatMap { AttachmentScheme.fileURL(for: $0, thread: "t1", filesDirectory: files) } == nil, "\(s)")
+        }
+        #expect(AttachmentScheme.url(thread: "t1", name: "..") == nil)
+        #expect(AttachmentScheme.url(thread: "t1", name: "a/b") == nil)
+        #expect(AttachmentScheme.url(thread: "../t", name: "x") == nil)
+    }
+
+    @Test func symlinksOutOfTheDirectoryAreRejected() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "agent-mail-links-\(UUID().uuidString)")
+        let dir = root.appending(path: "files")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("secret".utf8).write(to: root.appending(path: "secret.png"))
+        try Data("ok".utf8).write(to: dir.appending(path: "ok.png"))
+        try FileManager.default.createSymbolicLink(at: dir.appending(path: "link.png"),
+                                                   withDestinationURL: root.appending(path: "secret.png"))
+        #expect(AttachmentScheme.file(named: "ok.png", in: dir) != nil)
+        #expect(AttachmentScheme.file(named: "link.png", in: dir) == nil)
+    }
+
+    @Test func kindsAndTypes() {
+        #expect(AttachmentScheme.isImage("a.PNG") && AttachmentScheme.isImage("b.heic") && AttachmentScheme.isImage("c.svg"))
+        #expect(!AttachmentScheme.isImage("notes.md") && !AttachmentScheme.isImage("png"))
+        #expect(AttachmentScheme.isMarkdown("notes.md"))
+        #expect(AttachmentScheme.mimeType(forName: "a.png") == "image/png")
+        #expect(AttachmentScheme.mimeType(forName: "a.svg") == "image/svg+xml")
+        #expect(AttachmentScheme.mimeType(forName: "noext") == "application/octet-stream")
+    }
+
+    @Test func linkPolicy() {
+        func c(_ s: String, click: Bool = true) -> ThreadLink {
+            LinkPolicy.classify(URL(string: s), isLinkClick: click, thread: "t1")
+        }
+        #expect(c("about:blank", click: false) == .loadDocument)
+        #expect(c("https://example.com/x", click: false) == .ignore)
+        #expect(c("https://example.com/x") == .openExternally(URL(string: "https://example.com/x")!))
+        #expect(c("http://example.com") == .openExternally(URL(string: "http://example.com")!))
+        #expect(c("mailto:a@example.com") == .openExternally(URL(string: "mailto:a@example.com")!))
+        #expect(c("agent-mail-file:///t1/a%20b.png") == .openAttachment("a b.png"))
+        #expect(c("agent-mail-file:///t2/a.png") == .ignore)
+        #expect(c("agent-mail-file:///t1/../a.png") == .ignore)
+        #expect(c("agent-mail-action:///open/t1/m.md") == .openMessage("m.md"))
+        #expect(c("agent-mail-action:///reply/t1/m.md") == .reply(toMessage: "m.md"))
+        #expect(c("agent-mail-action:///reply/t1") == .reply(toMessage: nil))
+        #expect(c("agent-mail-action:///reveal/t1/a.png") == .revealAttachment("a.png"))
+        #expect(c("agent-mail-action:///open/t1") == .ignore)
+        #expect(c("agent-mail-action:///delete/t1/m.md") == .ignore)
+        #expect(c("agent-mail-action:///open/t2/m.md") == .ignore)
+        #expect(c("agent-mail-action:///reveal/t1/..") == .ignore)
+        #expect(c("file:///etc/hosts") == .ignore)
+        #expect(c("javascript:alert(1)") == .ignore)
+        #expect(c("data:text/html,x") == .ignore)
+        #expect(c("x-apple.systempreferences:foo") == .ignore)
+        #expect(LinkPolicy.classify(URL(string: "agent-mail-file:///t1/a.png"), isLinkClick: true, thread: nil) == .ignore)
+        #expect(LinkPolicy.actionURL(.open, thread: "t1", item: "m.md")?.absoluteString == "agent-mail-action:///open/t1/m.md")
+    }
+
+    @Test func executablesAreNotOpened() throws {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "agent-mail-open-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let png = dir.appending(path: "a.png")
+        try Data().write(to: png)
+        let script = dir.appending(path: "run")
+        try Data("#!/bin/sh\n".utf8).write(to: script)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        #expect(LinkPolicy.isSafeToOpen(png))
+        #expect(!LinkPolicy.isSafeToOpen(script))
+        #expect(!LinkPolicy.isSafeToOpen(dir.appending(path: "x.command")))
+        #expect(!LinkPolicy.isSafeToOpen(dir.appending(path: "x.app")))
+        #expect(!LinkPolicy.isSafeToOpen(dir.appending(path: "x.sh")))
+        #expect(LinkPolicy.isSafeToOpen(dir.appending(path: "notes.md")))
+    }
+}
+
+@Suite struct TextZoomTests {
+    @Test func steps() {
+        #expect(TextZoom.bigger(than: 1) == 1.1)
+        #expect(TextZoom.smaller(than: 1) == 0.9)
+        #expect(TextZoom.bigger(than: 1.3) == 1.5)
+        #expect(TextZoom.smaller(than: 1.3) == 1.25)
+        #expect(TextZoom.bigger(than: 3) == 3)
+        #expect(TextZoom.smaller(than: 0.5) == 0.5)
+        #expect(TextZoom.clamp(9) == 3)
+        #expect(TextZoom.clamp(.nan) == 1)
     }
 }
 
