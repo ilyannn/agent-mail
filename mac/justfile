@@ -1,0 +1,41 @@
+# Agent Mail for Mac. `just` here, or `just mac` in the repo root, lists recipes.
+# Tools come from the repo's mise.toml (xcodegen, xcbeautify, babashka).
+
+set shell := ["bash", "-euo", "pipefail", "-c"]
+
+derived := "build/DerivedData"
+debug_app := derived / "Build/Products/Debug/Agent Mail.app"
+xcodebuild := "xcodebuild -project AgentMail.xcodeproj -scheme AgentMail -destination platform=macOS -derivedDataPath " + derived
+
+[private]
+default:
+    @just --list
+
+# Generate AgentMail.xcodeproj from project.yml (the project file isn't committed)
+gen:
+    xcodegen generate --quiet
+
+# Build the Debug app, ad hoc signed, into build/DerivedData
+build: gen
+    {{xcodebuild}} -configuration Debug build | xcbeautify --quiet
+
+# Run the AgentMailKit tests, then the app's UI smoke tests
+test: gen
+    swift test --package-path AgentMailKit
+    {{xcodebuild}} -configuration Debug test | xcbeautify
+
+# Build and run the Debug app from the build directory (AGENT_MAIL_DIR passes through; args go to the app)
+run *args: build
+    "{{debug_app}}/Contents/MacOS/Agent Mail" {{args}}
+
+# Create the self-signed code-signing identity "Agent Mail Local" in the login keychain (once)
+signing-cert *args:
+    bb scripts/signing_cert.bb {{args}}
+
+# Build Release, sign it with "Agent Mail Local", install it into ~/Applications and launch it
+install *args: gen
+    bb scripts/install.bb {{args}}
+
+# Quit and remove ~/Applications/Agent Mail.app (--purge also removes its settings)
+uninstall *args:
+    bb scripts/uninstall.bb {{args}}

@@ -4,9 +4,12 @@
 default:
     @just --list
 
-# Lint src/ and every bb script; fails on warnings
+# The Mac app's recipes, from mac/justfile: `just mac build`, `just mac test`, …
+mod mac
+
+# Lint src/ and every bb script (the Mac app's too); fails on warnings
 lint:
-    clj-kondo --fail-level warning --lint src *.bb
+    clj-kondo --fail-level warning --lint src *.bb mac/scripts
 
 # Run the test suite against a temporary store
 test:

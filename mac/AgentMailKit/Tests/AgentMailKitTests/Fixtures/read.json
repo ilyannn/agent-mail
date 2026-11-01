@@ -1,0 +1,26 @@
+{
+  "number" : 1,
+  "updated" : "2026-10-31T23:05:03.415Z",
+  "created" : "2026-10-31T23:05:03.205Z",
+  "msgs" : [ {
+    "from" : "website",
+    "to" : "infra",
+    "date" : "2026-10-31T23:05:03.205Z",
+    "file" : "2026-10-31T230503.205Z__website__66ad.md",
+    "body" : "Please deploy **website** v2 to the edge hosts.\n\n- build is green\n- needs `nginx -s reload`\n\n```sh\njust deploy\n```"
+  }, {
+    "from" : "infra",
+    "to" : "user",
+    "date" : "2026-10-31T23:05:03.415Z",
+    "in-reply-to" : "2026-10-31T230503.205Z__website__66ad.md",
+    "file" : "2026-10-31T230503.415Z__infra__872a.md",
+    "body" : "Can I restart nginx during business hours? <script>alert(1)</script>\n\n| host | load |\n|------|------|\n| a    | 0.3  |"
+  } ],
+  "status" : "open",
+  "from" : "website",
+  "id" : "2026-10-31-deploy-the-new-site",
+  "count" : 2,
+  "last-from" : "infra",
+  "subject" : "Deploy the new site",
+  "owner" : "user"
+}

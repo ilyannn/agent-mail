@@ -1,0 +1,101 @@
+# XcodeGen spec for the Mac app; the source of truth. `just gen` (in mac/)
+# writes AgentMail.xcodeproj, which is generated and not committed.
+name: AgentMail
+options:
+  bundleIdPrefix: dev.agent-mail
+  deploymentTarget:
+    macOS: "26.0"
+  developmentLanguage: en
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+packages:
+  AgentMailKit:
+    path: AgentMailKit
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MACOSX_DEPLOYMENT_TARGET: "26.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    DEAD_CODE_STRIPPING: YES
+    ENABLE_STRICT_OBJC_MSGSEND: YES
+    CLANG_ENABLE_OBJC_ARC: YES
+
+targets:
+  AgentMail:
+    type: application
+    platform: macOS
+    sources:
+      - path: AgentMail
+    dependencies:
+      - package: AgentMailKit
+        product: AgentMailKit
+    settings:
+      base:
+        PRODUCT_NAME: Agent Mail
+        PRODUCT_MODULE_NAME: AgentMail
+        PRODUCT_BUNDLE_IDENTIFIER: dev.agent-mail.AgentMail
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        # Info.plist: generated keys merged into the committed fragment, which
+        # holds the keys Xcode has no build setting for.
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_FILE: AgentMail/Info.plist
+        INFOPLIST_KEY_CFBundleDisplayName: Agent Mail
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
+        INFOPLIST_KEY_NSHumanReadableCopyright: "MIT License"
+        # Swift 6 with the app's code on the main actor unless it says otherwise.
+        SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
+        SWIFT_STRICT_CONCURRENCY: complete
+        # Not sandboxed: the app runs the agent-mail CLI from the user's PATH
+        # and reads the store. Release builds are signed by `just install`.
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        DEVELOPMENT_TEAM: ""
+        COMBINE_HIDPI_IMAGES: YES
+      configs:
+        Debug:
+          PRODUCT_BUNDLE_IDENTIFIER: dev.agent-mail.AgentMail.debug
+
+  # Unit tests hosted in the app (no UI automation, which needs Automation
+  # Mode and so a password on most Macs). The app skips its startup when it
+  # hosts tests, so no store, status item or window is touched.
+  AgentMailTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: AgentMailTests
+    dependencies:
+      - target: AgentMail
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.agent-mail.AgentMailTests
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Agent Mail.app/Contents/MacOS/Agent Mail"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_DEFAULT_ACTOR_ISOLATION: MainActor
+        SWIFT_STRICT_CONCURRENCY: complete
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        DEVELOPMENT_TEAM: ""
+
+schemes:
+  AgentMail:
+    build:
+      targets:
+        AgentMail: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - AgentMailTests
+      environmentVariables:
+        # Never the real store, whatever a test does.
+        AGENT_MAIL_DIR: /tmp/agent-mail-tests-store-unused
+    profile:
+      config: Release
+    archive:
+      config: Release

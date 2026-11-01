@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Keys without an Xcode build setting; the rest is generated (project.yml). -->
+<plist version="1.0">
+<dict>
+	<!-- A menu bar app: no Dock icon or menu bar until it switches to the
+	     regular activation policy (Settings › General › Dock icon). -->
+	<key>LSUIElement</key>
+	<true/>
+	<!-- Ask for the Alerts style, which inline Reply needs. -->
+	<key>NSUserNotificationAlertStyle</key>
+	<string>alert</string>
+	<key>NSSupportsAutomaticTermination</key>
+	<false/>
+	<key>NSSupportsSuddenTermination</key>
+	<false/>
+</dict>
+</plist>

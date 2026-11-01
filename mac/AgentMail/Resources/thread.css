@@ -1,0 +1,63 @@
+/* The thread view's stylesheet, inlined into each rendered thread (the CSP
+   allows inline styles only). System fonts and colours, light and dark. */
+:root {
+  color-scheme: light dark;
+  --accent: AccentColor;
+  --rule: color-mix(in srgb, CanvasText 12%, transparent);
+  --muted: color-mix(in srgb, CanvasText 55%, transparent);
+  --code-bg: color-mix(in srgb, CanvasText 6%, transparent);
+  --mine-bg: color-mix(in srgb, AccentColor 7%, transparent);
+}
+html { background: Canvas; }
+body {
+  font: -apple-system-body;
+  color: CanvasText;
+  background: Canvas;
+  margin: 0;
+  padding: 18px 22px 32px;
+  line-height: 1.45;
+  word-wrap: break-word;
+  -webkit-text-size-adjust: none;
+}
+header.thread h1 { font: -apple-system-title2; font-weight: 600; margin: 0 0 4px; }
+header.thread .meta { color: var(--muted); font: -apple-system-footnote; margin: 0 0 16px; }
+
+article.msg {
+  border-top: 1px solid var(--rule);
+  padding: 12px 0 4px;
+  scroll-margin-top: 8px;
+}
+article.msg.mine { background: var(--mine-bg); border-radius: 8px; padding: 12px 12px 4px; border-top-color: transparent; margin: 6px -12px; }
+article.msg > header { font: -apple-system-subheadline; color: var(--muted); margin-bottom: 6px; }
+article.msg > header .from { color: CanvasText; font-weight: 600; }
+article.msg > header time { margin-left: 6px; }
+article.msg > header .status {
+  margin-left: 6px; padding: 0 5px; border-radius: 4px;
+  font: -apple-system-caption1; font-weight: 600;
+  background: var(--code-bg);
+}
+.attachments { font: -apple-system-footnote; color: var(--muted); margin: 0 0 6px; }
+.attachments::before { content: "📎 "; }
+
+.body > :first-child { margin-top: 0; }
+.body > :last-child { margin-bottom: 8px; }
+a { color: LinkText; }
+code, pre { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.92em; }
+code { background: var(--code-bg); padding: 0.1em 0.3em; border-radius: 4px; }
+pre { background: var(--code-bg); padding: 10px 12px; border-radius: 6px; overflow-x: auto; white-space: pre; }
+pre code { background: none; padding: 0; }
+pre.raw-html { white-space: pre-wrap; color: var(--muted); }
+blockquote { margin: 0.6em 0; padding: 0 0 0 12px; border-left: 3px solid var(--rule); color: var(--muted); }
+table { border-collapse: collapse; margin: 0.6em 0; }
+th, td { border: 1px solid var(--rule); padding: 4px 8px; text-align: left; }
+th { background: var(--code-bg); }
+th.center, td.center { text-align: center; }
+th.right, td.right { text-align: right; }
+hr { border: none; border-top: 1px solid var(--rule); }
+li.task { list-style: none; margin-left: -1.2em; }
+li.task .box { display: inline-block; width: 1.2em; }
+h1, h2, h3, h4, h5, h6 { line-height: 1.25; margin: 1em 0 0.4em; }
+.body h1 { font-size: 1.3em; }
+.body h2 { font-size: 1.15em; }
+.body h3 { font-size: 1.05em; }
+a.image { font-style: italic; }

@@ -1,0 +1,96 @@
+{
+  "schema" : 1,
+  "now" : "2026-10-31T23:05:41.213Z",
+  "me" : "user",
+  "threads" : [ {
+    "unread" : 0,
+    "number" : 4,
+    "participants" : [ "infra", "user" ],
+    "updated" : "2026-10-31T23:05:04.296Z",
+    "unread-by" : {
+      "infra" : 1,
+      "user" : 0
+    },
+    "created" : "2026-10-31T23:05:04.296Z",
+    "listener" : "none",
+    "status" : "open",
+    "from" : "user",
+    "id" : "2026-10-31-please-rotate-the-tls-certificate",
+    "count" : 1,
+    "last-from" : "user",
+    "waiting-s" : 37,
+    "subject" : "Please rotate the TLS certificate",
+    "owner" : "infra"
+  }, {
+    "unread" : 2,
+    "number" : 3,
+    "participants" : [ "infra", "website" ],
+    "updated" : "2026-10-31T23:05:04.085Z",
+    "unread-by" : {
+      "infra" : 1,
+      "website" : 0
+    },
+    "created" : "2026-10-31T23:05:03.861Z",
+    "listener" : null,
+    "status" : "done",
+    "from" : "infra",
+    "id" : "2026-10-31-dns-for-docs-is-ready",
+    "count" : 2,
+    "last-from" : "website",
+    "waiting-s" : null,
+    "subject" : "DNS for docs is ready",
+    "owner" : "infra"
+  }, {
+    "unread" : 1,
+    "number" : 2,
+    "participants" : [ "user", "website" ],
+    "updated" : "2026-10-31T23:05:03.634Z",
+    "unread-by" : {
+      "user" : 1,
+      "website" : 0
+    },
+    "created" : "2026-10-31T23:05:03.634Z",
+    "listener" : "user",
+    "status" : "open",
+    "from" : "website",
+    "id" : "2026-10-31-quick-question-which-domain-for-the-docs",
+    "count" : 1,
+    "last-from" : "website",
+    "waiting-s" : 38,
+    "subject" : "Quick question: which domain for the docs?",
+    "owner" : "user"
+  }, {
+    "unread" : 2,
+    "number" : 1,
+    "participants" : [ "infra", "user", "website" ],
+    "updated" : "2026-10-31T23:05:03.415Z",
+    "unread-by" : {
+      "infra" : 0,
+      "user" : 2,
+      "website" : 1
+    },
+    "created" : "2026-10-31T23:05:03.205Z",
+    "listener" : "user",
+    "status" : "open",
+    "from" : "website",
+    "id" : "2026-10-31-deploy-the-new-site",
+    "count" : 2,
+    "last-from" : "infra",
+    "waiting-s" : 38,
+    "subject" : "Deploy the new site",
+    "owner" : "user"
+  } ],
+  "duty" : [ {
+    "on-duty" : true,
+    "heartbeat" : "2026-10-31T23:05:41.102Z",
+    "state" : "waiting",
+    "stale" : false,
+    "age-s" : 0,
+    "pid" : 26787,
+    "session-alive" : true,
+    "repo" : "website",
+    "session-pid" : 89919,
+    "session" : "s1"
+  } ],
+  "undelivered" : [ "2026-10-31-please-rotate-the-tls-certificate" ]
+}
