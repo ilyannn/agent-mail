@@ -551,7 +551,21 @@
     (testing "a reply reads its body from stdin too"
       (let [id (out {:who "a"} "@b" "q")]
         (is (= id (out {:who "b" :in "answer\nover two lines\n"} "reply" id)))
-        (is (= "answer\nover two lines" (:body (last (:msgs (thread-json id))))))))))
+        (is (= "answer\nover two lines" (:body (last (:msgs (thread-json id))))))))
+    (testing "text on the command line plus a file on stdin: the text leads, the file follows"
+      (with-dir [d]
+        (let [f (fs/file d "body.md")
+              _ (spit f "- **What happened:** it broke\n- **Cost:** a turn\n")
+              id (out {:who "a" :in f} "@b" "the-repo: it broke")
+              th (thread-json id)]
+          (is (= "the-repo: it broke" (:subject th)) "the text is the subject")
+          (is (= "the-repo: it broke\n\n- **What happened:** it broke\n- **Cost:** a turn" (:body (first (:msgs th)))))
+          (is (= "the-repo: it broke\n\nand a pipe" (:body (first (:msgs (thread-json (out {:who "a" :in "and a pipe\n"} "@b" "the-repo: it broke"))))))
+              "a pipe works the same way")
+          (is (= "Given" (:subject (thread-json (out {:who "a" :in f} "send" "--to" "b" "--subject" "Given" "lead"))))
+              "an explicit subject stays")
+          (is (= "lead\n\nmore" (:body (last (:msgs (thread-json (do (out {:who "b" :in "more"} "reply" id "lead") id))))))
+              "a reply too"))))))
 
 (deftest json-shapes
   (with-store

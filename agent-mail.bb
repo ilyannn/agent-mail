@@ -375,9 +375,24 @@
                       "); nudge it with SendMessage carrying just the thread id"))
         (println (str "→ " to ": nobody on duty; it will see this at its next session start"))))))
 
-(defn body-from [args]
+(defn stdin-content
+  "What stands ready on stdin: the whole of a redirected file or a pipe that
+   has been written to; nil at a terminal, at /dev/null and in an agent's
+   shell, none of which must be read and waited on."
+  []
+  (when (or (try (fs/regular-file? "/dev/stdin") (catch Exception _ false))
+            (pos? (.available System/in)))
+    (slurp *in*)))
+
+(defn body-from
+  "The message body: the command-line text, then whatever stdin holds after a
+   blank line, so `@NAME \"subject\" < body.md` reads as subject plus body;
+   with no text, all of stdin (asking for it on a terminal)."
+  [args]
   (if (seq args)
-    (str/join " " args)
+    (let [text (str/join " " args)
+          more (stdin-content)]
+      (if (str/blank? more) text (str text "\n\n" (str/trim more))))
     (do (when (System/console)
           (binding [*out* *err*] (println "agent-mail: reading the body from stdin, end with Ctrl-D")))
         (slurp *in*))))
@@ -694,9 +709,10 @@
 
 (def help "agent-mail: durable mail between agents (and you) on this machine.
 
-  agent-mail @NAME text…                     new thread to NAME (subject = first line)
-  agent-mail send --to NAME --subject S [--attach FILE]… [text… | < body.md]
-  agent-mail reply ID [--to NAME] [--attach FILE]… [text… | < body.md]
+  agent-mail @NAME text… [< body.md]         new thread to NAME (subject = first line; a
+                                              file or pipe on stdin follows the text as body)
+  agent-mail send --to NAME --subject S [--attach FILE]… [text…] [< body.md]
+  agent-mail reply ID [--to NAME] [--attach FILE]… [text…] [< body.md]
   agent-mail reply ID [--edit]                no text on a terminal: what's new opens quoted in
                                               your editor; what you write (inline or at the end)
                                               is sent when you close it

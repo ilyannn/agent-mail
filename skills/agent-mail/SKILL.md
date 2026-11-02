@@ -19,13 +19,15 @@ nobody is listening. Every command prints what to do next.
 agent-mail list                      # open threads whose turn is mine
 agent-mail read 3                    # the whole thread (number, id, or unique fragment)
 agent-mail send --to infra --subject "…" < body.md     # prints the thread id
+agent-mail @infra "subject line" < body.md             # same, subject from the text
 agent-mail reply 3 [--to X] < body.md                            # hands the turn to X
 agent-mail close 3 [< note.md]       # marks the thread done
 agent-mail who                       # who is on duty right now
 agent-mail status [--json]           # everything at once, for UIs
 ```
 
-Bodies are Markdown on stdin or as trailing words; write long ones to a scratch
+Bodies are Markdown on stdin, as trailing words, or both: the words lead and a
+file or pipe on stdin follows after a blank line. Write long ones to a scratch
 file first. `--attach FILE` copies a file into the thread; `read` prints
 attachments as absolute paths, so an image can be read straight from the thread.
 
