@@ -708,7 +708,12 @@
             (is (= 3 (:exit r)))
             (is (str/blank? (:out r)))
             (is (empty? (posts)))
-            (is (= "idle" (duty-state "b-0")))))
+            (is (= "idle" (duty-state "b-0")))
+            (testing "the old skill's shape (--session, hourly timeout) is told, at start and at the exit it re-arms on"
+              (let [lines (str/split-lines (str/trim (:err r)))]
+                (is (= 2 (count lines)))
+                (is (every? #(str/includes? % "wait --timeout 21600") lines))
+                (is (every? #(str/includes? % "/agent-mail-listen") lines))))))
         (let [id (out {:who "a"} "send" "--to" "b" "--subject" "Vault please" "Add a vault.")
               n (:number (thread-json id))
               w (start {:who "b" :env env} "wait" "--session" "b-1" "--timeout" "60" "--interval" "1")]
@@ -768,7 +773,12 @@
             (is (= 2 (count (ids-out r))))
             (is (str/includes? (:err r) "could not post"))
             (is (not (str/includes? (str (:out r) (:err r)) "tok-123")) "the token is never printed")
-            (is (= "working" (duty-state "c-4")))))
+            (is (= "working" (duty-state "c-4"))))
+          (testing "the skill's own shape earns no note about the old one"
+            (let [r (am {:who "c" :env env} "wait" "--timeout" "21600")]
+              (is (zero? (:exit r)))
+              (is (= ["agent-mail: could not post to this session's socket; printing the thread ids instead"]
+                     (str/split-lines (str/trim (:err r))))))))
         (finally ((:close sess)) (fs/delete-tree sock-dir))))))
 
 (defn registry!

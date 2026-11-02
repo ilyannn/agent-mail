@@ -565,6 +565,18 @@
         true))
     (catch Exception _ false)))
 
+(def skill-timeout
+  "The --timeout the listen skill arms wait with in a Claude Code session: a
+   safety net, not a cadence, since mail is posted into the session as it
+   comes. A shorter one, or --session, is the shape of the skill before
+   1 Nov 2026, whose loop re-armed hourly; a running listener never hears
+   that the skill changed, so wait tells it."
+  21600)
+(defn old-shape-notice [opts sock]
+  (when (and sock (or (:session opts) (some-> (:timeout opts) (< skill-timeout))))
+    (str "agent-mail: the listen skill changed: arm with `agent-mail wait --timeout " skill-timeout
+         "` (no --session; mail is posted into this session as it comes) and re-read /agent-mail-listen before re-arming")))
+
 (defn cmd-wait
   "Waits for threads that are `me`'s turn. Classic mode (no session socket, or
    --once) prints their ids and exits 0. Socket mode keeps running and posts
@@ -582,7 +594,10 @@
         interval (or (:interval opts) 3)
         deadline (when-let [t (:timeout opts)] (+ (System/currentTimeMillis) (* 1000 t)))
         sock (when-not (:once opts) (session-socket))
+        notice (old-shape-notice opts sock)
+        notice! #(when notice (binding [*out* *err*] (println notice)))
         print-ids! (fn [pending] (run! println (map :id pending)) (System/exit 0))]
+    (notice!)
     (tab-title! (str "📪 " me))
     (loop [announced {}, titled-mail? false, prev-session nil, warned? false]
       (let [live (session-name)
@@ -606,7 +621,7 @@
                 (println "agent-mail: could not post to this session's socket; printing the thread ids instead"))
               (print-ids! pending)))
         (if (and deadline (>= (System/currentTimeMillis) deadline))
-          (do (write-duty! me session "idle") (System/exit 3))
+          (do (write-duty! me session "idle") (notice!) (System/exit 3))
           (do (Thread/sleep (* 1000 interval))
               (recur (:announced next-state) mail? session (or warned? mismatch?))))))))
 
@@ -699,7 +714,9 @@
                                               prints their ids and exits. Exit 3 on timeout.
                                               --session NAME is needed only outside Claude
                                               Code; inside, wait reads the session's live name
-                                              from Claude Code's session registry
+                                              from Claude Code's session registry, and a
+                                              --timeout under 21600 (the listen skill's) earns
+                                              a note on stderr: that is the old hourly loop
   agent-mail who [--json]                     who is on duty
   agent-mail status [--json]                  everything at once, for UIs
   agent-mail hook                             SessionStart hook output
