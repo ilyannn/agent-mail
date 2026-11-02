@@ -5,6 +5,7 @@
 // window is ⌥⌘0. ⌘↩ also sends from the reply box (ThreadViewController). Every command is here, so it can be
 // rebound in System Settings › Keyboard › Keyboard Shortcuts. Actions go
 // down the responder chain (nil target).
+import AgentMailKit
 import AppKit
 
 @objc protocol MailActions {
@@ -16,6 +17,8 @@ import AppKit
     func showInbox(_ sender: Any?)
     func showUndelivered(_ sender: Any?)
     func showAllMail(_ sender: Any?)
+    /// Sort By: the sender is a menu item whose tag is a ThreadOrder's menuTag.
+    func setThreadOrder(_ sender: Any?)
     func replyToThread(_ sender: Any?)
     func sendReply(_ sender: Any?)
     func closeThread(_ sender: Any?)
@@ -167,7 +170,19 @@ enum MainMenu {
         m.addItem(item("Undelivered", #selector(MailActions.showUndelivered(_:)), "2"))
         m.addItem(item("All Mail", #selector(MailActions.showAllMail(_:)), "3"))
         m.addItem(.separator())
+        m.addItem(withSubmenu(sortMenu()))
+        m.addItem(.separator())
         m.addItem(item("Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control]))
+        return m
+    }
+
+    /// View › Sort By, and the toolbar's sort menu: one item per order, the
+    /// current one checked by validateMenuItem.
+    static func sortMenu() -> NSMenu {
+        let m = NSMenu(title: "Sort By")
+        for order in ThreadOrder.allCases {
+            m.addItem(item(order.title, #selector(MailActions.setThreadOrder(_:)), tag: order.menuTag))
+        }
         return m
     }
 
@@ -204,5 +219,16 @@ enum MainMenu {
         let m = NSMenu(title: "Help")
         m.addItem(item("Agent Mail Help", #selector(MailActions.showHelp(_:)), "?"))
         return m
+    }
+}
+
+extension ThreadOrder {
+    /// The tag of this order's Sort By item.
+    var menuTag: Int { Self.allCases.firstIndex(of: self) ?? 0 }
+
+    /// The order a Sort By item stands for.
+    init?(menuItem sender: Any?) {
+        guard let tag = (sender as? NSMenuItem)?.tag, Self.allCases.indices.contains(tag) else { return nil }
+        self = Self.allCases[tag]
     }
 }

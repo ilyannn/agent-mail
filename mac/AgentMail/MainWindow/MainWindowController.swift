@@ -1,7 +1,8 @@
 // The main window: sidebar, thread list and thread view in a split view
 // controller, a unified toolbar whose sections track the split dividers, and
-// the thread commands (Reply, Send, Close Thread, mailboxes, text size) for
-// the menus and toolbar. Closing it leaves the app running in the menu bar.
+// the thread commands (Reply, Send, Close Thread, mailboxes, sort order, text
+// size) for the menus and toolbar. Closing it leaves the app running in the
+// menu bar.
 import AgentMailKit
 import AppKit
 import Observation
@@ -9,6 +10,7 @@ import Observation
 extension NSToolbarItem.Identifier {
     static let newMessage = Self("newMessage")
     static let refresh = Self("refresh")
+    static let sortOrder = Self("sortOrder")
     static let listTrackingSeparator = Self("listTrackingSeparator")
     static let reply = Self("reply")
     static let closeThread = Self("closeThread")
@@ -22,6 +24,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     let list: ThreadListViewController
     let thread: ThreadViewController
     private var observation: Task<Void, Never>?
+    /// The toolbar's sort pop-up, titled by the current order.
+    private weak var sortItem: NSMenuToolbarItem?
     var onClose: () -> Void = {}
 
     init(store: MailStore) {
@@ -80,9 +84,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         store.detailIsVisible = { [weak self] in self?.isThreadVisible ?? false }
 
         updateTitle()
-        let changes = Observations { [store] in (store.mailbox, store.index) }
+        let changes = Observations { [store] in (store.mailbox, store.index, store.threadOrder) }
         observation = Task { [weak self] in
-            for await _ in changes { self?.updateTitle() }
+            for await _ in changes {
+                self?.updateTitle()
+                self?.updateSortItem()
+            }
         }
     }
 
@@ -100,6 +107,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         var parts = ["\(threads.count) thread\(threads.count == 1 ? "" : "s")"]
         if unread > 0 { parts.append("\(unread) unread") }
         window?.subtitle = parts.joined(separator: ", ")
+    }
+
+    /// Undelivered keeps the CLI's order (longest waiting first), so the
+    /// sort choice doesn't apply there. In the Inbox, open only, both orders
+    /// agree.
+    private var canSort: Bool { store.mailbox != .undelivered }
+
+    private func updateSortItem() {
+        sortItem?.title = store.threadOrder.title
+        sortItem?.isEnabled = canSort
     }
 
     /// Shows a thread: switches to a mailbox that holds it when the current
@@ -151,6 +168,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     @objc func showInbox(_ sender: Any?) { store.mailbox = .inbox }
     @objc func showUndelivered(_ sender: Any?) { store.mailbox = .undelivered }
     @objc func showAllMail(_ sender: Any?) { store.mailbox = .allMail }
+    @objc func setThreadOrder(_ sender: Any?) {
+        if let order = ThreadOrder(menuItem: sender) { store.threadOrder = order }
+    }
     @objc func replyToThread(_ sender: Any?) { thread.focusReply() }
     @objc func sendReply(_ sender: Any?) { thread.sendReply() }
     @objc func closeThread(_ sender: Any?) { thread.closeThread() }
@@ -199,6 +219,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             menuItem.state = store.mailbox == mailbox ? .on : .off
             return true
         }
+        if menuItem.action == #selector(setThreadOrder(_:)) {
+            menuItem.state = ThreadOrder(menuItem: menuItem) == store.threadOrder ? .on : .off
+            return canSort
+        }
         return isEnabled(menuItem.action) ?? true
     }
 
@@ -209,8 +233,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     // MARK: NSToolbarDelegate
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .sidebarTrackingSeparator, .refresh, .flexibleSpace, .newMessage, .listTrackingSeparator,
-         .flexibleSpace, .reply, .closeThread]
+        [.toggleSidebar, .sidebarTrackingSeparator, .refresh, .flexibleSpace, .sortOrder, .newMessage,
+         .listTrackingSeparator, .flexibleSpace, .reply, .closeThread]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -226,6 +250,21 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             return button(id, "New Message", "square.and.pencil", #selector(AppDelegate.newMessage(_:)))
         case .refresh:
             return button(id, "Get New Mail", "arrow.clockwise", #selector(AppDelegate.refresh(_:)))
+        case .sortOrder:
+            let item = NSMenuToolbarItem(itemIdentifier: id)
+            item.label = "Sort By"
+            item.paletteLabel = "Sort By"
+            item.toolTip = "Sort All Mail and agent mailboxes"
+            item.menu = MainMenu.sortMenu()
+            item.showsIndicator = true
+            item.autovalidates = false
+            // When the list is too narrow, this goes into the overflow menu
+            // before New Message does (View › Sort By has it too).
+            item.visibilityPriority = .low
+            item.title = store.threadOrder.title
+            item.isEnabled = canSort
+            if flag { sortItem = item }
+            return item
         case .reply:
             return button(id, "Reply", "arrowshape.turn.up.left", #selector(replyToThread(_:)))
         case .closeThread:

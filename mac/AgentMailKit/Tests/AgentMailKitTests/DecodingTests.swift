@@ -23,6 +23,7 @@ import Testing
         #expect(deploy.unread == 2)
         #expect(deploy.unreadBy == ["infra": 0, "user": 2, "website": 1])
         #expect(deploy.participants == ["infra", "user", "website"])
+        #expect(deploy.flow == ["website", "infra", "user"])
         #expect(deploy.waitingSeconds == 24)
         #expect(deploy.listener == "user")
         #expect(deploy.updated == Fixture.date("2026-10-31T23:05:03.415Z"))
@@ -33,6 +34,7 @@ import Testing
         #expect(closed.listener == nil)
         #expect(closed.waitingSeconds == nil)
         #expect(!closed.isOpen)
+        #expect(closed.flow == ["infra", "website"])
     }
 
     @Test func dutyRecordsDecode() throws {
@@ -111,6 +113,7 @@ import Testing
         #expect(t.owner == nil)
         #expect(t.updated == nil)
         #expect(!t.isWaiting(on: "user"))
+        #expect(t.flow.isEmpty, "a status without flow (an older CLI) decodes to none")
     }
 
     @Test func datesWithAndWithoutMilliseconds() {

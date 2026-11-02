@@ -50,13 +50,17 @@ public struct ThreadSummary: Sendable, Equatable, Hashable, Identifiable, Decoda
     /// Unread count for each participant.
     public var unreadBy: [String: Int]
     public var participants: [String]
+    /// Who the thread passed through (core/flow): its senders in written
+    /// order, repeats collapsed, then the owner when it isn't the last sender.
+    /// Empty from a CLI that predates the field; see `shownFlow`.
+    public var flow: [String]
     /// Seconds an open thread has waited on its owner; nil once closed.
     public var waitingSeconds: Int?
     /// `user`, `on-duty` or `none` for an open thread; nil when closed.
     public var listener: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, number, subject, from, created, owner, status, count, updated, unread, participants, listener
+        case id, number, subject, from, created, owner, status, count, updated, unread, participants, flow, listener
         case lastFrom = "last-from"
         case unreadBy = "unread-by"
         case waitingSeconds = "waiting-s"
@@ -65,7 +69,7 @@ public struct ThreadSummary: Sendable, Equatable, Hashable, Identifiable, Decoda
     public init(id: String, number: Int? = nil, subject: String, from: String? = nil, lastFrom: String? = nil,
                 created: Date? = nil, owner: String? = nil, status: String = "open", count: Int = 1,
                 updated: Date? = nil, unread: Int = 0, unreadBy: [String: Int] = [:], participants: [String] = [],
-                waitingSeconds: Int? = nil, listener: String? = nil) {
+                flow: [String] = [], waitingSeconds: Int? = nil, listener: String? = nil) {
         self.id = id
         self.number = number
         self.subject = subject
@@ -79,6 +83,7 @@ public struct ThreadSummary: Sendable, Equatable, Hashable, Identifiable, Decoda
         self.unread = unread
         self.unreadBy = unreadBy
         self.participants = participants
+        self.flow = flow
         self.waitingSeconds = waitingSeconds
         self.listener = listener
     }
@@ -98,6 +103,7 @@ public struct ThreadSummary: Sendable, Equatable, Hashable, Identifiable, Decoda
         unread = try c.decodeIfPresent(Int.self, forKey: .unread) ?? 0
         unreadBy = try c.decodeIfPresent([String: Int].self, forKey: .unreadBy) ?? [:]
         participants = try c.decodeIfPresent([String].self, forKey: .participants) ?? []
+        flow = try c.decodeIfPresent([String].self, forKey: .flow) ?? []
         waitingSeconds = try c.decodeIfPresent(Int.self, forKey: .waitingSeconds)
         listener = try c.decodeIfPresent(String.self, forKey: .listener)
     }
@@ -109,6 +115,15 @@ public struct ThreadSummary: Sendable, Equatable, Hashable, Identifiable, Decoda
 
     /// Open, and nobody is listening for its owner.
     public var isUndelivered: Bool { listener == "none" }
+
+    /// The flow to show: the CLI's, or from a CLI that predates `flow`, the
+    /// last sender and the owner (what the list showed before).
+    public var shownFlow: [String] {
+        if !flow.isEmpty { return flow }
+        return [lastFrom ?? from, owner].compactMap { $0 }.reduce(into: []) { names, name in
+            if names.last != name { names.append(name) }
+        }
+    }
 
     /// What identifies the thread's content: changes when a message arrives or
     /// the status flips, not when someone merely reads it.

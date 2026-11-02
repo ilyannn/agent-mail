@@ -43,6 +43,7 @@ final class AppSettings {
         static let skipFirstRun = "skipFirstRun"
         static let settingsPane = "settingsPane"
         static let mailbox = "mailbox"
+        static let threadOrder = "threadOrder"
         static let textZoom = "textZoom"
     }
 
@@ -110,6 +111,12 @@ final class AppSettings {
             }
             defaults.set(raw, forKey: Key.mailbox)
         }
+    }
+
+    /// How All Mail and agent mailboxes are sorted (View › Sort By).
+    var threadOrder: ThreadOrder {
+        get { ThreadOrder(rawValue: defaults.string(forKey: Key.threadOrder) ?? "") ?? .newestFirst }
+        set { defaults.set(newValue.rawValue, forKey: Key.threadOrder) }
     }
 }
 

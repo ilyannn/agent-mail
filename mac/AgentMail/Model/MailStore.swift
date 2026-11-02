@@ -34,6 +34,13 @@ final class MailStore {
             }
         }
     }
+    /// How All Mail and agent mailboxes are sorted; saved in the settings.
+    var threadOrder: ThreadOrder {
+        didSet {
+            guard threadOrder != oldValue else { return }
+            settings.threadOrder = threadOrder
+        }
+    }
     private(set) var selectedThreadID: String?
     /// The selected thread, once `read` has returned it.
     private(set) var detail: ThreadDetail?
@@ -66,6 +73,7 @@ final class MailStore {
         self.settings = settings
         self.location = location
         mailbox = settings.mailbox
+        threadOrder = settings.threadOrder
         reader = StoreReader(root: location.url)
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appending(path: Bundle.main.bundleIdentifier ?? "AgentMail")

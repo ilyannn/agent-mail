@@ -173,6 +173,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MailActions, NSMenuIte
     @objc func showUndelivered(_ sender: Any?) { open(mailbox: .undelivered) }
     @objc func showAllMail(_ sender: Any?) { open(mailbox: .allMail) }
 
+    /// Sort By while the main window isn't key: the order is the store's, so
+    /// the window shows it when it opens.
+    @objc func setThreadOrder(_ sender: Any?) {
+        if let order = ThreadOrder(menuItem: sender) { store.threadOrder = order }
+    }
+
     // Thread and text size commands reach the app delegate only when the
     // main window isn't key; they are disabled then.
     @objc func replyToThread(_ sender: Any?) {}
@@ -201,12 +207,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MailActions, NSMenuIte
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
+        case #selector(setThreadOrder(_:)):
+            menuItem.state = ThreadOrder(menuItem: menuItem) == store.threadOrder ? .on : .off
+            return true
         case #selector(replyToThread(_:)), #selector(sendReply(_:)), #selector(closeThread(_:)),
              #selector(copyThreadID(_:)), #selector(revealThreadInFinder(_:)),
              #selector(increaseTextSize(_:)), #selector(decreaseTextSize(_:)), #selector(resetTextSize(_:)):
-            false
+            return false
         default:
-            true
+            return true
         }
     }
 

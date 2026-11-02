@@ -7,6 +7,7 @@
 //                                                   (+ .web.png for the thread)
 //   {"cmd": "select", "arg": "<thread id>"}         (clicks the row)
 //   {"cmd": "mailbox", "arg": "inbox|undelivered|allMail|agent:NAME"}
+//   {"cmd": "sort", "arg": "newestFirst|openFirst"}  (View › Sort By)
 //   {"cmd": "key", "arg": "r", "mods": "cmd,shift"} (through the menus)
 //   {"cmd": "type", "arg": "text"}                  (into the first responder)
 //   {"cmd": "action", "arg": "replyToThread:"}      (down the responder chain)
@@ -54,6 +55,7 @@ final class DebugHooks: NSObject {
         case "snapshot": snapshot(to: out, title: cmd["window"])
         case "select": app.debugMain?.debugSelect(arg)
         case "mailbox": app.debugMain?.debugSelectMailbox(arg)
+        case "sort": if let order = ThreadOrder(rawValue: arg) { app.store.threadOrder = order }
         case "key":
             whenActive { [self] in
                 key(arg, mods: cmd["mods"] ?? "")
@@ -259,6 +261,7 @@ final class DebugHooks: NSObject {
             if w.isKeyWindow { lines.append("firstResponder: \(w.firstResponder.map { String(describing: type(of: $0)) } ?? "-") \((w.firstResponder as? NSView)?.accessibilityLabel() ?? "")") }
         }
         lines.append("mailbox: \(store.mailbox)")
+        lines.append("threadOrder: \(store.threadOrder.rawValue)")
         lines.append("selectedThread: \(store.selectedThreadID ?? "-")")
         lines.append("detail: \(store.detail.map { "\($0.id) msgs=\($0.msgs.count) fp=\($0.contentFingerprint)" } ?? "-")")
         lines.append("detailError: \(store.detailError?.errorDescription ?? "-")")

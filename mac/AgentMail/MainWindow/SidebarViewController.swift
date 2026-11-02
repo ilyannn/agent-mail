@@ -100,7 +100,7 @@ final class SidebarViewController: NSViewController, NSTableViewDelegate {
                           tip: "Open threads whose recipient has nobody on duty.")
             case .allMail:
                 cell.show(title: "All Mail", image: symbol("tray.2", "All Mail"), count: 0,
-                          tip: "Every thread, including mail between agents; closed threads last.")
+                          tip: "Every thread, including mail between agents, in the order chosen under View › Sort By.")
             case let .agent(name):
                 let agent = index.agents.first { $0.name == name }
                 let onDuty = agent?.onDuty ?? false

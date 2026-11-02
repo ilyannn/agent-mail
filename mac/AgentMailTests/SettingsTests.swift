@@ -19,7 +19,41 @@ import Testing
             #expect(s.mainWindowWasOpen)
             #expect(s.cliPath == nil)
             #expect(s.mailbox == .inbox)
+            #expect(s.threadOrder == .newestFirst)
         }
+    }
+
+    @Test func threadOrderRoundTrips() {
+        withSettings { s in
+            for order in ThreadOrder.allCases {
+                s.threadOrder = order
+                #expect(s.threadOrder == order)
+            }
+        }
+    }
+
+    @Test func sortMenuHasOneItemPerOrder() {
+        let menu = MainMenu.sortMenu()
+        #expect(menu.title == "Sort By")
+        #expect(menu.items.map(\.title) == ["Newest First", "Open First"])
+        #expect(menu.items.compactMap { ThreadOrder(menuItem: $0) } == ThreadOrder.allCases)
+        #expect(menu.items.allSatisfy { $0.action == #selector(MailActions.setThreadOrder(_:)) })
+        #expect(ThreadOrder(menuItem: nil) == nil)
+    }
+
+    @Test func listRowsSpeakTheirFlow() {
+        let cell = ThreadCellView()
+        let now = Date.now
+        let back = ThreadSummary(id: "a", number: 7, subject: "Deploy", owner: "user", count: 2, updated: now, unread: 1,
+                                 flow: ["user", "infra", "user"], listener: "user")
+        cell.configure(back, me: "user", now: now)
+        #expect(cell.accessibilityLabel() == "1 unread, user to infra, back to user, Deploy, 0 seconds ago, Your turn")
+        #expect(cell.toolTip == "#7 a\n2 messages, waiting on user")
+        let long = ThreadSummary(id: "b", number: 8, subject: "Long", owner: "c", status: "done", count: 5, updated: now,
+                                 flow: ["a", "b", "a", "b", "c"])
+        cell.configure(long, me: "user", now: now)
+        #expect(cell.accessibilityLabel() == "a, then 2 others, back to b, then c, Long, 0 seconds ago, Closed")
+        #expect(cell.toolTip == "#8 b\na → b → a → b → c\n5 messages, closed")
     }
 
     @Test func mailboxRoundTrips() {

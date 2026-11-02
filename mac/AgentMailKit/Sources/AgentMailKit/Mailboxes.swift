@@ -8,9 +8,9 @@ public enum Mailbox: Hashable, Sendable, Codable {
     case inbox
     /// Open threads nobody is listening for.
     case undelivered
-    /// Every thread, closed ones last.
+    /// Every thread, in the chosen ThreadOrder.
     case allMail
-    /// Every thread a repo takes part in.
+    /// Every thread a repo takes part in, in the chosen ThreadOrder.
     case agent(String)
 
     public var title: String {
@@ -19,6 +19,22 @@ public enum Mailbox: Hashable, Sendable, Codable {
         case .undelivered: "Undelivered"
         case .allMail: "All Mail"
         case let .agent(name): name
+        }
+    }
+}
+
+/// How All Mail and an agent's mailbox are sorted. The Inbox is newest
+/// first and Undelivered keeps the CLI's order, whatever this says.
+public enum ThreadOrder: String, CaseIterable, Codable, Sendable {
+    /// Latest activity first, open and closed threads mixed.
+    case newestFirst
+    /// Open threads first, then closed ones, each newest first.
+    case openFirst
+
+    public var title: String {
+        switch self {
+        case .newestFirst: "Newest First"
+        case .openFirst: "Open First"
         }
     }
 }
@@ -37,8 +53,10 @@ public struct MailboxIndex: Sendable, Equatable {
     public let me: String
     public let inbox: [ThreadSummary]
     public let undelivered: [ThreadSummary]
+    /// Every thread, newest first (ThreadOrder.newestFirst).
     public let allMail: [ThreadSummary]
     public let agents: [AgentInfo]
+    private let allMailOpenFirst: [ThreadSummary]
     private let byID: [String: ThreadSummary]
 
     public static let empty = MailboxIndex(status: nil)
@@ -52,7 +70,8 @@ public struct MailboxIndex: Sendable, Equatable {
         let newestFirst = threads.sorted(by: Self.newerFirst)
         inbox = newestFirst.filter { $0.isWaiting(on: me) }
         undelivered = (status?.undelivered ?? []).compactMap { byID[$0] }
-        allMail = newestFirst.filter(\.isOpen) + newestFirst.filter { !$0.isOpen }
+        allMail = newestFirst
+        allMailOpenFirst = newestFirst.filter(\.isOpen) + newestFirst.filter { !$0.isOpen }
 
         let duty = status?.duty ?? []
         let names = Set(duty.map(\.repo)).union(threads.flatMap(\.participants)).subtracting([me])
@@ -68,12 +87,20 @@ public struct MailboxIndex: Sendable, Equatable {
 
     public func thread(_ id: String) -> ThreadSummary? { byID[id] }
 
-    public func threads(in mailbox: Mailbox) -> [ThreadSummary] {
+    /// A mailbox's threads; `order` sorts All Mail and agent mailboxes only.
+    public func threads(in mailbox: Mailbox, order: ThreadOrder = .newestFirst) -> [ThreadSummary] {
         switch mailbox {
         case .inbox: inbox
         case .undelivered: undelivered
-        case .allMail: allMail
-        case let .agent(name): allMail.filter { $0.participants.contains(name) }
+        case .allMail: everything(order)
+        case let .agent(name): everything(order).filter { $0.participants.contains(name) }
+        }
+    }
+
+    private func everything(_ order: ThreadOrder) -> [ThreadSummary] {
+        switch order {
+        case .newestFirst: allMail
+        case .openFirst: allMailOpenFirst
         }
     }
 

@@ -1,7 +1,8 @@
-// The thread list: one row per thread of the selected mailbox, keyed by
-// thread id in a diffable data source, so selection and scroll position
-// survive live refreshes. Rows show parties, subject, age, an unread dot and
-// a state icon; visible rows are refreshed in place after each snapshot.
+// The thread list: one row per thread of the selected mailbox, in the chosen
+// order, keyed by thread id in a diffable data source, so selection and
+// scroll position survive live refreshes and re-sorting. Rows show the
+// thread's flow, subject, age, an unread dot and a state icon; visible rows
+// are refreshed in place after each snapshot.
 import AgentMailKit
 import AppKit
 import Observation
@@ -12,6 +13,9 @@ final class ThreadListViewController: NSViewController, NSTableViewDelegate, NSM
     private let emptyLabel = NSTextField.label(font: .systemFont(ofSize: NSFont.systemFontSize + 2), color: .tertiaryLabelColor)
     private var dataSource: NSTableViewDiffableDataSource<Int, String>!
     private var applying = false
+    /// What the last snapshot showed, to tell a re-sort from a mailbox switch.
+    private var appliedMailbox: Mailbox?
+    private var appliedOrder: ThreadOrder?
     private var observation: Task<Void, Never>?
     /// Return and Space in the list, handled by the window.
     var onReturn: () -> Void = {}
@@ -76,7 +80,10 @@ final class ThreadListViewController: NSViewController, NSTableViewDelegate, NSM
         }
         apply()
         // `status` changes on every refresh (its clock moves), so ages stay current.
-        let changes = Observations { [store] in (store.status, store.index, store.mailbox, store.selectedThreadID, store.refreshError, store.hasLoaded) }
+        let changes = Observations { [store] in
+            (store.status, store.index, store.mailbox, store.threadOrder, store.selectedThreadID, store.refreshError,
+             store.hasLoaded)
+        }
         observation = Task { [weak self] in
             for await _ in changes { self?.apply() }
         }
@@ -86,13 +93,20 @@ final class ThreadListViewController: NSViewController, NSTableViewDelegate, NSM
 
     private func apply() {
         let index = store.index
-        let ids = index.threads(in: store.mailbox).map(\.id)
+        let mailbox = store.mailbox, order = store.threadOrder
+        let ids = index.threads(in: mailbox, order: order).map(\.id)
+        // A new order in the same mailbox: the selected row stays where it is
+        // on screen and the others move around it, without animation.
+        let resorted = appliedMailbox == mailbox && appliedOrder != nil && appliedOrder != order
+        appliedMailbox = mailbox
+        appliedOrder = order
+        let anchor = resorted ? selectedRowOffset() : nil
         var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
         snapshot.appendSections([0])
         snapshot.appendItems(ids)
         applying = true
         defer { applying = false }
-        let animate = (view.window?.isVisible ?? false) && dataSource.snapshot().numberOfItems > 0
+        let animate = !resorted && (view.window?.isVisible ?? false) && dataSource.snapshot().numberOfItems > 0
         dataSource.apply(snapshot, animatingDifferences: animate)
         let now = Date.now
         tableView.enumerateAvailableRowViews { rowView, row in
@@ -103,8 +117,9 @@ final class ThreadListViewController: NSViewController, NSTableViewDelegate, NSM
         if let id = store.selectedThreadID, let row = dataSource.row(forItemIdentifier: id), row >= 0 {
             if tableView.selectedRow != row {
                 tableView.selectRowIndexes([row], byExtendingSelection: false)
-                tableView.scrollRowToVisible(row)
+                if anchor == nil { tableView.scrollRowToVisible(row) }
             }
+            if let anchor { scroll(row: row, toOffset: anchor) }
         } else if tableView.selectedRow >= 0 {
             tableView.deselectAll(nil)
         }
@@ -112,6 +127,27 @@ final class ThreadListViewController: NSViewController, NSTableViewDelegate, NSM
         if store.hasLoaded {
             Timing.note("list applied: \(store.mailbox.title), \(ids.count) rows")
         }
+    }
+
+    /// How far below the top of the visible area the selected row starts;
+    /// nil when nothing is selected or the row is scrolled out of view.
+    private func selectedRowOffset() -> CGFloat? {
+        guard let clip = tableView.enclosingScrollView?.contentView, let id = store.selectedThreadID,
+              let row = dataSource.row(forItemIdentifier: id), row >= 0 else { return nil }
+        let rect = tableView.rect(ofRow: row)
+        guard rect.intersects(clip.documentVisibleRect) else { return nil }
+        return rect.minY - clip.bounds.minY
+    }
+
+    /// Scrolls so `row` starts `offset` points below the top of the visible
+    /// area, as far as the list's length allows.
+    private func scroll(row: Int, toOffset offset: CGFloat) {
+        guard let scrollView = tableView.enclosingScrollView else { return }
+        let clip = scrollView.contentView
+        var bounds = clip.bounds
+        bounds.origin.y = tableView.rect(ofRow: row).minY - offset
+        clip.setBoundsOrigin(clip.constrainBoundsRect(bounds).origin)
+        scrollView.reflectScrolledClipView(clip)
     }
 
     private func updateEmptyState(isEmpty: Bool) {
@@ -225,9 +261,9 @@ final class ThreadTableView: NSTableView {
     }
 }
 
-/// One thread: `from → to` and age on top, subject and a state icon below
-/// (Your turn, Undelivered, Closed, On duty), in a fixed slot so subjects
-/// line up whether or not a row has one.
+/// One thread: its flow (`A → B → A`, whose turn it is last) and age on top,
+/// subject and a state icon below (Your turn, Undelivered, Closed, On duty),
+/// in a fixed slot so subjects line up whether or not a row has one.
 final class ThreadCellView: NSTableCellView {
     private let dot = NSImageView()
     private let parties = NSTextField.label()
@@ -236,6 +272,8 @@ final class ThreadCellView: NSTableCellView {
     private let subject = NSTextField.label(color: .secondaryLabelColor)
     private let stateIcon = NSImageView()
     private var unread = false
+    private var isOpen = true
+    private var flow = FlowLabel([])
     private var state: RowState?
 
     /// A row's state: what it says, its symbol and tint.
@@ -307,7 +345,41 @@ final class ThreadCellView: NSTableCellView {
 
     /// A selected row is drawn in the accent colour: tints turn white there.
     override var backgroundStyle: NSView.BackgroundStyle {
-        didSet { updateImages() }
+        didSet {
+            updateImages()
+            updateFlow()
+        }
+    }
+
+    /// The flow, names joined by arrows. In an open thread the last name,
+    /// whose turn it is, is semibold so the eye lands on it, and the names
+    /// before it are full strength while there is unread mail; a closed
+    /// thread's flow is plain secondary text. Too long for the row, it is cut
+    /// in the middle, so the last name stays. Rebuilt when the row's
+    /// highlight changes: an attributed string's colours don't follow it.
+    private func updateFlow() {
+        let selected = backgroundStyle == .emphasized
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingMiddle
+        func style(_ color: NSColor, _ weight: NSFont.Weight = .regular) -> [NSAttributedString.Key: Any] {
+            [.font: NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: weight),
+             .foregroundColor: selected ? NSColor.alternateSelectedControlTextColor : color,
+             .paragraphStyle: paragraph]
+        }
+        let quiet = style(.secondaryLabelColor)
+        let earlier = isOpen && unread ? style(.labelColor) : quiet
+        let turn = isOpen ? style(.labelColor, .semibold) : quiet
+        let text = NSMutableAttributedString()
+        for (i, step) in flow.steps.enumerated() {
+            if i > 0 { text.append(NSAttributedString(string: FlowLabel.arrow, attributes: quiet)) }
+            switch step {
+            case let .name(name):
+                text.append(NSAttributedString(string: name, attributes: i == flow.steps.count - 1 ? turn : earlier))
+            case .gap:
+                text.append(NSAttributedString(string: FlowLabel.ellipsis, attributes: quiet))
+            }
+        }
+        parties.attributedStringValue = text
     }
 
     private func updateImages() {
@@ -326,10 +398,10 @@ final class ThreadCellView: NSTableCellView {
 
     func configure(_ t: ThreadSummary, me: String, now: Date) {
         unread = t.unread > 0
-        let from = t.lastFrom ?? t.from ?? "?"
+        isOpen = t.isOpen
+        flow = FlowLabel(t.shownFlow)
         let to = t.owner ?? "?"
-        parties.stringValue = "\(from) → \(to)"
-        parties.font = .systemFont(ofSize: NSFont.systemFontSize, weight: unread ? .semibold : .regular)
+        updateFlow()
         subject.stringValue = t.subject
         subject.textColor = unread ? .labelColor : .secondaryLabelColor
         let seconds = Int(now.timeIntervalSince(t.updated ?? t.created ?? now))
@@ -342,12 +414,12 @@ final class ThreadCellView: NSTableCellView {
 
         var spoken = [String]()
         if unread { spoken.append("\(t.unread) unread") }
-        spoken.append("from \(from) to \(to)")
+        if !flow.names.isEmpty { spoken.append(flow.spoken) }
         spoken.append(t.subject)
         spoken.append("\(Formatting.spokenAge(seconds: seconds)) ago")
         if let s = state?.label { spoken.append(s) }
         setAccessibilityLabel(spoken.joined(separator: ", "))
-        toolTip = "#\(t.number.map(String.init) ?? "?") \(t.id)\n\(t.count) message\(t.count == 1 ? "" : "s"), "
-            + (t.isOpen ? "waiting on \(to)" : "closed")
+        toolTip = "#\(t.number.map(String.init) ?? "?") \(t.id)\n" + (flow.isShortened ? "\(flow.fullText)\n" : "")
+            + "\(t.count) message\(t.count == 1 ? "" : "s"), " + (t.isOpen ? "waiting on \(to)" : "closed")
     }
 }
