@@ -346,8 +346,17 @@
       :else (recur more (conj args a) opts))))
 
 (defn expand-shorthand
-  "`@NAME text…` is `send --to NAME text…`."
-  [argv]
-  (if (str/starts-with? (or (first argv) "") "@")
-    (concat ["send" "--to" (subs (first argv) 1)] (rest argv))
-    argv))
+  "`@NAME text…` is `send --to NAME text…`. Works on parsed argv, so options
+   such as `--as NAME` may come before the @NAME."
+  [{:keys [args opts] :as parsed}]
+  (if (str/starts-with? (or (first args) "") "@")
+    {:args (into ["send"] (rest args)) :opts (assoc opts :to (subs (first args) 1))}
+    parsed))
+
+(defn address-from-dir
+  "An address derived from a directory's name: runs of whitespace and path
+   separators become one `-`, so `2026-10 iPhone` is `2026-10-iPhone`; nil
+   when nothing is left."
+  [dir]
+  (let [x (-> (str dir) str/trim (str/replace #"[\s/\\]+" "-"))]
+    (when (valid-name? x) x)))

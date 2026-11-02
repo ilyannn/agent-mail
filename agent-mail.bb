@@ -222,7 +222,7 @@
   []
   (let [r (p/shell {:out :string :err :string :continue true} "git" "rev-parse" "--git-common-dir")]
     (when (zero? (:exit r))
-      (-> (:out r) str/trim fs/path fs/absolutize fs/normalize fs/parent fs/file-name str))))
+      (-> (:out r) str/trim fs/path fs/absolutize fs/normalize fs/parent fs/file-name core/address-from-dir))))
 
 (defn agent-session?
   "True inside a coding agent's shell. Claude Code (2.1.172+) sets
@@ -245,7 +245,7 @@
                (if-not (agent-session?)
                  "user"
                  (or (repo-name)
-                     (let [dir (str (fs/file-name (fs/normalize (fs/absolutize "."))))]
+                     (let [dir (core/address-from-dir (fs/file-name (fs/normalize (fs/absolutize "."))))]
                        (when-not (:quiet opts)
                          (binding [*out* *err*]
                            (println (str "agent-mail: not in a git repo; acting as " (pr-str dir)
@@ -709,7 +709,8 @@
 
 (def help "agent-mail: durable mail between agents (and you) on this machine.
 
-  agent-mail @NAME text… [< body.md]         new thread to NAME (subject = first line; a
+  agent-mail [--as ME] @NAME text… [< body.md]
+                                              new thread to NAME (subject = first line; a
                                               file or pipe on stdin follows the text as body)
   agent-mail send --to NAME --subject S [--attach FILE]… [text…] [< body.md]
   agent-mail reply ID [--to NAME] [--attach FILE]… [text…] [< body.md]
@@ -753,7 +754,7 @@ Store: $AGENT_MAIL_DIR, else ~/.local/share/agent-mail.")
 
 (defn -main [argv]
   (try
-    (let [{:keys [args opts]} (core/parse-argv (core/expand-shorthand argv))
+    (let [{:keys [args opts]} (core/expand-shorthand (core/parse-argv argv))
           [cmd & args] args]
       (case cmd
         "send" (cmd-send opts args)

@@ -348,9 +348,14 @@
   (is (usage-thrown? #(core/parse-argv ["send" "--to"])))
   (is (usage-thrown? #(core/parse-argv ["send" "--attach"])))
   (is (usage-thrown? #(core/parse-argv ["send" "--bogus"])))
-  (is (= ["send" "--to" "infra" "hi" "there"] (core/expand-shorthand ["@infra" "hi" "there"])))
-  (is (= ["list"] (core/expand-shorthand ["list"])))
-  (is (= [] (core/expand-shorthand []))))
+  (let [expand (comp core/expand-shorthand core/parse-argv)]
+    (is (= {:args ["send" "hi" "there"] :opts {:attach [] :to "infra"}} (expand ["@infra" "hi" "there"])))
+    (is (= {:args ["send" "hi"] :opts {:attach [] :to "infra" :as "me"}} (expand ["--as" "me" "@infra" "hi"])) "options before @NAME")
+    (is (= ["list"] (:args (expand ["list"]))))
+    (is (= [] (:args (expand [])))))
+  (is (= "2026-10-iPhone" (core/address-from-dir "2026-10 iPhone")))
+  (is (= "a-b" (core/address-from-dir " a / b ")))
+  (is (nil? (core/address-from-dir "  "))))
 
 ;; ================================================================ end to end
 
@@ -566,6 +571,17 @@
               "an explicit subject stays")
           (is (= "lead\n\nmore" (:body (last (:msgs (thread-json (do (out {:who "b" :in "more"} "reply" id "lead") id))))))
               "a reply too"))))))
+
+(deftest caller-from-a-directory-with-a-space
+  (with-store
+    (with-dir [d]
+      (let [dir (str (fs/create-dirs (fs/path d "2026-10 iPhone")))
+            r (am {:dir dir} "whoami")]
+        (is (= "2026-10-iPhone" (str/trim (:out r))) "the folder's name, made an address")
+        (is (str/includes? (:err r) "acting as \"2026-10-iPhone\"")))
+      (testing "--as before @NAME"
+        (let [id (out {:dir d} "--as" "guide" "@b" "hello")]
+          (is (= "guide" (:from (first (:msgs (thread-json id)))))))))))
 
 (deftest json-shapes
   (with-store
