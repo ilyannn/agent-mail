@@ -223,6 +223,19 @@
       (is (= ["a" "b" "c"] (core/participants open-th)))
       (is (= ["a" "user"] (core/participants to-user)))
       (is (= [] (core/participants empty-th))))
+    (testing "flow: senders in written order, repeats collapsed, then the owner when it isn't the last sender"
+      (let [fl #(core/flow (core/thread-state meta "f" %))]
+        (is (= ["a" "b"] (fl [(msg 0 "a" "b")])) "a wrote: b's turn")
+        (is (= ["a" "b" "a"] (fl [(msg 0 "a" "b") (msg 1 "b" "a")])) "b answered: a's turn again")
+        (is (= ["a" "b" "c"] (fl [(msg 0 "a" "b") (msg 1 "b" "c")])) "b handed it on: c's turn")
+        (is (= ["a" "b"] (fl [(msg 0 "a" "b") (msg 1 "a" "b")])) "a wrote twice: one a")
+        (is (= ["a"] (fl [(msg 0 "a" "a")])) "the owner is the last sender: not repeated")
+        (is (= ["a" "b" "c" "b"] (core/flow open-th)))
+        (is (= ["a" "b"] (core/flow closed-th)) "closed: the senders only, nobody's turn is left")
+        (is (= [] (core/flow empty-th)) "no messages: no flow")))
+    (testing "summary: the thread without its messages, with its flow"
+      (is (= (-> open-th (dissoc :msgs) (assoc :flow ["a" "b" "c" "b"])) (core/summary open-th)))
+      (is (= [] (:flow (core/summary empty-th)))))
     (testing "unread-by: one count per participant, each from their own marker"
       (is (= {"a" 2 "b" 2 "c" 2} (core/unread-by open-th {})) "nobody has read anything; own messages never count")
       (is (= {"a" 2 "b" 0 "c" 1} (core/unread-by open-th {"a" {"other" "009.md"} "b" {"t1" "002.md"} "c" {"t1" "000.md"}}))
@@ -264,6 +277,7 @@
         (is (= {"a" 2 "b" 0 "c" 2} (:unread-by t1)))
         (is (= ["on-duty" nil "user"] (map :listener [t1 t2 t3])))
         (is (= [58 nil 60] (map :waiting-s [t1 t2 t3])))
+        (is (= [["a" "b" "c" "b"] ["a" "b"] ["a" "user"]] (map :flow [t1 t2 t3])))
         (is (= [] (:undelivered st)))
         (is (= ["t3" "t1"] (:undelivered (core/status {:now now :me "x" :seen {} :duty []
                                                      :threads [open-th (core/thread-state meta "t3" [(msg 0 "a" "d")]) closed-th]})))
@@ -590,8 +604,9 @@
       (testing "list --json is one summary per thread, no messages"
         (let [[t :as ts] (list-json "--all")]
           (is (= 1 (count ts)))
-          (is (= #{:id :number :subject :from :last-from :created :owner :status :count :updated :unread} (set (keys t))))
+          (is (= #{:id :number :subject :from :last-from :created :owner :status :count :updated :unread :flow} (set (keys t))))
           (is (= {:id id :number 1 :subject "Shape" :from "a" :owner "a" :status "open" :count 2} (select-keys t [:id :number :subject :from :owner :status :count])))
+          (is (= ["a" "b" "a"] (:flow t)) "a wrote, b answered: a's turn")
           (is (= 2 (:unread t)) "the caller here is a bystander, so both messages are new to it")))
       (testing "read --json is the thread with its messages"
         (let [th (thread-json id)]
@@ -915,7 +930,7 @@
         (is (= [docs dns cert vault invoice typo] (map :id (:threads st))))
         (is (= (sort #(compare %2 %1) (map :updated (:threads st))) (map :updated (:threads st)))))
       (testing "each thread is what list --json gives, plus the derived fields"
-        (is (every? #(= #{:id :number :subject :from :last-from :created :owner :status :count :updated :unread
+        (is (every? #(= #{:id :number :subject :from :last-from :created :owner :status :count :updated :unread :flow
                           :unread-by :participants :waiting-s :listener} (set (keys %))) (:threads st)))
         (is (every? #(= (get listed (:id %)) (select-keys % (keys (get listed (:id %))))) (:threads st))
             "same values as list --all --json for the same caller"))
@@ -938,6 +953,15 @@
         (is (= {cert "user" dns "on-duty" docs "on-duty" invoice "none" typo "none"}
                (into {} (for [id [cert dns docs invoice typo]] [id (:listener (th id))])))
             "a stale waiting record is nobody; a working one whose session lives counts"))
+      (testing "flow: who the thread passed through, then whose turn it is"
+        (is (= {invoice ["website" "billing" "website" "billing"]
+                typo ["user" "website"]
+                vault ["website" "infra" "website"]
+                cert ["infra" "user"]
+                dns ["website" "infra"]
+                docs ["website" "docs"]}
+               (into {} (for [id [invoice typo vault cert dns docs]] [id (:flow (th id))])))
+            "closing sends a last message to the other party, so the closed vault ends with infra"))
       (testing "undelivered: open, not the user's, nobody on duty; longest waiting first"
         (is (= [typo invoice] (:undelivered st)) "not thread order, not number order"))
       (testing "the duty records, as who --json gives them"

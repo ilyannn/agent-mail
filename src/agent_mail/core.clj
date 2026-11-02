@@ -167,7 +167,21 @@
 
 ;; ---------------------------------------------------------------- status
 
-(defn summary "A thread without its messages." [th] (dissoc th :msgs))
+(defn flow
+  "Who the thread has passed through: the senders of its messages in written
+   order, consecutive repeats collapsed, then, while the thread is open, the
+   owner when it differs from the last sender. A wrote to B, B's turn: [A B];
+   B answered: [A B A]; B handed on to C: [A B C]; closed by B: [A B], since
+   nobody's turn is left. [] for a thread without messages."
+  [th]
+  (let [senders (vec (dedupe (keep :from (:msgs th))))
+        owner (:owner th)]
+    (cond-> senders (and (= "open" (:status th)) owner (not= owner (peek senders))) (conj owner))))
+
+(defn summary
+  "A thread without its messages, with its flow (list --json, status --json)."
+  [th]
+  (-> th (dissoc :msgs) (assoc :flow (flow th))))
 
 (defn participants
   "Every name the thread's messages come from or go to, sorted."
@@ -214,9 +228,10 @@
 
 (defn status
   "Everything at once, for a UI that must not re-derive anything: every thread
-   (closed ones too), newest-updated first, as a summary with the caller's
-   unread count, unread counts per participant, how long it has waited and who
-   will pick it up; the duty records as given; and the undelivered thread ids.
+   (closed ones too), newest-updated first, as a summary (flow included) with
+   the caller's unread count, unread counts per participant, how long it has
+   waited and who will pick it up; the duty records as given; and the
+   undelivered thread ids.
    `seen` maps each reader (the caller and every participant) to their seen
    markers; `duty` is the duty records with :on-duty already decided."
   [{:keys [now me threads seen duty]}]
