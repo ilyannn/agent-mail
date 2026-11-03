@@ -1,6 +1,6 @@
-// The sidebar's mailboxes and agents, derived from one status. Pure: the
-// CLI already decided who waits on whom and who is listening; this only
-// filters and orders.
+// The sidebar's mailboxes and participants, derived from one status. Pure:
+// the CLI already decided who waits on whom and who is listening; this only
+// filters, orders and words the counts.
 import Foundation
 
 public enum Mailbox: Hashable, Sendable, Codable {
@@ -10,7 +10,8 @@ public enum Mailbox: Hashable, Sendable, Codable {
     case undelivered
     /// Every thread, in the chosen ThreadOrder.
     case allMail
-    /// Every thread a repo takes part in, in the chosen ThreadOrder.
+    /// Every thread a participant takes part in, in the chosen ThreadOrder:
+    /// a repo, or the user's own address (`status.me`) for the user's row.
     case agent(String)
 
     public var title: String {
@@ -23,7 +24,7 @@ public enum Mailbox: Hashable, Sendable, Codable {
     }
 }
 
-/// How All Mail and an agent's mailbox are sorted. The Inbox is newest
+/// How All Mail and a participant's mailbox are sorted. The Inbox is newest
 /// first and Undelivered keeps the CLI's order, whatever this says.
 public enum ThreadOrder: String, CaseIterable, Codable, Sendable {
     /// Latest activity first, open and closed threads mixed.
@@ -39,14 +40,56 @@ public enum ThreadOrder: String, CaseIterable, Codable, Sendable {
     }
 }
 
+/// A row under Participants: the user (`status.me`) or a repo.
 public struct AgentInfo: Hashable, Sendable {
     public var name: String
+    /// The user's own row, whose mailbox is every thread the user takes part in.
+    public var isMe: Bool
     public var onDuty: Bool
-    /// Messages this agent has not read yet, over all its threads.
-    public var unread: Int
-    /// Open threads waiting on this agent.
+    /// Open threads waiting on this participant: its sidebar badge.
     public var waiting: Int
     public var sessions: [DutyRecord]
+
+    public init(name: String, isMe: Bool = false, onDuty: Bool = false, waiting: Int = 0, sessions: [DutyRecord] = []) {
+        self.name = name
+        self.isMe = isMe
+        self.onDuty = onDuty
+        self.waiting = waiting
+        self.sessions = sessions
+    }
+
+    /// The badge spelled out: "2 threads waiting on infra", "1 thread
+    /// waiting on you", "Nothing waiting on infra".
+    public var waitingText: String {
+        let who = isMe ? "you" : name
+        return switch waiting {
+        case 0: "Nothing waiting on \(who)"
+        case 1: "1 thread waiting on \(who)"
+        default: "\(waiting) threads waiting on \(who)"
+        }
+    }
+
+    /// The sidebar row's tooltip: who it is (on duty, and in which sessions,
+    /// for a repo), then what the badge counts.
+    public var tooltip: String {
+        var who: String
+        if isMe {
+            who = "you (\(name)): every thread you take part in"
+        } else {
+            who = "\(name): " + (onDuty ? "on duty" : "nobody on duty")
+            let live = sessions.filter(\.onDuty).map { "\($0.session) (\($0.state))" }
+            if !live.isEmpty { who += " — " + live.joined(separator: ", ") }
+        }
+        return who + "\n" + waitingText
+    }
+
+    /// The sidebar row's VoiceOver label; it names the count only when the
+    /// badge shows one.
+    public var accessibilityLabel: String {
+        var parts = isMe ? ["\(name) (you)"] : [name, onDuty ? "on duty" : "not on duty"]
+        if waiting > 0 { parts.append(waitingText) }
+        return parts.joined(separator: ", ")
+    }
 }
 
 public struct MailboxIndex: Sendable, Equatable {
@@ -55,7 +98,9 @@ public struct MailboxIndex: Sendable, Equatable {
     public let undelivered: [ThreadSummary]
     /// Every thread, newest first (ThreadOrder.newestFirst).
     public let allMail: [ThreadSummary]
-    public let agents: [AgentInfo]
+    /// The sidebar's Participants: the user (`me`) first, then every repo on
+    /// duty or in a thread, by name.
+    public let participants: [AgentInfo]
     private let allMailOpenFirst: [ThreadSummary]
     private let byID: [String: ThreadSummary]
 
@@ -74,20 +119,28 @@ public struct MailboxIndex: Sendable, Equatable {
         allMailOpenFirst = newestFirst.filter(\.isOpen) + newestFirst.filter { !$0.isOpen }
 
         let duty = status?.duty ?? []
-        let names = Set(duty.map(\.repo)).union(threads.flatMap(\.participants)).subtracting([me])
-        agents = names.sorted { $0.localizedStandardCompare($1) == .orderedAscending }.map { name in
+        let repos = Set(duty.map(\.repo)).union(threads.flatMap(\.participants)).subtracting([me])
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        participants = ([me] + repos).map { name in
             let sessions = duty.filter { $0.repo == name }
             return AgentInfo(name: name,
+                             isMe: name == me,
                              onDuty: sessions.contains(where: \.onDuty),
-                             unread: threads.reduce(0) { $0 + ($1.unreadBy[name] ?? 0) },
                              waiting: threads.filter { $0.isWaiting(on: name) }.count,
                              sessions: sessions)
         }
     }
 
+    /// The repos alone, without the user: the recipients New Message offers
+    /// and the menu bar's On Duty list.
+    public var agents: [AgentInfo] { participants.filter { !$0.isMe } }
+
+    public func participant(_ name: String) -> AgentInfo? { participants.first { $0.name == name } }
+
     public func thread(_ id: String) -> ThreadSummary? { byID[id] }
 
-    /// A mailbox's threads; `order` sorts All Mail and agent mailboxes only.
+    /// A mailbox's threads; `order` sorts All Mail and participant mailboxes
+    /// only. The user's own row is `.agent(me)`: every thread with `me` in it.
     public func threads(in mailbox: Mailbox, order: ThreadOrder = .newestFirst) -> [ThreadSummary] {
         switch mailbox {
         case .inbox: inbox
@@ -104,14 +157,17 @@ public struct MailboxIndex: Sendable, Equatable {
         }
     }
 
-    /// The count shown next to a mailbox: unread messages for the Inbox,
-    /// threads for Undelivered, the agent's own unread messages for an agent.
+    /// The count shown next to a mailbox, 0 for none. The units differ on
+    /// purpose: the Inbox counts unread messages (the menu bar's number),
+    /// Undelivered counts threads, and a participant counts the open threads
+    /// waiting on it. So the user's row shows as many threads as the Inbox
+    /// holds, while the Inbox badge counts the messages in them.
     public func badge(for mailbox: Mailbox) -> Int {
         switch mailbox {
         case .inbox: unreadInInbox
         case .undelivered: undelivered.count
         case .allMail: 0
-        case let .agent(name): agents.first { $0.name == name }?.unread ?? 0
+        case let .agent(name): participant(name)?.waiting ?? 0
         }
     }
 

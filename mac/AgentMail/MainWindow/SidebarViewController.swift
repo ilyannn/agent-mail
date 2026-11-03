@@ -1,7 +1,8 @@
 // The sidebar: a source list with Mailboxes (Inbox, Undelivered, All Mail)
-// and Agents (every repo on duty or in a thread, with an on-duty dot and its
-// unread count). Driven by a diffable data source keyed by row identity;
-// counts are refreshed in place, never with reloadData().
+// and Participants (the user first, then every repo on duty or in a thread
+// with an on-duty dot; each counts the open threads waiting on it). Driven by
+// a diffable data source keyed by row identity; counts are refreshed in
+// place, never with reloadData().
 import AgentMailKit
 import AppKit
 import Observation
@@ -34,7 +35,7 @@ final class SidebarViewController: NSViewController, NSTableViewDelegate {
         tableView.floatsGroupRows = false
         tableView.allowsEmptySelection = false
         tableView.delegate = self
-        tableView.setAccessibilityLabel("Mailboxes and agents")
+        tableView.setAccessibilityLabel("Mailboxes and participants")
         let scroll = NSScrollView()
         scroll.documentView = tableView
         scroll.hasVerticalScroller = true
@@ -58,10 +59,9 @@ final class SidebarViewController: NSViewController, NSTableViewDelegate {
         var snapshot = NSDiffableDataSourceSnapshot<Int, SidebarRow>()
         snapshot.appendSections([0])
         snapshot.appendItems([.header("Mailboxes"), .mailbox(.inbox), .mailbox(.undelivered), .mailbox(.allMail)])
-        let agents = store.index.agents
-        if !agents.isEmpty {
-            snapshot.appendItems([.header("Agents")] + agents.map { .mailbox(.agent($0.name)) })
-        }
+        // Never empty: the user's own row is always first.
+        let participants = store.index.participants
+        snapshot.appendItems([.header("Participants")] + participants.map { .mailbox(.agent($0.name)) })
         applying = true
         defer { applying = false }
         dataSource.apply(snapshot, animatingDifferences: false)
@@ -92,28 +92,32 @@ final class SidebarViewController: NSViewController, NSTableViewDelegate {
         case let .mailbox(mailbox):
             let count = index.badge(for: mailbox)
             switch mailbox {
+            // The Inbox counts unread messages; the participants below count
+            // threads (MailboxIndex.badge(for:)).
             case .inbox:
                 cell.show(title: "Inbox", image: symbol("tray", "Inbox"), count: count,
-                          tip: "Open threads waiting on you; the count is unread messages.")
+                          tip: "Open threads waiting on you; the count is unread messages.",
+                          accessibility: count > 0 ? "Inbox, \(count) unread message\(count == 1 ? "" : "s")" : "Inbox")
             case .undelivered:
                 cell.show(title: "Undelivered", image: symbol("paperplane", "Undelivered"), count: count,
-                          tip: "Open threads whose recipient has nobody on duty.")
+                          tip: "Open threads whose recipient has nobody on duty.",
+                          accessibility: count > 0 ? "Undelivered, \(count) thread\(count == 1 ? "" : "s")" : "Undelivered")
             case .allMail:
                 cell.show(title: "All Mail", image: symbol("tray.2", "All Mail"), count: 0,
                           tip: "Every thread, including mail between agents, in the order chosen under View › Sort By.")
             case let .agent(name):
-                let agent = index.agents.first { $0.name == name }
-                let onDuty = agent?.onDuty ?? false
-                let image = NSImage.dot(onDuty ? .systemGreen : .tertiaryLabelColor, filled: onDuty,
-                                        label: onDuty ? "On duty" : "Not on duty")
-                var tip = "\(name): " + (onDuty ? "on duty" : "nobody on duty")
-                if let agent {
-                    let sessions = agent.sessions.filter(\.onDuty).map { "\($0.session) (\($0.state))" }
-                    if !sessions.isEmpty { tip += " — " + sessions.joined(separator: ", ") }
-                    tip += "\n\(agent.unread) unread by \(name), \(agent.waiting) thread\(agent.waiting == 1 ? "" : "s") waiting on it"
+                // A row from the previous snapshot may outlive its participant
+                // until the next apply().
+                let who = index.participant(name) ?? AgentInfo(name: name, isMe: name == index.me)
+                let image = if who.isMe {
+                    NSImage(systemSymbolName: "person.fill", accessibilityDescription: "You")?
+                        .withSymbolConfiguration(.init(paletteColors: [.tertiaryLabelColor]))
+                } else {
+                    NSImage.dot(who.onDuty ? .systemGreen : .tertiaryLabelColor, filled: who.onDuty,
+                                label: who.onDuty ? "On duty" : "Not on duty")
                 }
-                cell.show(title: name, image: image, count: count, tip: tip,
-                          accessibility: "\(name), \(onDuty ? "on duty" : "not on duty"), \(count) unread")
+                cell.show(title: name, image: image, count: count, tip: who.tooltip,
+                          accessibility: who.accessibilityLabel)
             }
         }
     }

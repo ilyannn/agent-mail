@@ -34,7 +34,7 @@ final class MailStore {
             }
         }
     }
-    /// How All Mail and agent mailboxes are sorted; saved in the settings.
+    /// How All Mail and participant mailboxes are sorted; saved in the settings.
     var threadOrder: ThreadOrder {
         didSet {
             guard threadOrder != oldValue else { return }

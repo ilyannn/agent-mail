@@ -58,12 +58,32 @@ import Testing
 
     @Test func mailboxRoundTrips() {
         withSettings { s in
-            for m: Mailbox in [.inbox, .undelivered, .allMail, .agent("infra")] {
+            // The user's own row under Participants is .agent(me).
+            for m: Mailbox in [.inbox, .undelivered, .allMail, .agent("infra"), .agent("user")] {
                 s.mailbox = m
                 #expect(s.mailbox == m)
             }
             s.cliPath = ""
             #expect(s.cliPath == nil)
+        }
+    }
+
+    @Test func sidebarListsTheUserFirstUnderParticipants() {
+        withSettings { s in
+            let store = MailStore(settings: s, location: StoreLocation(url: URL(filePath: "/tmp/agent-mail-tests-no-store"),
+                                                                       source: .environment))
+            let sidebar = SidebarViewController(store: store)
+            let window = NSWindow(contentViewController: sidebar)
+            window.isReleasedWhenClosed = false
+            defer { window.close() }
+            window.setContentSize(NSSize(width: 220, height: 400))
+            window.layoutIfNeeded()
+            let rows = sidebar.debugRows()
+            #expect(rows.map { $0.components(separatedBy: " | ")[0] } == [
+                "sidebar  Mailboxes", "sidebar* Inbox", "sidebar  Undelivered", "sidebar  All Mail",
+                "sidebar  Participants", "sidebar  user (you)",
+            ])
+            #expect(rows.last == "sidebar  user (you) | tip: you (user): every thread you take part in / Nothing waiting on you")
         }
     }
 

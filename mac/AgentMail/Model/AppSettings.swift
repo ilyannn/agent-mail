@@ -113,7 +113,7 @@ final class AppSettings {
         }
     }
 
-    /// How All Mail and agent mailboxes are sorted (View › Sort By).
+    /// How All Mail and participant mailboxes are sorted (View › Sort By).
     var threadOrder: ThreadOrder {
         get { ThreadOrder(rawValue: defaults.string(forKey: Key.threadOrder) ?? "") ?? .newestFirst }
         set { defaults.set(newValue.rawValue, forKey: Key.threadOrder) }

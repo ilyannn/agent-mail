@@ -64,27 +64,97 @@ import Testing
         #expect(ThreadOrder(rawValue: "newestFirst") == .newestFirst)
     }
 
-    @Test func agentsAreEveryoneButMe() {
-        #expect(index.agents.map(\.name) == ["infra", "website"])
-        let infra = index.agents[0], website = index.agents[1]
-        #expect(infra.unread == 2)
-        #expect(infra.waiting == 1)
-        #expect(!infra.onDuty)
-        #expect(website.unread == 1)
+    @Test func participantsAreMeFirstThenTheReposByName() {
+        #expect(index.participants.map(\.name) == ["user", "infra", "website"])
+        #expect(index.participants.map(\.isMe) == [true, false, false])
+        #expect(index.agents.map(\.name) == ["infra", "website"], "the repos alone, for New Message and On Duty")
+        #expect(index.participant("infra")?.onDuty == false)
+        #expect(index.participant("nobody") == nil)
         #expect(index.threads(in: .agent("website")).map(\.number) == [3, 2, 1])
-        #expect(index.badge(for: .agent("infra")) == 2)
+    }
+
+    @Test func myMailboxIsEveryThreadITakePartIn() {
+        #expect(index.threads(in: .agent("user")).map(\.number) == [4, 2, 1])
+        #expect(index.threads(in: .agent("user"), order: .openFirst).map(\.number) == [4, 2, 1])
+        let closedToo = MailboxIndex(status: MailStatus(now: .now, me: "user", threads: [
+            ThreadSummary(id: "a", number: 1, subject: "a", status: "done", updated: Date(timeIntervalSince1970: 2000),
+                          participants: ["user", "x"]),
+            ThreadSummary(id: "b", number: 2, subject: "b", updated: Date(timeIntervalSince1970: 1000),
+                          participants: ["user", "x"]),
+            ThreadSummary(id: "c", number: 3, subject: "c", updated: Date(timeIntervalSince1970: 3000),
+                          participants: ["x", "y"]),
+        ]))
+        #expect(closedToo.threads(in: .agent("user")).map(\.id) == ["a", "b"])
+        #expect(closedToo.threads(in: .agent("user"), order: .openFirst).map(\.id) == ["b", "a"])
+    }
+
+    @Test func participantBadgesCountThreadsWaitingOnThem() {
+        #expect(index.participants.map(\.waiting) == [2, 1, 0])
+        #expect(index.badge(for: .agent("user")) == index.inbox.count)
+        #expect(index.badge(for: .agent("user")) == 2, "threads, while the Inbox badge counts messages")
+        #expect(index.badge(for: .inbox) == 3)
+        #expect(index.badge(for: .agent("infra")) == 1, "#4; infra's unread closing note on #3 doesn't count")
+        #expect(index.badge(for: .agent("website")) == 0, "nothing open waits on website: no badge")
+        #expect(index.badge(for: .agent("nobody")) == 0)
+        #expect(index.badge(for: .allMail) == 0)
+    }
+
+    @Test func participantsSayWhatTheirBadgeCounts() throws {
+        let me = try #require(index.participant("user"))
+        #expect(me.waitingText == "2 threads waiting on you")
+        #expect(me.tooltip == "you (user): every thread you take part in\n2 threads waiting on you")
+        #expect(me.accessibilityLabel == "user (you), 2 threads waiting on you")
+        let infra = try #require(index.participant("infra"))
+        #expect(infra.waitingText == "1 thread waiting on infra")
+        #expect(infra.tooltip == "infra: nobody on duty\n1 thread waiting on infra")
+        #expect(infra.accessibilityLabel == "infra, not on duty, 1 thread waiting on infra")
+        let website = try #require(index.participant("website"))
+        #expect(website.waitingText == "Nothing waiting on website")
+        #expect(website.tooltip == "website: nobody on duty\nNothing waiting on website")
+        #expect(website.accessibilityLabel == "website, not on duty", "no badge, no count")
+        let idle = AgentInfo(name: "user", isMe: true)
+        #expect(idle.waitingText == "Nothing waiting on you")
+        #expect(idle.accessibilityLabel == "user (you)")
     }
 
     @Test func dutyMarksAgentsOnDuty() throws {
         let duty = MailboxIndex(status: try AgentMailJSON.decodeStatus(Fixture.data("status-duty")))
         #expect(duty.onDuty.map(\.name) == ["website"])
-        #expect(duty.agents.first { $0.name == "website" }?.sessions.first?.session == "s1")
+        let website = try #require(duty.participant("website"))
+        #expect(website.sessions.first?.session == "s1")
+        #expect(website.tooltip == "website: on duty — s1 (waiting)\nNothing waiting on website")
+        #expect(website.accessibilityLabel == "website, on duty")
+        #expect(duty.participant("user")?.onDuty == false)
     }
 
     @Test func agentsSeenOnlyOnDutyAreListed() {
         let st = MailStatus(now: .now, me: "user", threads: [],
                             duty: [DutyRecord(repo: "docs", session: "s", onDuty: true)])
         #expect(MailboxIndex(status: st).agents.map(\.name) == ["docs"])
+        #expect(MailboxIndex(status: st).participants.map(\.name) == ["user", "docs"])
+    }
+
+    @Test func meComesFirstWhateverItsName() {
+        let st = MailStatus(now: .now, me: "zoe", threads: [
+            ThreadSummary(id: "a", subject: "a", owner: "zoe", participants: ["zoe", "website"]),
+            ThreadSummary(id: "b", subject: "b", owner: "docs", participants: ["agent-rules", "docs"]),
+        ])
+        let index = MailboxIndex(status: st)
+        #expect(index.participants.map(\.name) == ["zoe", "agent-rules", "docs", "website"])
+        #expect(index.participants.map(\.waiting) == [1, 0, 1, 0])
+        #expect(index.participant("zoe")?.tooltip == "you (zoe): every thread you take part in\n1 thread waiting on you")
+    }
+
+    @Test func theUserIsListedBeforeAnythingLoads() {
+        #expect(MailboxIndex.empty.participants == [AgentInfo(name: "user", isMe: true)])
+        #expect(MailboxIndex.empty.agents.isEmpty)
+        #expect(MailboxIndex.empty.badge(for: .agent("user")) == 0)
+    }
+
+    @Test func myMailboxCodesLikeAnyParticipant() throws {
+        let data = try JSONEncoder().encode(Mailbox.agent("user"))
+        #expect(try JSONDecoder().decode(Mailbox.self, from: data) == .agent("user"))
+        #expect(Mailbox.agent("user").title == "user")
     }
 
     @Test func preferredMailbox() {

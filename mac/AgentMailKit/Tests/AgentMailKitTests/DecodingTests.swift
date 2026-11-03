@@ -100,6 +100,7 @@ import Testing
             """.utf8))
         #expect(st.threads.isEmpty)
         #expect(MailboxIndex(status: st).agents.isEmpty)
+        #expect(MailboxIndex(status: st).participants.map(\.name) == ["user"])
     }
 
     @Test func threadWithoutMessagesHasNoOwner() throws {

@@ -160,7 +160,7 @@ final class ThreadListViewController: NSViewController, NSTableViewDelegate, NSM
             case .inbox: "Nothing waiting on you"
             case .undelivered: "Everything is being listened for"
             case .allMail: "No threads yet"
-            case let .agent(name): "No threads with \(name)"
+            case let .agent(name): name == store.index.me ? "No threads yet" : "No threads with \(name)"
             }
         }
         emptyLabel.isHidden = !isEmpty

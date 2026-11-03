@@ -254,7 +254,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             let item = NSMenuToolbarItem(itemIdentifier: id)
             item.label = "Sort By"
             item.paletteLabel = "Sort By"
-            item.toolTip = "Sort All Mail and agent mailboxes"
+            item.toolTip = "Sort All Mail and participant mailboxes"
             item.menu = MainMenu.sortMenu()
             item.showsIndicator = true
             item.autovalidates = false
