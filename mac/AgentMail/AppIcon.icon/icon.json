@@ -14,23 +14,9 @@
   },
   "groups" : [ {
     "layers" : [ {
-      "glass" : false,
-      "image-name" : "eyes.svg",
-      "name" : "eyes"
-    } ],
-    "shadow" : {
-      "kind" : "neutral",
-      "opacity" : 0.5
-    },
-    "translucency" : {
-      "enabled" : false,
-      "value" : 0.5
-    }
-  }, {
-    "layers" : [ {
       "glass" : true,
-      "image-name" : "agent.svg",
-      "name" : "agent"
+      "image-name" : "cursor.svg",
+      "name" : "cursor"
     } ],
     "shadow" : {
       "kind" : "neutral",

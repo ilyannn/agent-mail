@@ -14,8 +14,8 @@ the results with the SVGs.
 Three hand-drawn concepts on a 1024 × 1024 canvas share one palette: a blue
 gradient, amber, white, and deep indigo for the eyes.
 
-- `envelope-agent.svg` (shipped): an envelope sealed by a small robot head on the tip of its flap.
-- `envelope-prompt.svg`: an envelope opening at the side, so the flap line is a prompt `>`, with a block cursor.
+- `envelope-agent.svg`: an envelope sealed by a small robot head on the tip of its flap.
+- `envelope-prompt.svg` (shipped): an envelope opening at the side, so the flap line is a prompt `>`, with a block cursor.
 - `two-agents.svg`: two robot heads with letters passing between them.
 
 Each one is also a layer stack for Icon Composer:

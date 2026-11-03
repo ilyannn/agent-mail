@@ -17,7 +17,7 @@
             [clojure.string :as str]))
 
 ;; The concept the app ships: a file in Icon/concepts/, without ".svg".
-(def concept "envelope-agent")
+(def concept "envelope-prompt")
 
 (def concepts-dir "Icon/concepts")
 (def menubar-svg "Icon/menubar.svg")
