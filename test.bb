@@ -1379,6 +1379,18 @@
           (is (= (str "agent-mail: serve is already running (pid " me ")") (str/trim (:err r)))))
         (is (= (str me) (str/trim (slurp (str (serve-file "pid"))))) "its pid file is left alone")
         (is (= {:alive true :pid me} (:serve (status-json {})))))
+      (testing "--standby (launchd's) waits for the live one to end, then takes over"
+        (let [w (start {} "serve" "--standby" "--once" "--interval" "1")]
+          (Thread/sleep 2500)
+          (is (p/alive? w) "still standing by")
+          (state! "2020-01-01T00:00:00.000Z")
+          (let [r (deref w 15000 nil)]
+            (is (= 0 (:exit r)) (:err r))
+            (is (str/includes? (:err r) (str "serve: standing by while serve pid " me " runs")))
+            (is (= 1 (count (re-seq #"standing by" (:err r)))) "said once")
+            (is (str/includes? (:err r) "a round every 1s"))))
+        (spit (str (serve-file "pid")) (str me "\n"))
+        (state! (core/now-utc)))
       (testing "a stale heartbeat, or a dead pid: taken over, and given up when done"
         (state! "2020-01-01T00:00:00.000Z")
         (is (= {:alive false :pid me} (:serve (status-json {}))) "a live pid alone is not enough")

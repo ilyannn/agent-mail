@@ -81,7 +81,7 @@ install-serve:
                        "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
                        "<plist version=\"1.0\">\n<dict>\n"
                        "  <key>Label</key>" (s label) "\n"
-                       "  <key>ProgramArguments</key><array>" (s bin) (s "serve") "</array>\n"
+                       "  <key>ProgramArguments</key><array>" (s bin) (s "serve") (s "--standby") "</array>\n"
                        "  <key>EnvironmentVariables</key><dict>"
                        (str/join (for [[k v] (sort vars)] (str "<key>" k "</key>" (s v)))) "</dict>\n"
                        "  <key>WorkingDirectory</key>" (s home) "\n"

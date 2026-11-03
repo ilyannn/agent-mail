@@ -1104,13 +1104,23 @@
   "The on-call daemon (see core/oncall-actions): a round every --interval
    seconds (5), closing tabs idle for --idle-minutes (see serve-idle-minutes);
    --once runs one round. Its memory and heartbeat go to duty/serve/state.edn
-   after every round. Exits when another serve has taken the pid file over."
+   after every round. Exits when another serve has taken the pid file over.
+   Another serve alive refuses this one, except with --standby (launchd's):
+   then it waits for that one to end and takes over, rather than exiting
+   for launchd to restart every few seconds."
   [opts]
   (let [interval (or (:interval opts) 5)
         idle-minutes (or (:idle-minutes opts) serve-idle-minutes)
         cfg {:idle-ms (* 60000 idle-minutes) :grace-ms core/oncall-grace-ms}
         me (.pid (java.lang.ProcessHandle/current))]
     (when (< interval 1) (fail "--interval must be at least 1"))
+    (when (:standby opts)
+      (loop [said? false]
+        (let [{:keys [alive pid]} (serve-info)]
+          (when (and alive (not= pid me))
+            (when-not said? (log! (str "serve: standing by while serve pid " pid " runs")))
+            (Thread/sleep (* 1000 interval))
+            (recur true)))))
     (claim-serve! interval)
     (.addShutdownHook (Runtime/getRuntime) (Thread. ^Runnable release-serve!))
     (log! (str "serve: pid " me ", a round every " interval "s, idle tabs closed after " idle-minutes "m"))
@@ -1180,7 +1190,7 @@
                                               its main worktree. wait in a Claude Code session
                                               does this for its repo the first time
   agent-mail oncall remove [NAME]             take it off; wait won't put it back
-  agent-mail serve [--interval S] [--idle-minutes M] [--once]
+  agent-mail serve [--interval S] [--idle-minutes M] [--once] [--standby]
                                               the on-call daemon (`just install-serve` runs it
                                               under launchd): every S (5) seconds it opens a
                                               WezTerm tab running `claude \"/agent-mail-listen\"`
@@ -1189,7 +1199,8 @@
                                               waits and its session has been idle M (60)
                                               minutes: the prompt cache lives an hour, so a
                                               session kept longer answers no cheaper than a
-                                              fresh one. One serve at a time
+                                              fresh one. One serve at a time; --standby
+                                              (launchd's) waits for a running one to end
   agent-mail status [--json]                  everything at once, for UIs
   agent-mail hook                             SessionStart hook output
   agent-mail whoami                           who the caller is
