@@ -1,5 +1,6 @@
 // Fixtures captured from real `agent-mail status --json` and `read --json`
-// output against a scratch store (repos `infra` and `website`, and `user`).
+// output against a scratch store (repos `infra` and `website`, and `user`;
+// the -forward ones also `docs`, with two forwards of a closed thread).
 import Foundation
 
 enum Fixture {

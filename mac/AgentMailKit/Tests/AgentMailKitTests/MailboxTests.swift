@@ -88,6 +88,103 @@ import Testing
         #expect(closedToo.threads(in: .agent("user"), order: .openFirst).map(\.id) == ["b", "a"])
     }
 
+    @Test func participantFiltersSplitAParticipantsThreads() {
+        func numbers(_ name: String, _ filter: ParticipantFilter, _ order: ThreadOrder = .newestFirst) -> [Int?] {
+            index.threads(in: .agent(name), order: order, filter: filter).map(\.number)
+        }
+        #expect(numbers("user", .all) == [4, 2, 1])
+        #expect(numbers("user", .sent) == [4])
+        #expect(numbers("user", .received) == [2, 1])
+        #expect(numbers("user", .waiting) == [2, 1])
+        #expect(numbers("infra", .all) == [4, 3, 1])
+        #expect(numbers("infra", .sent) == [3])
+        #expect(numbers("infra", .received) == [4, 1])
+        #expect(numbers("infra", .waiting) == [4], "#3 is infra's turn but closed")
+        #expect(numbers("website", .sent) == [2, 1])
+        #expect(numbers("website", .received) == [3])
+        #expect(numbers("website", .waiting) == [])
+        #expect(numbers("infra", .received, .openFirst) == [4, 1])
+        #expect(numbers("website", .all, .openFirst) == [2, 1, 3])
+        #expect(index.threads(in: .agent("infra")) == index.threads(in: .agent("infra"), filter: .all), "All is the default")
+    }
+
+    @Test func sentAndReceivedPartitionAll() {
+        for p in index.participants {
+            for order in ThreadOrder.allCases {
+                let all = index.threads(in: .agent(p.name), order: order).map(\.id)
+                let sent = index.threads(in: .agent(p.name), order: order, filter: .sent).map(\.id)
+                let received = index.threads(in: .agent(p.name), order: order, filter: .received).map(\.id)
+                #expect(Set(sent).isDisjoint(with: received), "\(p.name)")
+                #expect(Set(sent).union(received) == Set(all), "\(p.name)")
+                #expect(all.filter(Set(sent).contains) == sent, "the filter keeps the order")
+            }
+        }
+    }
+
+    @Test func filtersApplyToParticipantMailboxesOnly() {
+        for filter in ParticipantFilter.allCases {
+            #expect(index.threads(in: .inbox, filter: filter) == index.inbox)
+            #expect(index.threads(in: .undelivered, filter: filter) == index.undelivered)
+            #expect(index.threads(in: .allMail, filter: filter) == index.allMail)
+        }
+    }
+
+    @Test func filterCountsMatchTheListsAndTheBadge() {
+        for p in index.participants {
+            for filter in ParticipantFilter.allCases {
+                #expect(index.count(filter, for: p.name) == index.threads(in: .agent(p.name), filter: filter).count)
+            }
+            #expect(index.count(.waiting, for: p.name) == p.waiting, "Waiting is the sidebar badge")
+        }
+        #expect(index.count(.waiting, for: "user") == index.inbox.count)
+        #expect(index.count(.all, for: "nobody") == 0)
+    }
+
+    @Test func filtersNameTheirParticipant() throws {
+        #expect(ParticipantFilter.allCases == [.all, .sent, .received, .waiting])
+        #expect(ParticipantFilter.allCases.map(\.title) == ["All", "Sent", "Received", "Waiting"])
+        #expect(ParticipantFilter.allCases.map { $0.explanation(for: "infra", isMe: false) } == [
+            "Every thread infra takes part in", "Threads infra started",
+            "Threads others started that infra takes part in", "Open threads waiting on infra",
+        ])
+        #expect(ParticipantFilter.allCases.map { $0.explanation(for: "user", isMe: true) } == [
+            "Every thread you take part in", "Threads you started",
+            "Threads others started that you take part in", "Open threads waiting on you",
+        ])
+        #expect(ParticipantFilter.allCases.map { $0.emptyText(for: "infra", isMe: false) } == [
+            "No threads with infra", "infra hasn’t started a thread", "No threads others started with infra",
+            "Nothing waiting on infra",
+        ])
+        #expect(ParticipantFilter.allCases.map { $0.emptyText(for: "user", isMe: true) } == [
+            "No threads yet", "You haven’t started a thread", "No threads others started with you",
+            "Nothing waiting on you",
+        ])
+        let data = try JSONEncoder().encode(ParticipantFilter.received)
+        #expect(String(data: data, encoding: .utf8) == #""received""#)
+        #expect(try JSONDecoder().decode(ParticipantFilter.self, from: data) == .received)
+        #expect(ParticipantFilter(rawValue: "waiting") == .waiting)
+    }
+
+    @Test func forwardsAreFoundByTheirSource() throws {
+        let fwd = MailboxIndex(status: try AgentMailJSON.decodeStatus(Fixture.data("status-forward")))
+        let forwards = fwd.forwards(of: "2026-11-03-rotate-the-certificate")
+        #expect(forwards.map(\.number) == [2, 3], "in the order they were started")
+        #expect(forwards.map(\.firstRecipient) == ["docs", "infra"])
+        #expect(fwd.forwards(of: "2026-11-03-fwd-rotate-the-certificate").isEmpty)
+        #expect(index.forwards(of: "2026-10-31-deploy-the-new-site").isEmpty)
+    }
+
+    @Test func firstRecipientFromTheSummary() {
+        #expect(ThreadSummary(id: "a", subject: "s", from: "user", owner: "docs", flow: ["user", "docs"]).firstRecipient == "docs")
+        #expect(ThreadSummary(id: "b", subject: "s", from: "user", owner: "user", flow: ["user", "infra", "user"])
+            .firstRecipient == "infra", "the recipient wrote back")
+        #expect(ThreadSummary(id: "c", subject: "s", from: "user", owner: "infra").firstRecipient == "infra",
+                "an older CLI without flow: the owner")
+        #expect(ThreadSummary(id: "d", subject: "s", from: "user", owner: "user", participants: ["user", "docs"])
+            .firstRecipient == "docs")
+        #expect(ThreadSummary(id: "e", subject: "s").firstRecipient == nil)
+    }
+
     @Test func participantBadgesCountThreadsWaitingOnThem() {
         #expect(index.participants.map(\.waiting) == [2, 1, 0])
         #expect(index.badge(for: .agent("user")) == index.inbox.count)

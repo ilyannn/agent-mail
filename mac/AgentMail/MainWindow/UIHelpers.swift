@@ -1,5 +1,6 @@
 // Small AppKit pieces shared by the windows: the plain-text editor used for
-// replies and new messages, label shorthands and the dot image.
+// replies and new messages, label shorthands, a view filled with the text
+// background, and the dot image.
 import AppKit
 
 enum PlainTextEditor {
@@ -65,10 +66,21 @@ final class EditorTextView: NSTextView {
 
 extension NSEvent {
     /// ⌘↩ (Return or Enter with Command alone), which sends from the reply
-    /// box and the compose window.
+    /// box, the new message's included.
     var isCommandReturn: Bool {
         type == .keyDown && (keyCode == 36 || keyCode == 76)
             && modifierFlags.intersection([.command, .shift, .option, .control]) == .command
+    }
+}
+
+/// A plain view filled with the text background (light or dark, as the
+/// appearance draws it), so native views can sit on a web page's Canvas.
+final class FilledView: NSView {
+    override var isOpaque: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.textBackgroundColor.setFill()
+        dirtyRect.fill()
     }
 }
 

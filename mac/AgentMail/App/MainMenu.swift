@@ -1,10 +1,11 @@
 // The menu bar, with Mail's shortcuts where Mail has the command: New ⌘N,
-// Reply ⌘R, Send ⇧⌘D, Close Thread ⌃⌘A (Mail's Archive), Get New Mail ⇧⌘N;
-// mailboxes ⌘1–3 and the sidebar ⌃⌘S. Text size has Safari's: Actual Size
-// ⌘0, Make Text Bigger ⌘+ (and ⌘=), Make Text Smaller ⌘−, so the main
-// window is ⌥⌘0. ⌘↩ also sends from the reply box (ThreadViewController). Every command is here, so it can be
-// rebound in System Settings › Keyboard › Keyboard Shortcuts. Actions go
-// down the responder chain (nil target).
+// Reply ⌘R, Forward ⇧⌘F, Send ⇧⌘D, Close Thread ⌃⌘A (Mail's Archive), Get
+// New Mail ⇧⌘N; mailboxes ⌘1–3 and the sidebar ⌃⌘S. Text size has Safari's:
+// Actual Size ⌘0, Make Text Bigger ⌘+ (and ⌘=), Make Text Smaller ⌘−, so the
+// main window is ⌥⌘0. ⌘↩ also sends from the reply box
+// (ThreadViewController). Every command is here, so it can be rebound in
+// System Settings › Keyboard › Keyboard Shortcuts. Actions go down the
+// responder chain (nil target).
 import AgentMailKit
 import AppKit
 
@@ -19,7 +20,10 @@ import AppKit
     func showAllMail(_ sender: Any?)
     /// Sort By: the sender is a menu item whose tag is a ThreadOrder's menuTag.
     func setThreadOrder(_ sender: Any?)
+    /// Participant Filter: the sender's tag is a ParticipantFilter's menuTag.
+    func setParticipantFilter(_ sender: Any?)
     func replyToThread(_ sender: Any?)
+    func forwardThread(_ sender: Any?)
     func sendReply(_ sender: Any?)
     func closeThread(_ sender: Any?)
     func copyThreadID(_ sender: Any?)
@@ -153,7 +157,7 @@ enum MainMenu {
         return i
     }
 
-    private static func viewMenu() -> NSMenu {
+    static func viewMenu() -> NSMenu {
         let m = NSMenu(title: "View")
         m.addItem(item("Show Sidebar", #selector(NSSplitViewController.toggleSidebar(_:)), "s", [.command, .control]))
         m.addItem(.separator())
@@ -172,8 +176,21 @@ enum MainMenu {
         m.addItem(.separator())
         m.addItem(withSubmenu(sortMenu()))
         m.addItem(.separator())
+        for i in filterItems() { m.addItem(i) }
+        m.addItem(.separator())
         m.addItem(item("Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control]))
         return m
+    }
+
+    /// View › Participant Filter: a section header and one item per filter,
+    /// the current one checked; validateMenuItem enables them only while a
+    /// participant's mailbox is shown.
+    static func filterItems() -> [NSMenuItem] {
+        [NSMenuItem.sectionHeader(title: "Participant Filter")] + ParticipantFilter.allCases.map { filter in
+            let i = item(filter.title, #selector(MailActions.setParticipantFilter(_:)), tag: filter.menuTag)
+            i.toolTip = filter.explanation(for: "the participant", isMe: false)
+            return i
+        }
     }
 
     /// View › Sort By, and the toolbar's sort menu: one item per order, the
@@ -192,11 +209,12 @@ enum MainMenu {
         return m
     }
 
-    private static func messageMenu() -> NSMenu {
+    static func messageMenu() -> NSMenu {
         let m = NSMenu(title: "Message")
         m.addItem(item("Send", #selector(MailActions.sendReply(_:)), "d", [.command, .shift]))
         m.addItem(.separator())
         m.addItem(item("Reply", #selector(MailActions.replyToThread(_:)), "r"))
+        m.addItem(item("Forward", #selector(MailActions.forwardThread(_:)), "f", [.command, .shift]))
         m.addItem(item("Close Thread", #selector(MailActions.closeThread(_:)), "a", [.command, .control]))
         m.addItem(.separator())
         m.addItem(item("Copy Thread ID", #selector(MailActions.copyThreadID(_:))))
@@ -230,5 +248,18 @@ extension ThreadOrder {
     init?(menuItem sender: Any?) {
         guard let tag = (sender as? NSMenuItem)?.tag, Self.allCases.indices.contains(tag) else { return nil }
         self = Self.allCases[tag]
+    }
+}
+
+extension ParticipantFilter {
+    /// The tag of this filter's View menu item.
+    var menuTag: Int { Self.allCases.firstIndex(of: self) ?? 0 }
+
+    /// The filter a Participant Filter item stands for (its section header
+    /// has no action, so it stands for none).
+    init?(menuItem sender: Any?) {
+        guard let item = sender as? NSMenuItem, item.action == #selector(MailActions.setParticipantFilter(_:)),
+              Self.allCases.indices.contains(item.tag) else { return nil }
+        self = Self.allCases[item.tag]
     }
 }

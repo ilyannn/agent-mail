@@ -1,11 +1,13 @@
 // A whole thread as one HTML document for the web view: a strict CSP (no
 // scripts, no network; images only from the attachment scheme), the app's
-// stylesheet inlined, and every message as a card with its header (from →
-// to, date, Open and Reply buttons), its body, and its attachments (links,
-// image thumbnails, Markdown files rendered in a collapsible section). Long
-// read messages start folded with the middle in a <details>, which works
-// without JavaScript; unread ones and the newest never do. The newest is
-// marked so the view can scroll to it.
+// stylesheet inlined, a header (subject, state, Reply and Forward, links to
+// the thread it forwards and the forwards of it), and every message as a
+// card with its header (from → to, date, Open, Reply and Forward buttons),
+// its body, and its attachments (links, image thumbnails, Markdown files
+// rendered in a collapsible section). Long read messages start folded with
+// the middle in a <details>, which works without JavaScript; unread ones and
+// the newest never do. The newest is marked so the view can scroll to it.
+// A forward's preview is the same cards without the header or buttons.
 import Foundation
 
 public enum ThreadDocument {
@@ -18,8 +20,12 @@ public enum ThreadDocument {
     ///     ones); the newest always is.
     ///   - readAttachment: the text of a Markdown attachment by name, or nil
     ///     to only link it.
+    ///   - forwardedFrom: the thread this one forwards, linked from the header
+    ///     (a bare id when the index doesn't know it).
+    ///   - forwards: the threads that forward this one, linked from the header.
     ///   - formatDate: local time for a message date.
     public static func html(thread: ThreadDetail, me: String, css: String, expanded: Set<String> = [],
+                            forwardedFrom: ThreadSummary? = nil, forwards: [ThreadSummary] = [],
                             readAttachment: (String) -> String? = { _ in nil },
                             formatDate: (Date) -> String) -> String {
         let e = MarkdownHTML.escape
@@ -28,48 +34,96 @@ public enum ThreadDocument {
         meta.append(thread.isOpen ? "open" : "closed")
         if thread.isOpen, let owner = thread.owner { meta.append("waiting on \(owner == me ? "you" : owner)") }
         if let from = thread.from { meta.append("started by \(from)") }
-        let replyAll = LinkPolicy.actionURL(.reply, thread: thread.id).map {
-            " <a class=\"button\" href=\"\(e($0.absoluteString))\" title=\"Reply (⌘R)\">Reply</a>"
-        } ?? ""
+        var buttons = ""
+        if let reply = LinkPolicy.actionURL(.reply, thread: thread.id) {
+            buttons += " <a class=\"button\" href=\"\(e(reply.absoluteString))\" title=\"Reply (⌘R)\">Reply</a>"
+        }
+        if let forward = LinkPolicy.actionURL(.forward, thread: thread.id) {
+            let tip = thread.isOpen ? "Hand the thread on to someone else (⇧⌘F)" : "Forward the thread in a new thread (⇧⌘F)"
+            buttons += " <a class=\"button\" href=\"\(e(forward.absoluteString))\" title=\"\(tip)\">Forward</a>"
+        }
 
         var body = """
             <header class="thread">
             <h1>\(e(thread.subject))</h1>
-            <p class="meta"><span>\(meta.map(e).joined(separator: " · "))</span>\(replyAll)</p>
-            </header>
+            <p class="meta"><span>\(meta.map(e).joined(separator: " · "))</span>\(buttons)</p>
+            \(related(thread: thread.id, forwardedFrom: forwardedFrom, forwards: forwards))</header>
 
             """
         for (i, m) in thread.msgs.enumerated() {
             let newest = i == thread.msgs.count - 1
-            body += card(m, index: i, thread: thread.id, me: me, newest: newest,
-                         unread: expanded.contains(m.file), readAttachment: readAttachment, formatDate: formatDate)
+            body += card(m, index: i, thread: thread.id, me: me, newest: newest, unread: expanded.contains(m.file),
+                         threadIsOpen: thread.isOpen, readAttachment: readAttachment, formatDate: formatDate)
         }
-
-        return """
-            <!DOCTYPE html>
-            <html>
-            <head>
-            <meta charset="utf-8">
-            <meta http-equiv="Content-Security-Policy" content="\(contentSecurityPolicy)">
-            <meta name="color-scheme" content="light dark">
-            <title>\(e(thread.subject))</title>
-            <style>
-            \(css)
-            </style>
-            </head>
-            <body>
-            <main>
-            \(body)</main>
-            </body>
-            </html>
-
-            """
+        return document(title: thread.subject, css: css, body: body)
     }
 
+    /// What a forward of `thread` carries, for the new thread's preview: its
+    /// messages (or only `message`, a file name) as cards without buttons,
+    /// none folded or marked unread, and no thread header (the draft shows
+    /// its own). Attachment links name the source thread's files.
+    public static func forwardPreview(thread: ThreadDetail, message: String?, me: String, css: String,
+                                      readAttachment: (String) -> String? = { _ in nil },
+                                      formatDate: (Date) -> String) -> String {
+        var body = ""
+        for (i, m) in thread.msgs.enumerated() where message == nil || m.file == message {
+            body += card(m, index: i, thread: thread.id, me: me, newest: false, unread: false, preview: true,
+                         readAttachment: readAttachment, formatDate: formatDate)
+        }
+        return document(title: thread.subject, css: css, body: body)
+    }
+
+    /// The header's links to related threads: the one this forwards, and the
+    /// forwards of this one ("Forwarded to infra as #45").
+    static func related(thread: String, forwardedFrom: ThreadSummary?, forwards: [ThreadSummary]) -> String {
+        let e = MarkdownHTML.escape
+        func link(_ t: ThreadSummary, _ text: String) -> String {
+            guard let url = LinkPolicy.actionURL(.show, thread: thread, item: t.id) else { return e(text) }
+            return "<a class=\"thread-link\" href=\"\(e(url.absoluteString))\" title=\"Show \(e(t.id))\">\(e(text))</a>"
+        }
+        var parts = [String]()
+        if let src = forwardedFrom {
+            let name = [src.number.map { "#\($0)" }, src.subject.isEmpty ? nil : src.subject].compactMap { $0 }
+            parts.append("Forwarded from " + link(src, name.isEmpty ? src.id : name.joined(separator: " ")))
+        }
+        if !forwards.isEmpty {
+            let links = forwards.map { t in
+                link(t, "\(t.firstRecipient ?? "?") as " + (t.number.map { "#\($0)" } ?? "“\(t.subject)”"))
+            }
+            parts.append("Forwarded to " + links.joined(separator: ", "))
+        }
+        guard !parts.isEmpty else { return "" }
+        return "<p class=\"related\">" + parts.map { "<span>\($0)</span>" }.joined() + "</p>\n"
+    }
+
+    static func document(title: String, css: String, body: String) -> String {
+        """
+        <!DOCTYPE html>
+        <html>
+        <head>
+        <meta charset="utf-8">
+        <meta http-equiv="Content-Security-Policy" content="\(contentSecurityPolicy)">
+        <meta name="color-scheme" content="light dark">
+        <title>\(MarkdownHTML.escape(title))</title>
+        <style>
+        \(css)
+        </style>
+        </head>
+        <body>
+        <main>
+        \(body)</main>
+        </body>
+        </html>
+
+        """
+    }
+
+    /// One message. A preview card has no buttons and is never folded.
     static func card(_ m: Message, index i: Int, thread: String, me: String, newest: Bool, unread: Bool,
+                     preview: Bool = false, threadIsOpen: Bool = true,
                      readAttachment: (String) -> String?, formatDate: (Date) -> String) -> String {
         let e = MarkdownHTML.escape
-        let folded = MessageFolding.startsFolded(body: m.body, isUnread: unread, isNewest: newest)
+        let folded = !preview && MessageFolding.startsFolded(body: m.body, isUnread: unread, isNewest: newest)
             ? MarkdownHTML.renderFolded(m.body, thread: thread) : nil
         let rendered = folded == nil ? MarkdownHTML.renderBody(m.body, thread: thread) : nil
         let inlineImages = folded?.inlineImages ?? rendered?.inlineImages ?? []
@@ -89,15 +143,8 @@ public enum ThreadDocument {
             out += " <time datetime=\"\(e(d.formatted(.iso8601)))\">\(e(formatDate(d)))</time>"
         }
         if let s = m.status { out += " <span class=\"status \(e(s))\">\(s == "done" ? "closed" : e(s))</span>" }
-        out += "<span class=\"actions\">"
-        if let open = LinkPolicy.actionURL(.open, thread: thread, item: m.file) {
-            out += "<a class=\"button\" href=\"\(e(open.absoluteString))\" title=\"Open the message file in your Markdown app\">Open</a>"
-        }
-        if let reply = LinkPolicy.actionURL(.reply, thread: thread, item: m.file) {
-            let to = m.from == me ? m.to : m.from
-            out += "<a class=\"button\" href=\"\(e(reply.absoluteString))\" title=\"Reply to \(e(to ?? "?"))\">Reply</a>"
-        }
-        out += "</span></header>\n"
+        if !preview { out += actions(m, thread: thread, me: me, threadIsOpen: threadIsOpen) }
+        out += "</header>\n"
 
         if let folded {
             out += "<div class=\"body\">\n\(folded.head)"
@@ -107,10 +154,30 @@ public enum ThreadDocument {
         } else if let rendered {
             out += "<div class=\"body\">\n\(rendered.html)</div>\n"
         }
-        out += attachments(m.attachments, thread: thread, inlineImages: inlineImages, open: unread || newest,
+        out += attachments(m.attachments, thread: thread, inlineImages: inlineImages, open: preview || unread || newest,
                            readAttachment: readAttachment)
         out += "</article>\n"
         return out
+    }
+
+    /// A card's Open, Reply and Forward buttons. Forward on an open thread
+    /// hands the whole thread on, as the thread's own Forward does; on a
+    /// closed one it forwards this message in a new thread.
+    static func actions(_ m: Message, thread: String, me: String, threadIsOpen: Bool) -> String {
+        let e = MarkdownHTML.escape
+        var out = "<span class=\"actions\">"
+        if let open = LinkPolicy.actionURL(.open, thread: thread, item: m.file) {
+            out += "<a class=\"button\" href=\"\(e(open.absoluteString))\" title=\"Open the message file in your Markdown app\">Open</a>"
+        }
+        if let reply = LinkPolicy.actionURL(.reply, thread: thread, item: m.file) {
+            let to = m.from == me ? m.to : m.from
+            out += "<a class=\"button\" href=\"\(e(reply.absoluteString))\" title=\"Reply to \(e(to ?? "?"))\">Reply</a>"
+        }
+        if let forward = LinkPolicy.actionURL(.forward, thread: thread, item: m.file) {
+            let tip = threadIsOpen ? "Hand the thread on to someone else" : "Forward this message in a new thread"
+            out += "<a class=\"button\" href=\"\(e(forward.absoluteString))\" title=\"\(tip)\">Forward</a>"
+        }
+        return out + "</span>"
     }
 
     /// The attachment list, thumbnails of the images the body doesn't show

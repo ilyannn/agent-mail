@@ -33,4 +33,9 @@ public enum Formatting {
     public static func isValidName(_ s: String) -> Bool {
         !s.isEmpty && !s.contains { $0.isWhitespace || $0 == "/" || $0 == "\\" }
     }
+
+    /// A name `me` can mail: valid, and not `me` (the CLI refuses that).
+    public static func isValidRecipient(_ s: String, me: String) -> Bool {
+        isValidName(s) && s != me
+    }
 }

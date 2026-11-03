@@ -11,6 +11,9 @@
 ;;   bb scripts/debug.bb clickweb "#m1 a.button"  (a real click on an element)
 ;;   bb scripts/debug.bb recordopens              (log opens, launch nothing)
 ;;   bb scripts/debug.bb appearance dark          (also: light, system)
+;;   bb scripts/debug.bb filter sent              (the participant filter)
+;;   bb scripts/debug.bb compose                  (New Message: the draft)
+;;   bb scripts/debug.bb forward ID[/FILE]        (Forward; discard drops a draft)
 (ns debug
   (:require [babashka.fs :as fs]
             [babashka.process :as p]

@@ -1,8 +1,9 @@
 // The app's one model object. It owns the CLI client, the store watcher and
-// the refresh loop, holds the latest status and the selected thread, and
-// runs writes. Writes never touch local state: the CLI changes the store,
-// FSEvents reports it, and the next status run brings the change in.
-// View controllers observe it (Observations) and forward actions to it.
+// the refresh loop, holds the latest status, the selected thread and the new
+// thread being written (the draft), and runs writes. Writes never touch
+// local state: the CLI changes the store, FSEvents reports it, and the next
+// status run brings the change in. View controllers observe it
+// (Observations) and forward actions to it.
 import AgentMailKit
 import AppKit
 import Observation
@@ -29,9 +30,7 @@ final class MailStore {
         didSet {
             guard mailbox != oldValue else { return }
             settings.mailbox = mailbox
-            if let id = selectedThreadID, !index.threads(in: mailbox).contains(where: { $0.id == id }) {
-                select(threadID: nil)
-            }
+            dropSelectionUnlessShown()
         }
     }
     /// How All Mail and participant mailboxes are sorted; saved in the settings.
@@ -41,12 +40,32 @@ final class MailStore {
             settings.threadOrder = threadOrder
         }
     }
+    /// Which of a participant's threads its mailbox shows; one setting for
+    /// every participant, saved in the settings. Like a mailbox switch, a new
+    /// filter drops a selection it hides.
+    var participantFilter: ParticipantFilter {
+        didSet {
+            guard participantFilter != oldValue else { return }
+            settings.participantFilter = participantFilter
+            dropSelectionUnlessShown()
+        }
+    }
     private(set) var selectedThreadID: String?
     /// The selected thread, once `read` has returned it.
     private(set) var detail: ThreadDetail?
     private(set) var detailError: AgentMailError?
     /// Threads with a write in flight.
     private(set) var busyThreadIDs: Set<String> = []
+
+    /// The new thread being written (File › New Message, or Forward on a
+    /// closed thread), at most one. Selecting a thread keeps it.
+    private(set) var newDraft: NewThreadDraft?
+    /// The thread view shows the draft; no thread is selected meanwhile.
+    private(set) var isShowingDraft = false
+    private(set) var isSendingDraft = false
+    /// The thread a forward draft carries, once loaded, for its preview.
+    private(set) var forwardSource: ThreadDetail?
+    private(set) var forwardSourceError: AgentMailError?
 
     /// Unsent replies by thread id; the thread view saves into it on every
     /// selection change, and a failed notification reply lands here.
@@ -68,12 +87,19 @@ final class MailStore {
     @ObservationIgnored private let reader: StoreReader
     @ObservationIgnored private var scheduler: RefreshScheduler?
     @ObservationIgnored private var requestedAt: ContinuousClock.Instant?
+    /// The thread selected when the draft came on screen, for Discard to go
+    /// back to.
+    @ObservationIgnored private var threadBeforeDraft: String?
+    /// A thread just sent from the draft: once a refresh brings it in, the
+    /// mailbox switches to All Mail if the list doesn't show it.
+    @ObservationIgnored private var pendingReveal: String?
 
     init(settings: AppSettings, location: StoreLocation) {
         self.settings = settings
         self.location = location
         mailbox = settings.mailbox
         threadOrder = settings.threadOrder
+        participantFilter = settings.participantFilter
         reader = StoreReader(root: location.url)
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appending(path: Bundle.main.bundleIdentifier ?? "AgentMail")
@@ -162,6 +188,10 @@ final class MailStore {
         if newIndex != index { index = newIndex }
         if refreshError != nil { refreshError = nil }
         hasLoaded = true
+        if let id = pendingReveal, newIndex.thread(id) != nil {
+            pendingReveal = nil
+            if selectedThreadID == id, !isShown(id) { mailbox = .allMail }
+        }
         announceNewMessages(st)
         if let id = selectedThreadID, let t = newIndex.thread(id),
            detail?.id != id || detail?.contentFingerprint != t.contentFingerprint {
@@ -188,11 +218,47 @@ final class MailStore {
 
     // MARK: Selection
 
+    /// The thread list's threads: the mailbox in the chosen order, filtered
+    /// when it is a participant's.
+    var shownThreads: [ThreadSummary] { index.threads(in: mailbox, order: threadOrder, filter: participantFilter) }
+
+    /// Whether the thread list holds thread `id`.
+    func isShown(_ id: String) -> Bool {
+        index.threads(in: mailbox, filter: participantFilter).contains { $0.id == id }
+    }
+
+    private func dropSelectionUnlessShown() {
+        if let id = selectedThreadID, !isShown(id) { select(threadID: nil) }
+    }
+
+    /// Selects a thread (nil: none); the thread view stops showing the draft.
     func select(threadID id: String?) {
+        if isShowingDraft { isShowingDraft = false }
         guard id != selectedThreadID else { return }
         selectedThreadID = id
         detailError = nil
         loadDetail(debounce: true)
+    }
+
+    /// Shows thread `id` from a link (a forward, or its source): All Mail
+    /// when the list doesn't hold it. False when the thread is unknown.
+    @discardableResult
+    func reveal(threadID id: String) -> Bool {
+        guard index.thread(id) != nil else { return false }
+        if !isShown(id) { mailbox = .allMail }
+        select(threadID: id)
+        return true
+    }
+
+    /// Whether thread `id` is open, by its loaded copy when it is the
+    /// selected one, else by the latest status.
+    func isOpen(_ id: String) -> Bool {
+        (detail?.id == id ? detail?.isOpen : nil) ?? index.thread(id)?.isOpen ?? cache[id]?.isOpen ?? false
+    }
+
+    /// A thread's subject, as far as anything loaded knows it.
+    func subject(of id: String) -> String {
+        index.thread(id)?.subject ?? cache[id]?.subject ?? ""
     }
 
     /// The thread view came on screen: load what it should show.
@@ -238,6 +304,113 @@ final class MailStore {
         }
     }
 
+    // MARK: Draft
+
+    /// File › New Message: shows the draft, starting one when there is none.
+    /// `recipient` fills To when it is empty.
+    func startNewMessage(to recipient: String?) {
+        if newDraft == nil {
+            newDraft = NewThreadDraft(to: recipient ?? "")
+        } else if let recipient {
+            editDraft { $0.fillRecipient(recipient) }
+        }
+        showDraft()
+    }
+
+    /// Forward on a closed thread: a new draft carrying `source`, in place
+    /// of any other (the view asks first when that one has typed content).
+    func startForward(_ source: ForwardSource) {
+        newDraft = .forwarding(source, subject: subject(of: source.threadID))
+        forwardSource = nil
+        forwardSourceError = nil
+        showDraft()
+        loadForwardSource()
+    }
+
+    /// Puts the draft in the thread view, remembering the selected thread.
+    func showDraft() {
+        guard newDraft != nil, !isShowingDraft else { return }
+        threadBeforeDraft = selectedThreadID
+        select(threadID: nil)
+        isShowingDraft = true
+    }
+
+    /// An edit to the draft's fields.
+    func editDraft(_ change: (inout NewThreadDraft) -> Void) {
+        guard var draft = newDraft else { return }
+        change(&draft)
+        if draft != newDraft { newDraft = draft }
+    }
+
+    /// Throws the draft away; the thread view goes back to the thread shown
+    /// before it, when the list still holds it.
+    func discardDraft() {
+        let back = threadBeforeDraft
+        let showing = isShowingDraft
+        clearDraft()
+        guard showing else { return }
+        select(threadID: back.flatMap { isShown($0) ? $0 : nil })
+    }
+
+    private func clearDraft() {
+        newDraft = nil
+        forwardSource = nil
+        forwardSourceError = nil
+        threadBeforeDraft = nil
+    }
+
+    /// Sends the draft as it stands (a new thread, or a forward). On success
+    /// the draft goes and the new thread is selected; once a refresh brings
+    /// it in, the mailbox switches to All Mail if the list doesn't show it.
+    /// A failure keeps the draft.
+    func sendDraft() async throws(AgentMailError) {
+        guard let draft = newDraft, !isSendingDraft else { return }
+        isSendingDraft = true
+        defer { isSendingDraft = false }
+        let id = if let source = draft.forward {
+            try await forward(threadID: source.threadID, message: source.message, to: draft.recipient,
+                              subject: draft.subject, note: draft.body)
+        } else {
+            try await send(to: draft.recipient, subject: draft.subject, body: draft.body)
+        }
+        guard newDraft?.id == draft.id else { return }
+        let showing = isShowingDraft
+        clearDraft()
+        guard showing else { return }
+        if id.isEmpty {
+            select(threadID: nil)
+        } else {
+            pendingReveal = id
+            select(threadID: id)
+        }
+    }
+
+    /// The forwarded thread, for the draft's preview: the cached copy at
+    /// once, and `read` when that is stale or unread. Reading marks it seen,
+    /// which it is: the preview shows it.
+    private func loadForwardSource() {
+        guard let id = newDraft?.forward?.threadID else { return }
+        let summary = index.thread(id)
+        if let cached = cache[id] {
+            forwardSource = cached
+            if let summary, cached.contentFingerprint == summary.contentFingerprint, summary.unread == 0 { return }
+        }
+        Task { [weak self] in
+            guard let self, let client = await self.ensureClient() else { return }
+            do {
+                let r = try await client.thread(id)
+                self.cache[id] = r.value
+                if self.newDraft?.forward?.threadID == id {
+                    self.forwardSource = r.value
+                    self.forwardSourceError = nil
+                }
+                self.onThreadRead(r.value)
+            } catch let error as AgentMailError {
+                if self.newDraft?.forward?.threadID == id { self.forwardSourceError = error }
+            } catch {}
+        }
+    }
+
     // MARK: Writing
 
     private func requireClient() async throws(AgentMailError) -> CLIClient {
@@ -264,6 +437,18 @@ final class MailStore {
         return id
     }
 
+    /// Forwards a thread, or one message of it, in a new thread to
+    /// `recipient`; returns the new thread's id.
+    func forward(threadID: String, message: String?, to recipient: String, subject: String?,
+                 note: String) async throws(AgentMailError) -> String {
+        let client = try await requireClient()
+        let began = ContinuousClock.now
+        let id = try await client.forward(threadID: threadID, message: message, to: recipient, subject: subject,
+                                          note: note)
+        Timing.note("forward \(threadID) \(Timing.ms(.now - began))")
+        return id
+    }
+
     func close(threadID: String, note: String = "") async throws(AgentMailError) {
         let client = try await requireClient()
         busyThreadIDs.insert(threadID)
@@ -271,6 +456,16 @@ final class MailStore {
         try await client.close(threadID: threadID, text: note)
         drafts[threadID] = nil
     }
+
+    #if DEBUG
+    /// Tests: shows `st` as a refresh would, without the new-message
+    /// bookkeeping (which reads the store and saves the seen set).
+    func debugShow(_ st: MailStatus) {
+        status = st
+        index = MailboxIndex(status: st)
+        hasLoaded = true
+    }
+    #endif
 
     // MARK: Paths
 

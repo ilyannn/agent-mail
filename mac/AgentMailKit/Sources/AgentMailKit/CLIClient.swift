@@ -65,6 +65,29 @@ public struct CLIClient: Sendable {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Starts a thread to `recipient` carrying thread `threadID`, or only its
+    /// message `message` (a file name, as `read --json` gives it): the note,
+    /// then the forwarded messages, their files copied along. Returns the new
+    /// thread's id. A blank subject leaves the CLI's "Fwd: <subject>". The
+    /// note goes as one argument after `--`, so nothing in it reads as an
+    /// option; stdin stays empty (the CLI reads it only when it is ready).
+    @discardableResult
+    public func forward(threadID: String, message: String? = nil, to recipient: String, subject: String? = nil,
+                        note: String = "") async throws(AgentMailError) -> String {
+        try await run(Self.forwardArguments(threadID: threadID, message: message, to: recipient, subject: subject,
+                                            note: note), label: "forward").stdoutString
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func forwardArguments(threadID: String, message: String?, to recipient: String, subject: String?,
+                                 note: String) -> [String] {
+        var args = ["forward", threadID, "--to", recipient]
+        if let message { args += ["--msg", message] }
+        if let subject, !subject.trimmingCharacters(in: .whitespaces).isEmpty { args += ["--subject", subject] }
+        if !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { args += ["--", note] }
+        return args
+    }
+
     /// Closes the thread; an empty text closes it with the CLI's "Closed.".
     @discardableResult
     public func close(threadID: String, text: String = "") async throws(AgentMailError) -> String {

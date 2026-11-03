@@ -1,0 +1,21 @@
+{
+  "forwarded-from" : "2026-11-03-rotate-the-certificate",
+  "number" : 2,
+  "updated" : "2026-11-03T02:51:53.532Z",
+  "created" : "2026-11-03T02:51:53.532Z",
+  "msgs" : [ {
+    "from" : "user",
+    "to" : "docs",
+    "date" : "2026-11-03T02:51:53.532Z",
+    "attachments" : [ "files/chart.png" ],
+    "file" : "2026-11-03T025153.532Z__user__65b0.md",
+    "body" : "Please document this.\n\n---\n\nForwarded thread #1 **Rotate the certificate**, started by website, 3 messages (`agent-mail read 2026-11-03-rotate-the-certificate`)\n\n### website → infra · 2026-11-03 04:51 +02:00\n\nRotate the TLS cert on edge hosts.\n\nSee ![chart](files/chart.png).\n\n### infra → website · 2026-11-03 04:51 +02:00\n\nDone, rotated.\n\n### website → infra · 2026-11-03 04:51 +02:00 · done\n\nThanks."
+  } ],
+  "status" : "open",
+  "from" : "user",
+  "id" : "2026-11-03-fwd-rotate-the-certificate",
+  "count" : 1,
+  "last-from" : "user",
+  "subject" : "Fwd: Rotate the certificate",
+  "owner" : "docs"
+}

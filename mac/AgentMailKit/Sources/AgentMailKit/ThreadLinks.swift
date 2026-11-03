@@ -2,11 +2,11 @@
 // view gets no file access to the store: attachments are linked and
 // embedded as `agent-mail-file:///<thread>/<name>`, which the app serves
 // (images only) from that thread's files/ directory and nothing else, and
-// the card buttons (Open, Reply, Show in Finder) are
-// `agent-mail-action:///<verb>/<thread>[/<item>]` links, never loaded, that
-// the navigation delegate turns into app commands. Everything else a click
-// can reach is classified here: http(s) and mailto go to the system, the
-// rest is ignored.
+// the buttons (Open, Reply, Forward, Show in Finder) and links to related
+// threads are `agent-mail-action:///<verb>/<thread>[/<item>]` links, never
+// loaded, that the navigation delegate turns into app commands. Everything
+// else a click can reach is classified here: http(s) and mailto go to the
+// system, the rest is ignored.
 import Foundation
 import UniformTypeIdentifiers
 
@@ -95,6 +95,10 @@ public enum ThreadLink: Equatable, Sendable {
     case openMessage(String)
     /// Focus the reply box, addressed for that message (nil: the thread).
     case reply(toMessage: String?)
+    /// Forward that message (nil: the whole thread).
+    case forward(message: String?)
+    /// Show another thread by id: a forward's source, or a forward of this one.
+    case openThread(String)
     /// Anything else is cancelled.
     case ignore
 }
@@ -103,7 +107,9 @@ public enum LinkPolicy {
     public static let actionScheme = "agent-mail-action"
 
     public enum Verb: String, Sendable {
-        case open, reply, reveal
+        case open, reply, reveal, forward
+        /// `show/<thread>/<other thread>`: go to the other thread.
+        case show
     }
 
     /// `agent-mail-action:///<verb>/<thread>[/<item>]`.
@@ -154,6 +160,8 @@ public enum LinkPolicy {
         case let (.open, item?): return .openMessage(item)
         case let (.reveal, item?): return .revealAttachment(item)
         case let (.reply, item): return .reply(toMessage: item)
+        case let (.forward, item): return .forward(message: item)
+        case let (.show, item?) where item != thread: return .openThread(item)
         default: return .ignore
         }
     }

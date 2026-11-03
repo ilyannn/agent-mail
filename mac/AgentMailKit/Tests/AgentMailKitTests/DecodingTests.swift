@@ -69,6 +69,23 @@ import Testing
         #expect(th.replyRecipient(me: "user") == "infra")
     }
 
+    @Test func forwardsNameTheirSource() throws {
+        let st = try AgentMailJSON.decodeStatus(Fixture.data("status-forward"))
+        #expect(st.threads.map(\.forwardedFrom) == ["2026-11-03-rotate-the-certificate",
+                                                    "2026-11-03-rotate-the-certificate", nil])
+        let th = try AgentMailJSON.decodeThread(Fixture.data("read-forward"))
+        #expect(th.forwardedFrom == "2026-11-03-rotate-the-certificate")
+        #expect(th.subject == "Fwd: Rotate the certificate")
+        #expect(th.msgs.first?.attachments == ["files/chart.png"], "the forwarded files come along")
+        #expect(th.msgs.first?.body.hasPrefix("Please document this.\n\n---\n\nForwarded thread #1") == true)
+    }
+
+    @Test func threadsBeforeForwardingHaveNoSource() throws {
+        let st = try AgentMailJSON.decodeStatus(Fixture.data("status"))
+        #expect(st.threads.allSatisfy { $0.forwardedFrom == nil })
+        #expect(try AgentMailJSON.decodeThread(Fixture.data("read")).forwardedFrom == nil)
+    }
+
     @Test func unknownSchemaIsRefused() throws {
         var json = try #require(String(data: Fixture.data("status"), encoding: .utf8))
         json = json.replacingOccurrences(of: "\"schema\" : 1", with: "\"schema\" : 2")

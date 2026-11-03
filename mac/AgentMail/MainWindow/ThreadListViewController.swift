@@ -2,15 +2,28 @@
 // order, keyed by thread id in a diffable data source, so selection and
 // scroll position survive live refreshes and re-sorting. Rows show the
 // thread's flow, subject, age, an unread dot and a state icon; visible rows
-// are refreshed in place after each snapshot.
+// are refreshed in place after each snapshot. The new-thread draft, while
+// there is one, is a row pinned at the top of every mailbox. Above the
+// list, a participant's mailbox has a scope bar: All, Sent, Received,
+// Waiting (the participant filter).
 import AgentMailKit
 import AppKit
 import Observation
 
 final class ThreadListViewController: NSViewController, NSTableViewDelegate, NSMenuDelegate {
+    /// The draft row's item: thread ids are path components, never "/draft".
+    static let draftRow = "/draft"
+
     private let store: MailStore
     private let tableView = ThreadTableView()
     private let emptyLabel = NSTextField.label(font: .systemFont(ofSize: NSFont.systemFontSize + 2), color: .tertiaryLabelColor)
+    private let scopeBar = NSView()
+    private let scopeControl = NSSegmentedControl(labels: ParticipantFilter.allCases.map(\.title),
+                                                  trackingMode: .selectOne, target: nil, action: nil)
+    /// The list starts under the toolbar without the scope bar, below the
+    /// bar with it.
+    private var scrollTopToView: NSLayoutConstraint!
+    private var scrollTopToScope: NSLayoutConstraint!
     private var dataSource: NSTableViewDiffableDataSource<Int, String>!
     private var applying = false
     /// What the last snapshot showed, to tell a re-sort from a mailbox switch.
@@ -52,12 +65,15 @@ final class ThreadListViewController: NSViewController, NSTableViewDelegate, NSM
         let container = NSView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(scroll)
+        buildScopeBar(in: container)
         emptyLabel.alignment = .center
         container.addSubview(emptyLabel)
+        scrollTopToView = scroll.topAnchor.constraint(equalTo: container.topAnchor)
+        scrollTopToScope = scroll.topAnchor.constraint(equalTo: scopeBar.bottomAnchor)
         NSLayoutConstraint.activate([
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            scroll.topAnchor.constraint(equalTo: container.topAnchor),
+            scrollTopToView,
             scroll.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             emptyLabel.centerXAnchor.constraint(equalTo: container.centerXAnchor),
             emptyLabel.centerYAnchor.constraint(equalTo: container.centerYAnchor),
@@ -69,9 +85,78 @@ final class ThreadListViewController: NSViewController, NSTableViewDelegate, NSM
         view = container
     }
 
+    /// The participant filter as a small segmented control, centred below
+    /// the toolbar, with a separator under it.
+    private func buildScopeBar(in container: NSView) {
+        scopeControl.controlSize = .small
+        scopeControl.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        scopeControl.segmentDistribution = .fit
+        scopeControl.target = self
+        scopeControl.action = #selector(scopeChanged(_:))
+        scopeControl.setAccessibilityLabel("Participant filter")
+        scopeControl.translatesAutoresizingMaskIntoConstraints = false
+        let separator = NSBox()
+        separator.boxType = .separator
+        separator.translatesAutoresizingMaskIntoConstraints = false
+        scopeBar.translatesAutoresizingMaskIntoConstraints = false
+        scopeBar.addSubview(scopeControl)
+        scopeBar.addSubview(separator)
+        scopeBar.isHidden = true
+        container.addSubview(scopeBar)
+        NSLayoutConstraint.activate([
+            scopeBar.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            scopeBar.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            scopeBar.topAnchor.constraint(equalTo: container.safeAreaLayoutGuide.topAnchor),
+            scopeControl.centerXAnchor.constraint(equalTo: scopeBar.centerXAnchor),
+            scopeControl.leadingAnchor.constraint(greaterThanOrEqualTo: scopeBar.leadingAnchor, constant: 8),
+            scopeControl.topAnchor.constraint(equalTo: scopeBar.topAnchor, constant: 6),
+            separator.topAnchor.constraint(equalTo: scopeControl.bottomAnchor, constant: 6),
+            separator.leadingAnchor.constraint(equalTo: scopeBar.leadingAnchor),
+            separator.trailingAnchor.constraint(equalTo: scopeBar.trailingAnchor),
+            separator.bottomAnchor.constraint(equalTo: scopeBar.bottomAnchor),
+        ])
+    }
+
+    /// Shows the scope bar for a participant's mailbox only, with the
+    /// current filter selected and each segment's tooltip naming the
+    /// participant and counting its threads.
+    private func updateScopeBar() {
+        guard case let .agent(name) = store.mailbox else {
+            if !scopeBar.isHidden {
+                scopeBar.isHidden = true
+                scrollTopToScope.isActive = false
+                scrollTopToView.isActive = true
+            }
+            return
+        }
+        if scopeBar.isHidden {
+            scopeBar.isHidden = false
+            scrollTopToView.isActive = false
+            scrollTopToScope.isActive = true
+        }
+        let isMe = name == store.index.me
+        for (i, filter) in ParticipantFilter.allCases.enumerated() {
+            let n = store.index.count(filter, for: name)
+            scopeControl.setToolTip("\(filter.explanation(for: name, isMe: isMe)) (\(n))", forSegment: i)
+        }
+        scopeControl.selectedSegment = store.participantFilter.menuTag
+    }
+
+    @objc private func scopeChanged(_ sender: NSSegmentedControl) {
+        guard ParticipantFilter.allCases.indices.contains(sender.selectedSegment) else { return }
+        store.participantFilter = ParticipantFilter.allCases[sender.selectedSegment]
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         dataSource = NSTableViewDiffableDataSource(tableView: tableView) { [unowned self] tableView, _, _, id in
+            if id == Self.draftRow {
+                let cellID = NSUserInterfaceItemIdentifier("draft")
+                let cell = (tableView.makeView(withIdentifier: cellID, owner: nil) as? DraftCellView) ?? DraftCellView()
+                cell.identifier = cellID
+                if let draft = store.newDraft { cell.configure(draft) }
+                return cell
+            }
             let cellID = NSUserInterfaceItemIdentifier("thread")
             let cell = (tableView.makeView(withIdentifier: cellID, owner: nil) as? ThreadCellView) ?? ThreadCellView()
             cell.identifier = cellID
@@ -81,8 +166,8 @@ final class ThreadListViewController: NSViewController, NSTableViewDelegate, NSM
         apply()
         // `status` changes on every refresh (its clock moves), so ages stay current.
         let changes = Observations { [store] in
-            (store.status, store.index, store.mailbox, store.threadOrder, store.selectedThreadID, store.refreshError,
-             store.hasLoaded)
+            (store.status, store.index, store.mailbox, store.threadOrder, store.participantFilter,
+             store.selectedThreadID, store.refreshError, store.hasLoaded, store.newDraft, store.isShowingDraft)
         }
         observation = Task { [weak self] in
             for await _ in changes { self?.apply() }
@@ -94,7 +179,8 @@ final class ThreadListViewController: NSViewController, NSTableViewDelegate, NSM
     private func apply() {
         let index = store.index
         let mailbox = store.mailbox, order = store.threadOrder
-        let ids = index.threads(in: mailbox, order: order).map(\.id)
+        let ids = store.shownThreads.map(\.id)
+        updateScopeBar()
         // A new order in the same mailbox: the selected row stays where it is
         // on screen and the others move around it, without animation.
         let resorted = appliedMailbox == mailbox && appliedOrder != nil && appliedOrder != order
@@ -103,18 +189,22 @@ final class ThreadListViewController: NSViewController, NSTableViewDelegate, NSM
         let anchor = resorted ? selectedRowOffset() : nil
         var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
         snapshot.appendSections([0])
-        snapshot.appendItems(ids)
+        snapshot.appendItems((store.newDraft == nil ? [] : [Self.draftRow]) + ids)
         applying = true
         defer { applying = false }
         let animate = !resorted && (view.window?.isVisible ?? false) && dataSource.snapshot().numberOfItems > 0
         dataSource.apply(snapshot, animatingDifferences: animate)
         let now = Date.now
         tableView.enumerateAvailableRowViews { rowView, row in
-            guard let cell = rowView.view(atColumn: 0) as? ThreadCellView,
-                  let id = dataSource.itemIdentifier(forRow: row), let t = index.thread(id) else { return }
-            cell.configure(t, me: index.me, now: now)
+            guard let id = dataSource.itemIdentifier(forRow: row) else { return }
+            if let cell = rowView.view(atColumn: 0) as? DraftCellView, id == Self.draftRow, let draft = store.newDraft {
+                cell.configure(draft)
+            } else if let cell = rowView.view(atColumn: 0) as? ThreadCellView, let t = index.thread(id) {
+                cell.configure(t, me: index.me, now: now)
+            }
         }
-        if let id = store.selectedThreadID, let row = dataSource.row(forItemIdentifier: id), row >= 0 {
+        let selectedItem = store.isShowingDraft ? Self.draftRow : store.selectedThreadID
+        if let id = selectedItem, let row = dataSource.row(forItemIdentifier: id), row >= 0 {
             if tableView.selectedRow != row {
                 tableView.selectRowIndexes([row], byExtendingSelection: false)
                 if anchor == nil { tableView.scrollRowToVisible(row) }
@@ -123,6 +213,7 @@ final class ThreadListViewController: NSViewController, NSTableViewDelegate, NSM
         } else if tableView.selectedRow >= 0 {
             tableView.deselectAll(nil)
         }
+        // The draft row doesn't make a mailbox any less empty.
         updateEmptyState(isEmpty: ids.isEmpty)
         if store.hasLoaded {
             Timing.note("list applied: \(store.mailbox.title), \(ids.count) rows")
@@ -160,7 +251,7 @@ final class ThreadListViewController: NSViewController, NSTableViewDelegate, NSM
             case .inbox: "Nothing waiting on you"
             case .undelivered: "Everything is being listened for"
             case .allMail: "No threads yet"
-            case let .agent(name): name == store.index.me ? "No threads yet" : "No threads with \(name)"
+            case let .agent(name): store.participantFilter.emptyText(for: name, isMe: name == store.index.me)
             }
         }
         emptyLabel.isHidden = !isEmpty
@@ -179,11 +270,22 @@ final class ThreadListViewController: NSViewController, NSTableViewDelegate, NSM
     }
 
     func debugRows() -> [String] {
-        (0..<tableView.numberOfRows).map { row in
+        [debugScopeBar()] + (0..<tableView.numberOfRows).map { row in
             let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false)
             let selected = tableView.selectedRow == row ? "*" : " "
             return "row\(selected) \(dataSource.itemIdentifier(forRow: row) ?? "?") | \(cell?.accessibilityLabel() ?? "?")"
         } + ["emptyLabel: \(emptyLabel.isHidden ? "hidden" : emptyLabel.stringValue)"]
+    }
+
+    /// "scope: hidden", or the segments with the selected one starred and
+    /// their tooltips.
+    func debugScopeBar() -> String {
+        guard !scopeBar.isHidden else { return "scope: hidden" }
+        let segments = (0..<scopeControl.segmentCount).map { i in
+            (scopeControl.label(forSegment: i) ?? "?") + (scopeControl.selectedSegment == i ? "*" : "")
+        }
+        let tips = (0..<scopeControl.segmentCount).map { scopeControl.toolTip(forSegment: $0) ?? "" }
+        return "scope: \(segments.joined(separator: " ")) | tips: \(tips.joined(separator: " / "))"
     }
     #endif
 
@@ -192,7 +294,12 @@ final class ThreadListViewController: NSViewController, NSTableViewDelegate, NSM
     func tableViewSelectionDidChange(_ notification: Notification) {
         guard !applying else { return }
         let row = tableView.selectedRow
-        store.select(threadID: row >= 0 ? dataSource.itemIdentifier(forRow: row) : nil)
+        let id = row >= 0 ? dataSource.itemIdentifier(forRow: row) : nil
+        if id == Self.draftRow {
+            store.showDraft()
+        } else {
+            store.select(threadID: id)
+        }
     }
 
     // MARK: Context menu
@@ -200,14 +307,20 @@ final class ThreadListViewController: NSViewController, NSTableViewDelegate, NSM
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         let row = tableView.clickedRow
-        guard row >= 0, let id = dataSource.itemIdentifier(forRow: row), let t = store.index.thread(id) else { return }
+        guard row >= 0, let id = dataSource.itemIdentifier(forRow: row) else { return }
         func add(_ title: String, _ action: Selector, enabled: Bool = true) {
             let i = NSMenuItem(title: title, action: enabled ? action : nil, keyEquivalent: "")
             i.target = self
             i.representedObject = id
             menu.addItem(i)
         }
+        if id == Self.draftRow {
+            add("Discard Message…", #selector(contextDiscard(_:)))
+            return
+        }
+        guard let t = store.index.thread(id) else { return }
         add("Reply", #selector(contextReply(_:)))
+        add("Forward", #selector(contextForward(_:)))
         add("Close Thread", #selector(contextClose(_:)), enabled: t.isOpen)
         menu.addItem(.separator())
         add("Copy Thread ID", #selector(contextCopyID(_:)))
@@ -216,11 +329,22 @@ final class ThreadListViewController: NSViewController, NSTableViewDelegate, NSM
     }
 
     var onContextReply: (String) -> Void = { _ in }
+    var onContextForward: (String) -> Void = { _ in }
     var onContextClose: (String) -> Void = { _ in }
+    var onContextDiscard: () -> Void = {}
 
     @objc private func contextReply(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
         onContextReply(id)
+    }
+
+    @objc private func contextForward(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        onContextForward(id)
+    }
+
+    @objc private func contextDiscard(_ sender: NSMenuItem) {
+        onContextDiscard()
     }
 
     @objc private func contextClose(_ sender: NSMenuItem) {
@@ -258,6 +382,57 @@ final class ThreadTableView: NSTableView {
         case " " where plain: onSpace()
         default: super.keyDown(with: event)
         }
+    }
+}
+
+/// The draft row: a pencil, the subject (or "New Message"), and whom it is
+/// to (or "Draft"), laid out like a thread row.
+final class DraftCellView: NSTableCellView {
+    private let icon = NSImageView()
+    private let title = NSTextField.label()
+    private let detail = NSTextField.label(color: .secondaryLabelColor)
+
+    init() {
+        super.init(frame: .zero)
+        for v in [icon, title, detail] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(v)
+        }
+        textField = title
+        imageView = icon
+        title.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        detail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        icon.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: "Draft")?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .regular))
+        icon.contentTintColor = .controlAccentColor
+        NSLayoutConstraint.activate([
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 0),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 16),
+            title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 4),
+            title.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4),
+            title.topAnchor.constraint(equalTo: topAnchor, constant: 7),
+            detail.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            detail.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4),
+            detail.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 3),
+        ])
+        setAccessibilityElement(true)
+        setAccessibilityRole(.cell)
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    /// A selected row is drawn in the accent colour: the pencil turns white.
+    override var backgroundStyle: NSView.BackgroundStyle {
+        didSet { icon.contentTintColor = backgroundStyle == .emphasized ? .alternateSelectedControlTextColor : .controlAccentColor }
+    }
+
+    func configure(_ draft: NewThreadDraft) {
+        title.stringValue = draft.rowTitle
+        detail.stringValue = draft.rowDetail
+        setAccessibilityLabel("Draft, \(draft.rowTitle), \(draft.rowDetail)")
+        toolTip = draft.forward == nil ? "A new message, not sent yet" : "A forward, not sent yet"
     }
 }
 

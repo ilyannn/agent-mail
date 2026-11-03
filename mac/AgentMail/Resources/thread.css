@@ -56,6 +56,11 @@ header.thread .meta {
   display: flex; align-items: center; flex-wrap: wrap; gap: 6px 14px;
   color: var(--muted); font-size: 0.82em; margin: 0;
 }
+/* Links to the thread this forwards, and to the forwards of it. */
+header.thread .related {
+  display: flex; flex-wrap: wrap; gap: 4px 14px;
+  color: var(--muted); font-size: 0.82em; margin: 8px 0 0;
+}
 
 /* One card per message. */
 article.msg {

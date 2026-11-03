@@ -44,6 +44,7 @@ final class AppSettings {
         static let settingsPane = "settingsPane"
         static let mailbox = "mailbox"
         static let threadOrder = "threadOrder"
+        static let participantFilter = "participantFilter"
         static let textZoom = "textZoom"
     }
 
@@ -117,6 +118,13 @@ final class AppSettings {
     var threadOrder: ThreadOrder {
         get { ThreadOrder(rawValue: defaults.string(forKey: Key.threadOrder) ?? "") ?? .newestFirst }
         set { defaults.set(newValue.rawValue, forKey: Key.threadOrder) }
+    }
+
+    /// Which of a participant's threads its mailbox shows (the scope bar,
+    /// View › Participant Filter); one setting for every participant.
+    var participantFilter: ParticipantFilter {
+        get { ParticipantFilter(rawValue: defaults.string(forKey: Key.participantFilter) ?? "") ?? .all }
+        set { defaults.set(newValue.rawValue, forKey: Key.participantFilter) }
     }
 }
 

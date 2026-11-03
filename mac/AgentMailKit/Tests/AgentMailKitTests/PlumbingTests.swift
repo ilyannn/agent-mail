@@ -124,6 +124,46 @@ struct StubCLI {
         #expect(log.contains("args: close t1\nbody: \n"))
     }
 
+    @Test func forwardPassesTheNoteAsOneArgument() async throws {
+        let stub = try StubCLI(script: """
+            for a in "$@"; do echo "arg: $a" >> "$LOG"; done
+            echo "body: $(cat)" >> "$LOG"
+            echo "2026-11-03-fwd-deploy"
+            """)
+        defer { stub.remove() }
+        let client = stub.client()
+        let id = try await client.forward(threadID: "t1", message: "a.md", to: "docs", subject: "Fwd: Deploy",
+                                          note: "--see below\nline two")
+        #expect(id == "2026-11-03-fwd-deploy")
+        try await client.forward(threadID: "t1", to: "infra")
+        let log = try stub.calls()
+        #expect(log.contains("""
+            arg: forward
+            arg: t1
+            arg: --to
+            arg: docs
+            arg: --msg
+            arg: a.md
+            arg: --subject
+            arg: Fwd: Deploy
+            arg: --
+            arg: --see below
+            line two
+            body: \n
+            """))
+        #expect(log.hasSuffix("arg: forward\narg: t1\narg: --to\narg: infra\nbody: \n"))
+    }
+
+    @Test func forwardArguments() {
+        func args(message: String? = nil, subject: String? = nil, note: String = "") -> [String] {
+            CLIClient.forwardArguments(threadID: "t", message: message, to: "docs", subject: subject, note: note)
+        }
+        #expect(args() == ["forward", "t", "--to", "docs"])
+        #expect(args(subject: "  ", note: " \n ") == ["forward", "t", "--to", "docs"], "blank: the CLI's defaults")
+        #expect(args(message: "m.md", subject: "S", note: "hi") == ["forward", "t", "--to", "docs", "--msg", "m.md",
+                                                                    "--subject", "S", "--", "hi"])
+    }
+
     @Test func nonZeroExitIsAnError() async throws {
         let stub = try StubCLI(script: "echo 'agent-mail: no thread #9' >&2\nexit 1\n")
         defer { stub.remove() }

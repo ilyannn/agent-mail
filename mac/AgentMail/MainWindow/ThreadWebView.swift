@@ -51,6 +51,19 @@ final class ThreadWebView: WKWebView {
     private(set) var selectionAtMouseDown = ""
     /// The pinch's scale step, and whether the gesture ended.
     var onPinch: (_ magnification: Double, _ ended: Bool) -> Void = { _, _ in }
+    /// Until then the view won't take focus back: a card's Reply or Forward
+    /// has just put it in the pane, and WebKit may still be finishing the
+    /// click (or loading a forward's preview) and reclaim it.
+    private var refusesFocusUntil: ContinuousClock.Instant?
+
+    func refuseFocusBriefly() {
+        refusesFocusUntil = .now + .milliseconds(600)
+    }
+
+    override var acceptsFirstResponder: Bool {
+        if let until = refusesFocusUntil, ContinuousClock.now < until { return false }
+        return super.acceptsFirstResponder
+    }
 
     override func mouseDown(with event: NSEvent) {
         // Sent before the click, so the page answers with the selection

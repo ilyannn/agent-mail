@@ -1,0 +1,70 @@
+{
+  "schema" : 1,
+  "now" : "2026-11-03T02:51:53.709Z",
+  "me" : "user",
+  "threads" : [ {
+    "forwarded-from" : "2026-11-03-rotate-the-certificate",
+    "unread" : 0,
+    "number" : 3,
+    "participants" : [ "infra", "user" ],
+    "updated" : "2026-11-03T02:51:53.613Z",
+    "unread-by" : {
+      "infra" : 1,
+      "user" : 0
+    },
+    "flow" : [ "user", "infra" ],
+    "created" : "2026-11-03T02:51:53.613Z",
+    "listener" : "none",
+    "status" : "open",
+    "from" : "user",
+    "id" : "2026-11-03-fwd-rotate-the-certificate-2",
+    "count" : 1,
+    "last-from" : "user",
+    "waiting-s" : 0,
+    "subject" : "Fwd: Rotate the certificate",
+    "owner" : "infra"
+  }, {
+    "forwarded-from" : "2026-11-03-rotate-the-certificate",
+    "unread" : 0,
+    "number" : 2,
+    "participants" : [ "docs", "user" ],
+    "updated" : "2026-11-03T02:51:53.532Z",
+    "unread-by" : {
+      "docs" : 1,
+      "user" : 0
+    },
+    "flow" : [ "user", "docs" ],
+    "created" : "2026-11-03T02:51:53.532Z",
+    "listener" : "none",
+    "status" : "open",
+    "from" : "user",
+    "id" : "2026-11-03-fwd-rotate-the-certificate",
+    "count" : 1,
+    "last-from" : "user",
+    "waiting-s" : 0,
+    "subject" : "Fwd: Rotate the certificate",
+    "owner" : "docs"
+  }, {
+    "unread" : 3,
+    "number" : 1,
+    "participants" : [ "infra", "website" ],
+    "updated" : "2026-11-03T02:51:53.451Z",
+    "unread-by" : {
+      "infra" : 1,
+      "website" : 0
+    },
+    "flow" : [ "website", "infra", "website" ],
+    "created" : "2026-11-03T02:51:53.228Z",
+    "listener" : null,
+    "status" : "done",
+    "from" : "website",
+    "id" : "2026-11-03-rotate-the-certificate",
+    "count" : 3,
+    "last-from" : "website",
+    "waiting-s" : null,
+    "subject" : "Rotate the certificate",
+    "owner" : "infra"
+  } ],
+  "duty" : [ ],
+  "undelivered" : [ "2026-11-03-fwd-rotate-the-certificate", "2026-11-03-fwd-rotate-the-certificate-2" ]
+}

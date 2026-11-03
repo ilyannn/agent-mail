@@ -14,7 +14,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MailActions, NSMenuIte
     private var statusItem: StatusItemController?
     private var mainWindow: MainWindowController?
     private var settingsWindow: SettingsWindowController?
-    private var composeWindows: [ComposeWindowController] = []
     private var terminationSignal: (any DispatchSourceSignal)?
     #if DEBUG
     private var debugHooks: DebugHooks?
@@ -153,16 +152,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MailActions, NSMenuIte
         bringForward(settingsWindow?.window)
     }
 
+    /// New Message (⌘N, the toolbar, the menu bar extra): the main window
+    /// comes forward with the draft, an empty thread and its reply box.
     @objc func newMessage(_ sender: Any?) {
-        newMessage(to: nil)
-    }
-
-    func newMessage(to recipient: String?) {
-        let wc = ComposeWindowController(store: store, recipient: recipient)
-        wc.onClose = { [weak self, weak wc] in self?.composeWindows.removeAll { $0 === wc } }
-        composeWindows.append(wc)
-        wc.showWindow(nil)
-        bringForward(wc.window)
+        showMainWindow(nil)
+        mainWindow?.newMessage()
     }
 
     @objc func refresh(_ sender: Any?) {
@@ -179,9 +173,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MailActions, NSMenuIte
         if let order = ThreadOrder(menuItem: sender) { store.threadOrder = order }
     }
 
+    /// Participant Filter while the main window isn't key, likewise.
+    @objc func setParticipantFilter(_ sender: Any?) {
+        if let filter = ParticipantFilter(menuItem: sender) { store.participantFilter = filter }
+    }
+
     // Thread and text size commands reach the app delegate only when the
     // main window isn't key; they are disabled then.
     @objc func replyToThread(_ sender: Any?) {}
+    @objc func forwardThread(_ sender: Any?) {}
     @objc func sendReply(_ sender: Any?) {}
     @objc func closeThread(_ sender: Any?) {}
     @objc func copyThreadID(_ sender: Any?) {}
@@ -210,7 +210,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MailActions, NSMenuIte
         case #selector(setThreadOrder(_:)):
             menuItem.state = ThreadOrder(menuItem: menuItem) == store.threadOrder ? .on : .off
             return true
-        case #selector(replyToThread(_:)), #selector(sendReply(_:)), #selector(closeThread(_:)),
+        case #selector(setParticipantFilter(_:)):
+            menuItem.state = ParticipantFilter(menuItem: menuItem) == store.participantFilter ? .on : .off
+            if case .agent = store.mailbox { return true }
+            return false
+        case #selector(replyToThread(_:)), #selector(forwardThread(_:)), #selector(sendReply(_:)), #selector(closeThread(_:)),
              #selector(copyThreadID(_:)), #selector(revealThreadInFinder(_:)),
              #selector(increaseTextSize(_:)), #selector(decreaseTextSize(_:)), #selector(resetTextSize(_:)):
             return false

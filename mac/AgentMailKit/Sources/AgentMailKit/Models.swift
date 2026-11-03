@@ -58,18 +58,22 @@ public struct ThreadSummary: Sendable, Equatable, Hashable, Identifiable, Decoda
     public var waitingSeconds: Int?
     /// `user`, `on-duty` or `none` for an open thread; nil when closed.
     public var listener: String?
+    /// The thread this one forwards (`agent-mail forward`), nil for any
+    /// other thread and from a CLI that predates forwarding.
+    public var forwardedFrom: String?
 
     enum CodingKeys: String, CodingKey {
         case id, number, subject, from, created, owner, status, count, updated, unread, participants, flow, listener
         case lastFrom = "last-from"
         case unreadBy = "unread-by"
         case waitingSeconds = "waiting-s"
+        case forwardedFrom = "forwarded-from"
     }
 
     public init(id: String, number: Int? = nil, subject: String, from: String? = nil, lastFrom: String? = nil,
                 created: Date? = nil, owner: String? = nil, status: String = "open", count: Int = 1,
                 updated: Date? = nil, unread: Int = 0, unreadBy: [String: Int] = [:], participants: [String] = [],
-                flow: [String] = [], waitingSeconds: Int? = nil, listener: String? = nil) {
+                flow: [String] = [], waitingSeconds: Int? = nil, listener: String? = nil, forwardedFrom: String? = nil) {
         self.id = id
         self.number = number
         self.subject = subject
@@ -86,6 +90,7 @@ public struct ThreadSummary: Sendable, Equatable, Hashable, Identifiable, Decoda
         self.flow = flow
         self.waitingSeconds = waitingSeconds
         self.listener = listener
+        self.forwardedFrom = forwardedFrom
     }
 
     public init(from decoder: any Decoder) throws {
@@ -106,6 +111,7 @@ public struct ThreadSummary: Sendable, Equatable, Hashable, Identifiable, Decoda
         flow = try c.decodeIfPresent([String].self, forKey: .flow) ?? []
         waitingSeconds = try c.decodeIfPresent(Int.self, forKey: .waitingSeconds)
         listener = try c.decodeIfPresent(String.self, forKey: .listener)
+        forwardedFrom = try c.decodeIfPresent(String.self, forKey: .forwardedFrom)
     }
 
     public var isOpen: Bool { status == "open" }
@@ -135,6 +141,16 @@ public struct ThreadSummary: Sendable, Equatable, Hashable, Identifiable, Decoda
         if let lastFrom, lastFrom != me { return lastFrom }
         if let owner, owner != me { return owner }
         return participants.first { $0 != me }
+    }
+
+    /// Whom the thread's first message went to, as far as the summary can
+    /// tell: the second name of its flow (the first recipient wrote next, or
+    /// still has the turn), else the owner, else whoever else takes part.
+    /// Names a forward's recipient in the original's header.
+    public var firstRecipient: String? {
+        if flow.count > 1 { return flow[1] }
+        if let owner, owner != from { return owner }
+        return participants.first { $0 != from }
     }
 }
 
@@ -202,16 +218,19 @@ public struct ThreadDetail: Sendable, Equatable, Decodable {
     public var updated: Date?
     public var status: String
     public var count: Int
+    /// The thread this one forwards, as on ThreadSummary.
+    public var forwardedFrom: String?
     public var msgs: [Message]
 
     enum CodingKeys: String, CodingKey {
         case id, number, subject, from, created, owner, updated, status, count, msgs
         case lastFrom = "last-from"
+        case forwardedFrom = "forwarded-from"
     }
 
     public init(id: String, number: Int? = nil, subject: String, from: String? = nil, created: Date? = nil,
                 owner: String? = nil, lastFrom: String? = nil, updated: Date? = nil, status: String = "open",
-                msgs: [Message]) {
+                forwardedFrom: String? = nil, msgs: [Message]) {
         self.id = id
         self.number = number
         self.subject = subject
@@ -222,6 +241,7 @@ public struct ThreadDetail: Sendable, Equatable, Decodable {
         self.updated = updated
         self.status = status
         self.count = msgs.count
+        self.forwardedFrom = forwardedFrom
         self.msgs = msgs
     }
 
@@ -236,6 +256,7 @@ public struct ThreadDetail: Sendable, Equatable, Decodable {
         lastFrom = try c.decodeIfPresent(String.self, forKey: .lastFrom)
         updated = try c.decodeIfPresent(Date.self, forKey: .updated)
         status = try c.decodeIfPresent(String.self, forKey: .status) ?? "open"
+        forwardedFrom = try c.decodeIfPresent(String.self, forKey: .forwardedFrom)
         msgs = try c.decodeIfPresent([Message].self, forKey: .msgs) ?? []
         count = try c.decodeIfPresent(Int.self, forKey: .count) ?? msgs.count
     }

@@ -20,6 +20,16 @@ import Testing
             #expect(s.cliPath == nil)
             #expect(s.mailbox == .inbox)
             #expect(s.threadOrder == .newestFirst)
+            #expect(s.participantFilter == .all)
+        }
+    }
+
+    @Test func participantFilterRoundTrips() {
+        withSettings { s in
+            for filter in ParticipantFilter.allCases {
+                s.participantFilter = filter
+                #expect(s.participantFilter == filter)
+            }
         }
     }
 

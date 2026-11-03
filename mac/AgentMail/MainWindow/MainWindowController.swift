@@ -1,8 +1,9 @@
 // The main window: sidebar, thread list and thread view in a split view
 // controller, a unified toolbar whose sections track the split dividers, and
-// the thread commands (Reply, Send, Close Thread, mailboxes, sort order, text
-// size) for the menus and toolbar. Closing it leaves the app running in the
-// menu bar.
+// the thread commands (New Message, Reply, Forward, Send, Close Thread,
+// mailboxes, sort order, participant filter, text size) for the menus and
+// toolbar. Closing it leaves the app running in the menu bar, the draft and
+// unsent replies kept.
 import AgentMailKit
 import AppKit
 import Observation
@@ -13,6 +14,7 @@ extension NSToolbarItem.Identifier {
     static let sortOrder = Self("sortOrder")
     static let listTrackingSeparator = Self("listTrackingSeparator")
     static let reply = Self("reply")
+    static let forward = Self("forward")
     static let closeThread = Self("closeThread")
 }
 
@@ -58,7 +60,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         split.splitView.autosaveName = "MainSplit"
         window.contentViewController = split
 
-        let toolbar = NSToolbar(identifier: "MainToolbar")
+        // A new identifier when the default items change: a saved
+        // configuration would otherwise hide new ones (Forward).
+        let toolbar = NSToolbar(identifier: "MainToolbar.2")
         toolbar.delegate = self
         toolbar.displayMode = .iconOnly
         toolbar.allowsUserCustomization = true
@@ -81,10 +85,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             self?.store.select(threadID: id)
             self?.thread.closeThread()
         }
+        list.onContextForward = { [weak self] id in self?.thread.forward(threadID: id) }
+        list.onContextDiscard = { [weak self] in
+            self?.store.showDraft()
+            self?.thread.discardDraft()
+        }
         store.detailIsVisible = { [weak self] in self?.isThreadVisible ?? false }
 
         updateTitle()
-        let changes = Observations { [store] in (store.mailbox, store.index, store.threadOrder) }
+        let changes = Observations { [store] in (store.mailbox, store.index, store.threadOrder, store.participantFilter) }
         observation = Task { [weak self] in
             for await _ in changes {
                 self?.updateTitle()
@@ -100,9 +109,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         return !(split.splitViewItems.last?.isCollapsed ?? true)
     }
 
+    /// The mailbox, with the participant filter when it isn't All
+    /// ("infra — Sent"), and what the list holds.
     private func updateTitle() {
-        let threads = store.index.threads(in: store.mailbox)
-        window?.title = store.mailbox.title
+        let threads = store.shownThreads
+        var title = store.mailbox.title
+        if isParticipantMailbox, store.participantFilter != .all { title += " — \(store.participantFilter.title)" }
+        window?.title = title
         let unread = threads.reduce(0) { $0 + $1.unread }
         var parts = ["\(threads.count) thread\(threads.count == 1 ? "" : "s")"]
         if unread > 0 { parts.append("\(unread) unread") }
@@ -114,6 +127,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     /// agree.
     private var canSort: Bool { store.mailbox != .undelivered }
 
+    /// The participant filter applies to a participant's mailbox only.
+    private var isParticipantMailbox: Bool {
+        if case .agent = store.mailbox { return true }
+        return false
+    }
+
     private func updateSortItem() {
         sortItem?.title = store.threadOrder.title
         sortItem?.isEnabled = canSort
@@ -122,14 +141,21 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     /// Shows a thread: switches to a mailbox that holds it when the current
     /// one doesn't, then selects it.
     func reveal(threadID id: String) {
-        let inCurrent = store.index.threads(in: store.mailbox).contains { $0.id == id }
-        if !inCurrent { store.mailbox = store.index.preferredMailbox(for: id) }
+        if !store.isShown(id) { store.mailbox = store.index.preferredMailbox(for: id) }
         store.select(threadID: id)
         list.reveal(id)
     }
 
     func restoreDraft(_ text: String, for id: String) {
         thread.restoreDraft(text, for: id)
+    }
+
+    /// New Message: the draft in the thread view, addressed to the repo whose
+    /// mailbox is shown (not the user's own).
+    func newMessage() {
+        var recipient: String?
+        if case let .agent(name) = store.mailbox, name != store.index.me { recipient = name }
+        thread.newMessage(to: recipient)
     }
 
     #if DEBUG
@@ -171,7 +197,15 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     @objc func setThreadOrder(_ sender: Any?) {
         if let order = ThreadOrder(menuItem: sender) { store.threadOrder = order }
     }
+    @objc func setParticipantFilter(_ sender: Any?) {
+        if let filter = ParticipantFilter(menuItem: sender) { store.participantFilter = filter }
+    }
+    @objc func newMessage(_ sender: Any?) { newMessage() }
     @objc func replyToThread(_ sender: Any?) { thread.focusReply() }
+    @objc func forwardThread(_ sender: Any?) {
+        guard let id = store.selectedThreadID else { return }
+        thread.forward(threadID: id)
+    }
     @objc func sendReply(_ sender: Any?) { thread.sendReply() }
     @objc func closeThread(_ sender: Any?) { thread.closeThread() }
     @objc func increaseTextSize(_ sender: Any?) { thread.makeTextBigger() }
@@ -191,7 +225,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
 
     private func isEnabled(_ action: Selector?) -> Bool? {
         switch action {
-        case #selector(replyToThread(_:)), #selector(copyThreadID(_:)), #selector(revealThreadInFinder(_:)):
+        case #selector(replyToThread(_:)):
+            store.selectedThreadID != nil || store.isShowingDraft
+        case #selector(forwardThread(_:)), #selector(copyThreadID(_:)), #selector(revealThreadInFinder(_:)):
             store.selectedThreadID != nil
         case #selector(sendReply(_:)):
             thread.canSendReply
@@ -223,6 +259,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             menuItem.state = ThreadOrder(menuItem: menuItem) == store.threadOrder ? .on : .off
             return canSort
         }
+        if menuItem.action == #selector(setParticipantFilter(_:)) {
+            menuItem.state = ParticipantFilter(menuItem: menuItem) == store.participantFilter ? .on : .off
+            return isParticipantMailbox
+        }
         return isEnabled(menuItem.action) ?? true
     }
 
@@ -234,7 +274,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         [.toggleSidebar, .sidebarTrackingSeparator, .refresh, .flexibleSpace, .sortOrder, .newMessage,
-         .listTrackingSeparator, .flexibleSpace, .reply, .closeThread]
+         .listTrackingSeparator, .flexibleSpace, .reply, .forward, .closeThread]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -247,7 +287,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         case .listTrackingSeparator:
             return NSTrackingSeparatorToolbarItem(identifier: id, splitView: split.splitView, dividerIndex: 1)
         case .newMessage:
-            return button(id, "New Message", "square.and.pencil", #selector(AppDelegate.newMessage(_:)))
+            return button(id, "New Message", "square.and.pencil", #selector(newMessage(_:)))
         case .refresh:
             return button(id, "Get New Mail", "arrow.clockwise", #selector(AppDelegate.refresh(_:)))
         case .sortOrder:
@@ -267,6 +307,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             return item
         case .reply:
             return button(id, "Reply", "arrowshape.turn.up.left", #selector(replyToThread(_:)))
+        case .forward:
+            let item = button(id, "Forward", "arrowshape.turn.up.right", #selector(forwardThread(_:)))
+            item.toolTip = "Forward (⇧⌘F): hand an open thread on to someone else, or forward a closed one in a new thread"
+            return item
         case .closeThread:
             return button(id, "Close Thread", "checkmark.circle", #selector(closeThread(_:)))
         default:

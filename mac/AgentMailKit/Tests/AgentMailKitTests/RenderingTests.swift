@@ -184,6 +184,70 @@ import Testing
         #expect(html.contains("href=\"agent-mail-action:///reply/t/b.md\" title=\"Reply to infra\">Reply</a>"))
         // My own message: Reply goes to whom I wrote.
         #expect(html.contains("href=\"agent-mail-action:///reply/t/a.md\" title=\"Reply to infra\">Reply</a>"))
+        // A closed thread: a card's Forward starts a new thread with that message.
+        var closed = th
+        closed.status = "done"
+        let done = ThreadDocument.html(thread: closed, me: "user", css: "") { _ in "" }
+        #expect(done.contains("href=\"agent-mail-action:///forward/t/b.md\" title=\"Forward this message in a new thread\">Forward</a>"))
+        #expect(done.contains("href=\"agent-mail-action:///forward/t\" title=\"Forward the thread in a new thread (⇧⌘F)\">Forward</a>"))
+    }
+
+    @Test func forwardOnAnOpenThreadHandsItOn() throws {
+        let th = try AgentMailJSON.decodeThread(Fixture.data("read"))
+        let html = ThreadDocument.html(thread: th, me: "user", css: "") { _ in "" }
+        #expect(html.contains("href=\"agent-mail-action:///forward/2026-10-31-deploy-the-new-site\" "
+            + "title=\"Hand the thread on to someone else (⇧⌘F)\">Forward</a>"))
+        #expect(html.contains("href=\"agent-mail-action:///forward/2026-10-31-deploy-the-new-site/"
+            + "2026-10-31T230503.205Z__website__66ad.md\" title=\"Hand the thread on to someone else\">Forward</a>"))
+        #expect(html.components(separatedBy: ">Forward</a>").count == 4, "the thread's and one per card")
+        #expect(!html.contains("class=\"related\""), "no forwards either way")
+    }
+
+    @Test func headerLinksAForwardToItsSourceAndBack() throws {
+        let status = try AgentMailJSON.decodeStatus(Fixture.data("status-forward"))
+        let index = MailboxIndex(status: status)
+        let fwd = try AgentMailJSON.decodeThread(Fixture.data("read-forward"))
+        let source = try #require(index.thread("2026-11-03-rotate-the-certificate"))
+        let html = ThreadDocument.html(thread: fwd, me: "user", css: "", forwardedFrom: source) { _ in "" }
+        #expect(html.contains("<p class=\"related\"><span>Forwarded from <a class=\"thread-link\" "
+            + "href=\"agent-mail-action:///show/2026-11-03-fwd-rotate-the-certificate/2026-11-03-rotate-the-certificate\" "
+            + "title=\"Show 2026-11-03-rotate-the-certificate\">#1 Rotate the certificate</a></span></p>"))
+
+        let original = ThreadDetail(id: source.id, number: 1, subject: source.subject, status: "done", msgs: [])
+        let back = ThreadDocument.html(thread: original, me: "user", css: "",
+                                       forwards: index.forwards(of: source.id)) { _ in "" }
+        #expect(back.contains("<span>Forwarded to <a class=\"thread-link\" "
+            + "href=\"agent-mail-action:///show/2026-11-03-rotate-the-certificate/2026-11-03-fwd-rotate-the-certificate\" "
+            + "title=\"Show 2026-11-03-fwd-rotate-the-certificate\">docs as #2</a>, <a class=\"thread-link\" "
+            + "href=\"agent-mail-action:///show/2026-11-03-rotate-the-certificate/2026-11-03-fwd-rotate-the-certificate-2\" "
+            + "title=\"Show 2026-11-03-fwd-rotate-the-certificate-2\">infra as #3</a></span>"))
+
+        // A source the index doesn't know: its id, still a link.
+        let unknown = ThreadDocument.html(thread: fwd, me: "user", css: "",
+                                          forwardedFrom: ThreadSummary(id: "gone", subject: "")) { _ in "" }
+        #expect(unknown.contains(">gone</a>"))
+    }
+
+    @Test func forwardPreviewIsCardsWithoutButtons() throws {
+        let th = ThreadDetail(id: "t", number: 3, subject: "S", status: "done", msgs: [
+            Message(file: "1.md", from: "infra", to: "user", date: nil, body: FoldingTests.paragraphs),
+            Message(file: "2.md", from: "user", to: "infra", date: nil, attachments: ["files/notes.md"], body: "two"),
+        ])
+        let all = ThreadDocument.forwardPreview(thread: th, message: nil, me: "user", css: "",
+                                                readAttachment: { _ in "# Notes" }) { _ in "" }
+        #expect(!all.contains("<header class=\"thread\">"), "the draft has its own header")
+        #expect(!all.contains("agent-mail-action:///open"))
+        #expect(!all.contains("agent-mail-action:///reply"))
+        #expect(!all.contains("agent-mail-action:///forward"))
+        #expect(!all.contains("class=\"fold\""), "nothing folded, however long")
+        #expect(!all.contains("unread"))
+        #expect(all.contains("<article class=\"msg\" id=\"m1\">"))
+        #expect(all.contains("<article class=\"msg mine\" id=\"m2\">"))
+        #expect(all.contains("<a class=\"file\" href=\"agent-mail-file:///t/notes.md\""), "attachments still open")
+        #expect(all.contains("<details class=\"attachment-doc\" open>"))
+        let one = ThreadDocument.forwardPreview(thread: th, message: "2.md", me: "user", css: "") { _ in "" }
+        #expect(one.components(separatedBy: "<article").count == 2)
+        #expect(one.contains("id=\"m2\""))
     }
 
     @Test func attachmentsAreListedShownAndRendered() {
@@ -295,6 +359,13 @@ import Testing
         #expect(c("agent-mail-action:///reply/t1/m.md") == .reply(toMessage: "m.md"))
         #expect(c("agent-mail-action:///reply/t1") == .reply(toMessage: nil))
         #expect(c("agent-mail-action:///reveal/t1/a.png") == .revealAttachment("a.png"))
+        #expect(c("agent-mail-action:///forward/t1/m.md") == .forward(message: "m.md"))
+        #expect(c("agent-mail-action:///forward/t1") == .forward(message: nil))
+        #expect(c("agent-mail-action:///show/t1/t2") == .openThread("t2"))
+        #expect(c("agent-mail-action:///show/t1") == .ignore, "show needs a thread")
+        #expect(c("agent-mail-action:///show/t1/t1") == .ignore, "not the thread on screen")
+        #expect(c("agent-mail-action:///show/t1/..") == .ignore)
+        #expect(c("agent-mail-action:///show/t2/t3") == .ignore, "only from the thread on screen")
         #expect(c("agent-mail-action:///open/t1") == .ignore)
         #expect(c("agent-mail-action:///delete/t1/m.md") == .ignore)
         #expect(c("agent-mail-action:///open/t2/m.md") == .ignore)
@@ -305,6 +376,8 @@ import Testing
         #expect(c("x-apple.systempreferences:foo") == .ignore)
         #expect(LinkPolicy.classify(URL(string: "agent-mail-file:///t1/a.png"), isLinkClick: true, thread: nil) == .ignore)
         #expect(LinkPolicy.actionURL(.open, thread: "t1", item: "m.md")?.absoluteString == "agent-mail-action:///open/t1/m.md")
+        #expect(LinkPolicy.actionURL(.show, thread: "t1", item: "t2")?.absoluteString == "agent-mail-action:///show/t1/t2")
+        #expect(LinkPolicy.actionURL(.forward, thread: "t1")?.absoluteString == "agent-mail-action:///forward/t1")
     }
 
     @Test func executablesAreNotOpened() throws {

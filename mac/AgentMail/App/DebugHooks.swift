@@ -8,11 +8,15 @@
 //   {"cmd": "select", "arg": "<thread id>"}         (clicks the row)
 //   {"cmd": "mailbox", "arg": "inbox|undelivered|allMail|agent:NAME"}
 //   {"cmd": "sort", "arg": "newestFirst|openFirst"}  (View › Sort By)
+//   {"cmd": "filter", "arg": "all|sent|received|waiting"} (the scope bar)
 //   {"cmd": "key", "arg": "r", "mods": "cmd,shift"} (through the menus)
 //   {"cmd": "type", "arg": "text"}                  (into the first responder)
 //   {"cmd": "action", "arg": "replyToThread:"}      (down the responder chain)
 //   {"cmd": "statusmenu", "out": "..."}             (the status item's menu)
 //   {"cmd": "show" | "close" | "settings" | "compose" | "dock", "arg": ...}
+//                              (compose: New Message, the draft in the window)
+//   {"cmd": "forward", "arg": "<thread id>[/<message file>]"} (as Forward does)
+//   {"cmd": "discard"}                              (the draft's Discard)
 //   {"cmd": "visible", "arg": "on"}                 (treat the thread as seen)
 //   {"cmd": "js", "arg": "document.title"}          (in the thread's web view)
 //   {"cmd": "clickweb", "arg": "#m1 a.button"}      (a real click on an element)
@@ -56,6 +60,7 @@ final class DebugHooks: NSObject {
         case "select": app.debugMain?.debugSelect(arg)
         case "mailbox": app.debugMain?.debugSelectMailbox(arg)
         case "sort": if let order = ThreadOrder(rawValue: arg) { app.store.threadOrder = order }
+        case "filter": if let filter = ParticipantFilter(rawValue: arg) { app.store.participantFilter = filter }
         case "key":
             whenActive { [self] in
                 key(arg, mods: cmd["mods"] ?? "")
@@ -103,6 +108,10 @@ final class DebugHooks: NSObject {
         case "close": app.debugMain?.window?.performClose(nil)
         case "settings": app.showSettings(nil)
         case "compose": app.newMessage(nil)
+        case "forward":
+            let parts = arg.split(separator: "/", maxSplits: 1).map(String.init)
+            if let id = parts.first { app.debugMain?.thread.forward(threadID: id, message: parts.count > 1 ? parts[1] : nil) }
+        case "discard": app.debugMain?.thread.discardDraft()
         case "visible":
             // The thread view only runs `read` while the user can see it; a
             // window behind others can't be seen. "on" pretends it can.
@@ -161,13 +170,29 @@ final class DebugHooks: NSObject {
         }
         let window = NSApp.keyWindow ?? NSApp.mainWindow
         let codes: [String: UInt16] = ["\r": 36, " ": 49, "r": 15, "d": 2, "a": 0, "n": 45, "1": 18, "2": 19, "3": 20,
-                                       "0": 29, "w": 13, ",": 43, "\u{1b}": 53, "\t": 48, "=": 24, "+": 24, "-": 27]
-        let chars2 = flags.contains(.shift) ? chars.uppercased() : chars
+                                       "0": 29, "w": 13, ",": 43, "\u{1b}": 53, "\t": 48, "=": 24, "+": 24, "-": 27,
+                                       "f": 3]
+        // A known key goes through CGEvent, so its characters come from the
+        // key code and the keyboard layout, as when typed: menus match
+        // Shift shortcuts (⇧⌘F, ⇧⌘D) on those. ("+" is the "=" key: ⌘= has
+        // the same command.)
+        if let code = codes[chars] {
+            var cgFlags: CGEventFlags = []
+            if flags.contains(.command) { cgFlags.insert(.maskCommand) }
+            if flags.contains(.shift) { cgFlags.insert(.maskShift) }
+            if flags.contains(.control) { cgFlags.insert(.maskControl) }
+            if flags.contains(.option) { cgFlags.insert(.maskAlternate) }
+            for down in [true, false] {
+                guard let cg = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down) else { continue }
+                cg.flags = cgFlags
+                if let e = NSEvent(cgEvent: cg) { NSApp.sendEvent(e) }
+            }
+            return
+        }
         for type in [NSEvent.EventType.keyDown, .keyUp] {
             guard let e = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: flags, timestamp: ProcessInfo.processInfo.systemUptime,
-                                           windowNumber: window?.windowNumber ?? 0, context: nil, characters: chars2,
-                                           charactersIgnoringModifiers: chars, isARepeat: false,
-                                           keyCode: codes[chars] ?? 0) else { continue }
+                                           windowNumber: window?.windowNumber ?? 0, context: nil, characters: chars,
+                                           charactersIgnoringModifiers: chars, isARepeat: false, keyCode: 0) else { continue }
             NSApp.sendEvent(e)
         }
     }
@@ -250,6 +275,25 @@ final class DebugHooks: NSObject {
         return nil
     }
 
+    /// A top-level menu's items once validated: "All✓", "(off)" when
+    /// disabled; separators and submenus left out.
+    private func menuState(_ title: String) -> String {
+        guard let menu = NSApp.mainMenu?.item(withTitle: title)?.submenu else { return "-" }
+        menu.update()
+        return menu.items.filter { !$0.isSeparatorItem && $0.submenu == nil && !$0.isHidden }.map { i in
+            i.title + (i.state == .on ? "✓" : "") + (i.isEnabled || i.isSectionHeader ? "" : "(off)")
+        }.joined(separator: " | ")
+    }
+
+    /// A responder's class and label; a field editor by the field it edits.
+    private func describe(_ responder: NSResponder?) -> String {
+        guard let responder else { return "-" }
+        if let editor = responder as? NSTextView, editor.isFieldEditor, let field = editor.delegate as? NSControl {
+            return "field editor of \(type(of: field)) \(field.accessibilityLabel() ?? "")"
+        }
+        return "\(type(of: responder)) \((responder as? NSView)?.accessibilityLabel() ?? "")"
+    }
+
     private func dump(_ app: AppDelegate) -> String {
         var lines: [String] = []
         let store = app.store
@@ -258,11 +302,18 @@ final class DebugHooks: NSObject {
         lines.append("mainMenu: \(NSApp.mainMenu?.items.map(\.title).joined(separator: " | ") ?? "-")")
         for w in NSApp.windows where w.isVisible || w.isMiniaturized {
             lines.append("window: \"\(w.title)\" subtitle=\"\(w.subtitle)\" key=\(w.isKeyWindow) main=\(w.isMainWindow) class=\(type(of: w)) frame=\(w.frame)")
-            if w.isKeyWindow { lines.append("firstResponder: \(w.firstResponder.map { String(describing: type(of: $0)) } ?? "-") \((w.firstResponder as? NSView)?.accessibilityLabel() ?? "")") }
+            if w.isKeyWindow || w === app.debugMain?.window { lines.append("firstResponder: \(describe(w.firstResponder))") }
         }
         lines.append("mailbox: \(store.mailbox)")
         lines.append("threadOrder: \(store.threadOrder.rawValue)")
+        lines.append("participantFilter: \(store.participantFilter.rawValue)")
         lines.append("selectedThread: \(store.selectedThreadID ?? "-")")
+        lines.append("draft: " + (store.newDraft.map { d in
+            "to=\(d.to.debugDescription) subject=\(d.subject.debugDescription) body=\(d.body.debugDescription) "
+                + "forward=\(d.forward.map { "\($0.threadID)/\($0.message ?? "*")" } ?? "-") "
+                + "typed=\(d.hasTypedContent) shown=\(store.isShowingDraft) sending=\(store.isSendingDraft) "
+                + "source=\(store.forwardSource?.id ?? "-")"
+        } ?? "-"))
         lines.append("detail: \(store.detail.map { "\($0.id) msgs=\($0.msgs.count) fp=\($0.contentFingerprint)" } ?? "-")")
         lines.append("detailError: \(store.detailError?.errorDescription ?? "-")")
         lines.append("refreshError: \(store.refreshError?.errorDescription ?? "-")")
@@ -270,6 +321,8 @@ final class DebugHooks: NSObject {
         lines.append("store: \(store.location.url.path) (\(store.location.source.rawValue))")
         lines.append("unreadInInbox: \(store.index.unreadInInbox)")
         lines.append("notifications: authorization=\(app.notifications.authorization.rawValue) alertStyle=\(app.notifications.alertStyle.rawValue) (0 = not determined / none)")
+        lines.append("viewMenu: \(menuState("View"))")
+        lines.append("messageMenu: \(menuState("Message"))")
         lines += app.debugMain?.debugDump() ?? []
         lines.append("statusButton: title=\"\(app.debugStatusTitle)\"")
         return lines.joined(separator: "\n") + "\n"

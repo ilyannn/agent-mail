@@ -40,6 +40,62 @@ public enum ThreadOrder: String, CaseIterable, Codable, Sendable {
     }
 }
 
+/// Which of a participant's threads its mailbox shows: the scope bar above
+/// the thread list, and View › Participant Filter. Applies to participant
+/// mailboxes only. Sent and Received split All between them; Waiting counts
+/// what the participant's sidebar badge counts.
+public enum ParticipantFilter: String, CaseIterable, Codable, Sendable {
+    /// Every thread the participant takes part in.
+    case all
+    /// Threads the participant started.
+    case sent
+    /// Threads someone else started that the participant takes part in.
+    case received
+    /// Open threads waiting on the participant.
+    case waiting
+
+    public var title: String {
+        switch self {
+        case .all: "All"
+        case .sent: "Sent"
+        case .received: "Received"
+        case .waiting: "Waiting"
+        }
+    }
+
+    /// Whether `thread`, one that `name` takes part in, passes the filter.
+    public func includes(_ thread: ThreadSummary, for name: String) -> Bool {
+        switch self {
+        case .all: true
+        case .sent: thread.from == name
+        case .received: thread.from != name
+        case .waiting: thread.isWaiting(on: name)
+        }
+    }
+
+    /// What the filter shows, naming the participant ("you" for the user's
+    /// own row): the scope bar's tooltips.
+    public func explanation(for name: String, isMe: Bool) -> String {
+        let who = isMe ? "you" : name
+        return switch self {
+        case .all: "Every thread \(who) take\(isMe ? "" : "s") part in"
+        case .sent: "Threads \(who) started"
+        case .received: "Threads others started that \(who) take\(isMe ? "" : "s") part in"
+        case .waiting: "Open threads waiting on \(who)"
+        }
+    }
+
+    /// The thread list's text when the filter leaves nothing.
+    public func emptyText(for name: String, isMe: Bool) -> String {
+        switch self {
+        case .all: isMe ? "No threads yet" : "No threads with \(name)"
+        case .sent: isMe ? "You haven’t started a thread" : "\(name) hasn’t started a thread"
+        case .received: "No threads others started with \(isMe ? "you" : name)"
+        case .waiting: "Nothing waiting on \(isMe ? "you" : name)"
+        }
+    }
+}
+
 /// A row under Participants: the user (`status.me`) or a repo.
 public struct AgentInfo: Hashable, Sendable {
     public var name: String
@@ -140,14 +196,29 @@ public struct MailboxIndex: Sendable, Equatable {
     public func thread(_ id: String) -> ThreadSummary? { byID[id] }
 
     /// A mailbox's threads; `order` sorts All Mail and participant mailboxes
-    /// only. The user's own row is `.agent(me)`: every thread with `me` in it.
-    public func threads(in mailbox: Mailbox, order: ThreadOrder = .newestFirst) -> [ThreadSummary] {
+    /// only, and `filter` applies to participant mailboxes only. The user's
+    /// own row is `.agent(me)`: every thread with `me` in it.
+    public func threads(in mailbox: Mailbox, order: ThreadOrder = .newestFirst,
+                        filter: ParticipantFilter = .all) -> [ThreadSummary] {
         switch mailbox {
         case .inbox: inbox
         case .undelivered: undelivered
         case .allMail: everything(order)
-        case let .agent(name): everything(order).filter { $0.participants.contains(name) }
+        case let .agent(name):
+            everything(order).filter { $0.participants.contains(name) && filter.includes($0, for: name) }
         }
+    }
+
+    /// How many threads `filter` leaves in participant `name`'s mailbox.
+    /// `.waiting` equals the participant's sidebar badge.
+    public func count(_ filter: ParticipantFilter, for name: String) -> Int {
+        allMail.reduce(0) { n, t in n + (t.participants.contains(name) && filter.includes(t, for: name) ? 1 : 0) }
+    }
+
+    /// The threads that forward thread `id` (`agent-mail forward`), in the
+    /// order they were started: the original's header links to each.
+    public func forwards(of id: String) -> [ThreadSummary] {
+        allMail.filter { $0.forwardedFrom == id }.sorted { ($0.number ?? 0) < ($1.number ?? 0) }
     }
 
     private func everything(_ order: ThreadOrder) -> [ThreadSummary] {
