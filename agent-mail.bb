@@ -91,6 +91,23 @@
         (Thread/sleep 200)
         (recur (inc n))))))
 
+(defn read-edn
+  "The EDN value in file `f`; nil when it is missing, half written or does
+   not parse, so one bad file never stops a reader."
+  [f]
+  (try (when (fs/regular-file? f) (edn/read-string (slurp (str f))))
+       (catch Exception _ nil)))
+
+(defn spit-atomic!
+  "Writes `content` to `f` through a temporary file and a move, so a reader
+   never sees half of it. The temporary name starts with a dot and ends in
+   .tmp, which no glob for *.edn picks up."
+  [f content]
+  (fs/create-dirs (fs/parent f))
+  (let [tmp (fs/path (fs/parent f) (str "." (fs/file-name f) "." (.pid (java.lang.ProcessHandle/current)) ".tmp"))]
+    (spit (str tmp) content)
+    (fs/move tmp f {:replace-existing true :atomic-move true})))
+
 ;; ---------------------------------------------------------------- threads
 
 (defn thread-dir [id] (fs/path threads-dir id))
@@ -216,13 +233,19 @@
 
 ;; ---------------------------------------------------------------- identity, duty
 
-(defn repo-name
-  "Basename of the main working tree of the repo the command runs in, so a
-   worktree still counts as its repo. nil outside any repo."
+(defn repo-root
+  "The main working tree of the repo the command runs in: the parent of git's
+   common dir, so a worktree still counts as its repo. nil outside any repo."
   []
   (let [r (p/shell {:out :string :err :string :continue true} "git" "rev-parse" "--git-common-dir")]
     (when (zero? (:exit r))
-      (-> (:out r) str/trim fs/path fs/absolutize fs/normalize fs/parent fs/file-name core/address-from-dir))))
+      (-> (:out r) str/trim fs/path fs/absolutize fs/normalize fs/parent))))
+
+(defn repo-name
+  "Basename of the main working tree of the repo the command runs in (see
+   repo-root). nil outside any repo."
+  []
+  (some-> (repo-root) fs/file-name core/address-from-dir))
 
 (defn agent-session?
   "True inside a coding agent's shell. Claude Code (2.1.172+) sets
@@ -259,16 +282,25 @@
     (when-not (core/valid-name? to) (fail "bad recipient name:" (pr-str to)))
     to))
 
-(defn duty-records []
+(defn duty-files
+  "[path record] for each duty record: the *.edn files directly in the duty
+   directory, not the on-call registrations and serve's state below it. A file
+   that does not read is skipped."
+  []
   (when (fs/exists? duty-dir)
-    (->> (fs/glob duty-dir "*.edn") (map #(edn/read-string (slurp (str %)))) (sort-by :heartbeat))))
+    (keep #(when-let [r (read-edn %)] [% r]) (fs/glob duty-dir "*.edn"))))
+(defn duty-records [] (sort-by :heartbeat (map second (duty-files))))
 (defn fresh? [rec] (< (core/age-s (:heartbeat rec)) stale-s))
+(defn pid-alive?
+  "Whether a process with this pid runs; false for nil."
+  [pid]
+  (boolean (and pid (.isPresent (java.lang.ProcessHandle/of pid)))))
 (defn session-alive?
   "Whether the agent session that armed this wait is still running: nil when
    the record has no session pid (not started from Claude Code), else a boolean."
   [rec]
   (when-let [pid (:session-pid rec)]
-    (.isPresent (java.lang.ProcessHandle/of pid))))
+    (pid-alive? pid)))
 (defn on-duty?
   "A fresh record in any state counts. A wait posting into its session
    heartbeats while \"waiting\" and \"working\" alike; \"idle\" with a recent
@@ -287,20 +319,37 @@
   []
   (some-> (System/getenv "CLAUDE_PID") str/trim parse-long))
 
-(defn registry-name
-  "The name Claude Code's session registry gives the session with process id
-   `pid`: \"name\" in <config>/sessions/<pid>.json, <config> being
-   CLAUDE_CONFIG_DIR, else ~/.claude. Unlike a name learned once, it follows
-   restarts and renames. nil when there is no such file or it does not parse;
-   never throws."
+(defn registry-entry
+  "Claude Code's session registry entry for process id `pid`, a map with
+   string keys: <config>/sessions/<pid>.json, <config> being
+   CLAUDE_CONFIG_DIR, else ~/.claude. nil when there is no such file or it
+   does not parse; never throws."
   [pid]
   (try
     (let [config (let [d (System/getenv "CLAUDE_CONFIG_DIR")]
                    (if (str/blank? d) (fs/path (fs/home) ".claude") (fs/path d)))
           f (fs/path config "sessions" (str pid ".json"))
-          nm (when (fs/regular-file? f) (get (json/parse-string (slurp (str f))) "name"))]
-      (when (and (string? nm) (not (str/blank? nm))) nm))
+          e (when (fs/regular-file? f) (json/parse-string (slurp (str f))))]
+      (when (map? e) e))
     (catch Exception _ nil)))
+
+(defn registry-name
+  "The name Claude Code's session registry gives the session with process id
+   `pid` (see registry-entry). Unlike a name learned once, it follows
+   restarts and renames. nil when there is none; never throws."
+  [pid]
+  (let [nm (get (registry-entry pid) "name")]
+    (when (and (string? nm) (not (str/blank? nm))) nm)))
+
+(defn session-status
+  "What the registry says session `pid` is doing, {:status
+   :status-updated-at}: status \"busy\" during a turn and \"idle\" between
+   turns, changed at statusUpdatedAt (epoch ms). nil when the process is gone
+   or has no entry, so a dead session's leftover entry never looks idle."
+  [pid]
+  (when (pid-alive? pid)
+    (when-let [e (registry-entry pid)]
+      {:status (get e "status") :status-updated-at (get e "statusUpdatedAt")})))
 
 (defn session-name
   "The live name of the Claude Code session running this command, the one
@@ -322,16 +371,147 @@
   [who session]
   (fs/path duty-dir (str who "__" (str/replace session "/" "_") ".edn")))
 
+(defn wezterm-pane
+  "The WezTerm pane this command runs in: WezTerm exports WEZTERM_PANE to the
+   processes it spawns. nil elsewhere."
+  []
+  (some-> (System/getenv "WEZTERM_PANE") str/trim parse-long))
+
 (defn write-duty!
   "The duty record also carries the pid of the agent session that runs this
    wait (Claude Code exports CLAUDE_PID), so others can tell a busy session
-   from a dead one."
+   from a dead one; the directory it runs in; and its WezTerm pane, by which
+   serve knows a tab it opened. Written in one move: serve must never read
+   half a record and take the repo for off duty."
   [who session state]
-  (fs/create-dirs duty-dir)
-  (spit (str (duty-file who session))
-        (pr-str (cond-> {:repo who :session session :state state :heartbeat (core/now-utc)
-                         :pid (.pid (java.lang.ProcessHandle/current))}
-                  (claude-pid) (assoc :session-pid (claude-pid))))))
+  (spit-atomic! (duty-file who session)
+                (pr-str (cond-> {:repo who :session session :state state :heartbeat (core/now-utc)
+                                 :pid (.pid (java.lang.ProcessHandle/current))
+                                 :dir (str (fs/normalize (fs/absolutize ".")))}
+                          (claude-pid) (assoc :session-pid (claude-pid))
+                          (wezterm-pane) (assoc :pane (wezterm-pane))))))
+
+(defn duty-view
+  "The duty records with what is derived for each: the session's live name
+   (see live-session), age, staleness, whether the session that armed the wait
+   lives, and whether it counts as on duty."
+  []
+  (map #(assoc % :session (live-session %)
+               :age-s (core/age-s (:heartbeat %)) :stale (not (fresh? %))
+               :session-alive (session-alive? %) :on-duty (on-duty? %))
+       (duty-records)))
+
+;; ---------------------------------------------------------------- on call
+
+(def oncall-dir
+  "Registrations, one <repo>.edn each ({:repo :dir}, or :off after `oncall
+   remove`). Under duty/, which the store's git ignores."
+  (fs/path duty-dir "oncall"))
+(def serve-dir (fs/path duty-dir "serve"))
+(def serve-pid-file (fs/path serve-dir "pid"))
+(def serve-state-file
+  "serve's heartbeat, interval and memory of the tabs it opened (see core)."
+  (fs/path serve-dir "state.edn"))
+
+(defn oncall-file [repo] (fs/path oncall-dir (str repo ".edn")))
+
+(defn oncall-entries
+  "Every on-call entry, removed ones (:off) included: repo -> entry."
+  []
+  (when (fs/exists? oncall-dir)
+    (into {} (keep #(when-let [e (read-edn %)] (when (:repo e) [(:repo e) e])))
+          (fs/glob oncall-dir "*.edn"))))
+
+(defn oncall-registered
+  "The repos on call: repo -> {:repo :dir}."
+  []
+  (into {} (remove (comp :off val)) (oncall-entries)))
+
+(defn register-oncall! [repo dir]
+  (spit-atomic! (oncall-file repo) (pr-str {:repo repo :dir (str dir) :added (core/now-utc)})))
+
+(defn oncall-home
+  "Where a listener tab for `me` should start: the main worktree when `me` is
+   the repo the command runs in; outside any repo, the directory itself when
+   `me` is its name. nil otherwise (an --as name), since a tab started there
+   would not come on duty as `me`."
+  [me]
+  (if-let [root (repo-root)]
+    (when (= me (core/address-from-dir (fs/file-name root))) (str root))
+    (let [cwd (fs/normalize (fs/absolutize "."))]
+      (when (= me (core/address-from-dir (fs/file-name cwd))) (str cwd)))))
+
+(defn auto-register!
+  "A wait in a Claude Code session puts its repo on call the first time, so
+   serve can open a listener tab for it when mail comes and nobody is on
+   duty. A repo taken off with `oncall remove` stays off."
+  [me]
+  (when-not (contains? (oncall-entries) me)
+    (when-let [dir (oncall-home me)]
+      (register-oncall! me dir))))
+
+(defn serve-state [] (or (read-edn serve-state-file) {}))
+(defn serve-pid [] (try (some-> (slurp (str serve-pid-file)) str/trim parse-long) (catch Exception _ nil)))
+
+(defn serve-info
+  "Whether serve runs, {:alive :pid}: its pid file names a live process and
+   its heartbeat is fresh, within three rounds and at least a minute (a
+   reused pid alone is not enough)."
+  []
+  (let [pid (serve-pid)
+        st (serve-state)
+        fresh? (and (:heartbeat st) (< (core/age-s (:heartbeat st)) (max 60 (* 3 (or (:interval st) 5)))))]
+    {:alive (boolean (and fresh? (pid-alive? pid))) :pid pid}))
+
+(defn sessions-of
+  "Live session pid -> registry status (see session-status), for the session
+   pids of `duty`."
+  [duty]
+  (into {} (keep (fn [pid] (when-let [s (session-status pid)] [pid s]))) (distinct (keep :session-pid duty))))
+
+(defn oncall-view
+  "The on-call repos with what serve is doing about each (core/oncall-view)."
+  ([] (oncall-view (duty-view)))
+  ([duty]
+   (core/oncall-view {:now (System/currentTimeMillis) :oncall (oncall-registered)
+                      :memory (:repos (serve-state)) :duty duty :sessions (sessions-of duty)})))
+
+(defn serve-line
+  "One line on whether serve runs, for `oncall` and `who`."
+  []
+  (let [{:keys [alive pid]} (serve-info)]
+    (if alive
+      (str "serve: running (pid " pid ")")
+      "serve: not running, so no tab opens; start `agent-mail serve` (`just install-serve` in the agent-mail repo keeps it running)")))
+
+(def wezterm-app "/Applications/WezTerm.app/Contents/MacOS/wezterm")
+
+(defn wezterm-bin
+  "The wezterm CLI: AGENT_MAIL_WEZTERM if set, else wezterm on PATH, else the
+   macOS app's own copy; nil when there is none."
+  []
+  (let [e (System/getenv "AGENT_MAIL_WEZTERM")]
+    (cond (not (str/blank? e)) e
+          (fs/which "wezterm") (str (fs/which "wezterm"))
+          (fs/executable? wezterm-app) wezterm-app)))
+
+(defn wez!
+  "Runs `wezterm cli --no-auto-start ARGS…`, {:exit :out :err}. Without
+   --no-auto-start a CLI that finds no GUI starts a headless mux server, and a
+   tab spawned there would run where nobody sees it. Exit 127 when there is
+   no wezterm; never throws."
+  [& args]
+  (if-let [bin (wezterm-bin)]
+    (try (apply p/shell {:out :string :err :string :in "" :continue true} bin "cli" "--no-auto-start" (map str args))
+         (catch Exception e {:exit 127 :out "" :err (str (ex-message e))}))
+    {:exit 127 :out "" :err "wezterm not found"}))
+
+(defn wez-json
+  "`wezterm cli ARGS… --format json`, parsed; nil on any failure."
+  [& args]
+  (let [r (apply wez! (concat args ["--format" "json"]))]
+    (when (zero? (:exit r))
+      (try (json/parse-string (:out r)) (catch Exception _ nil)))))
 
 ;; ---------------------------------------------------------------- delivery notes
 
@@ -358,6 +538,19 @@
                    (str "display notification " (q subject) " with title " (q title) " subtitle " (q id)))
           (if tn :banner-not-allowed :banner))))))
 
+(defn oncall-note
+  "The delivery note for `to`, which nobody is on duty for, when it is on
+   call: a tab opens shortly while serve runs and the repo is not backing
+   off; otherwise why not. nil when `to` is not on call."
+  [to]
+  (when-let [oc (first (filter #(= to (:repo %)) (oncall-view)))]
+    (cond
+      (not (:alive (serve-info)))
+      (str "→ " to ": nobody on duty; on call, but `agent-mail serve` isn't running; it will see this at its next session start")
+      (= "backing-off" (:state oc))
+      (str "→ " to ": nobody on duty; on call, " (:text oc) "; it will see this at its next session start")
+      :else (str "→ " to ": on call; a listener tab opens for it shortly"))))
+
 (defn delivered! [from to id subject]
   (binding [*out* *err*]
     (if (= to "user")
@@ -373,7 +566,8 @@
                                                                "idle" ", between waits"
                                                                ", busy")) d))
                       "); nudge it with SendMessage carrying just the thread id"))
-        (println (str "→ " to ": nobody on duty; it will see this at its next session start"))))))
+        (println (or (oncall-note to)
+                     (str "→ " to ": nobody on duty; it will see this at its next session start")))))))
 
 (defn stdin-content
   "What stands ready on stdin: the whole of a redirected file or a pipe that
@@ -590,8 +784,8 @@
    tabs show their repo and whether mail is in: an explicit tab title sticks
    over the title Claude Code keeps rewriting. Silent elsewhere or on failure."
   [title]
-  (when (and (not (str/blank? (System/getenv "WEZTERM_PANE"))) (fs/which "wezterm"))
-    (p/shell {:continue true :out :string :err :string} "wezterm" "cli" "set-tab-title" title)))
+  (when (wezterm-pane)
+    (wez! "set-tab-title" title)))
 
 (defn session-socket
   "The inbox of the Claude Code session running this command: Claude Code
@@ -641,7 +835,11 @@
    never left unreachable. Either way exit 3 on --timeout, duty \"idle\".
    The duty record names the session by its live name, read again every
    round (see session-name), so neither a restart nor a rename leaves a name
-   nobody answers to; --session names it only where there is no registry."
+   nobody answers to; --session names it only where there is no registry.
+   Socket mode puts the repo on call the first time (see auto-register!),
+   and ends, removing its record, once the session it posts to is gone (a
+   tab serve closed): a wait outliving its session would keep the repo on
+   duty with nobody to answer."
   [opts]
   (ensure-store!)
   (let [me (caller opts)
@@ -654,6 +852,7 @@
         notice! #(when notice (binding [*out* *err*] (println notice)))
         print-ids! (fn [pending] (run! println (map :id pending)) (System/exit 0))]
     (notice!)
+    (when sock (auto-register! me))
     (tab-title! (str "📪 " me))
     (loop [announced {}, titled-mail? false, prev-session nil, warned? false]
       (let [live (session-name)
@@ -662,6 +861,9 @@
             pending (open-for me)
             mail? (boolean (seq pending))
             {:keys [fresh] :as next-state} (core/announce announced pending)]
+        (when (and sock (claude-pid) (not (pid-alive? (claude-pid))))
+          (fs/delete-if-exists (duty-file me (or prev-session session)))
+          (System/exit 3))
         (when (and mismatch? (not warned?))
           (binding [*out* *err*]
             (println (str "agent-mail: this session is named " (pr-str live) ", not " (pr-str given)
@@ -681,40 +883,39 @@
           (do (Thread/sleep (* 1000 interval))
               (recur (:announced next-state) mail? session (or warned? mismatch?))))))))
 
-(defn duty-view
-  "The duty records with what is derived for each: the session's live name
-   (see live-session), age, staleness, whether the session that armed the wait
-   lives, and whether it counts as on duty."
-  []
-  (map #(assoc % :session (live-session %)
-               :age-s (core/age-s (:heartbeat %)) :stale (not (fresh? %))
-               :session-alive (session-alive? %) :on-duty (on-duty? %))
-       (duty-records)))
-
-(defn cmd-who [opts]
+(defn cmd-who
+  "The duty records, then the repos on call with what serve is doing about
+   each (--json: the duty records alone, as status gives them)."
+  [opts]
   (let [recs (duty-view)]
     (if (:json opts)
       (println (json/generate-string recs {:pretty true}))
-      (doseq [r recs]
-        (println (format "%-20s %-28s %-8s %5ds ago%s" (:repo r) (:session r) (:state r) (:age-s r)
-                         (cond (false? (:session-alive r)) "  (session gone)"
-                               (and (:stale r) (= "waiting" (:state r))) "  (stale)"
-                               (and (:stale r) (:on-duty r)) "  (session alive)"
-                               :else "")))))))
+      (let [oncall (oncall-view recs)]
+        (doseq [r recs]
+          (println (format "%-20s %-28s %-8s %5ds ago%s" (:repo r) (:session r) (:state r) (:age-s r)
+                           (cond (false? (:session-alive r)) "  (session gone)"
+                                 (and (:stale r) (= "waiting" (:state r))) "  (stale)"
+                                 (and (:stale r) (:on-duty r)) "  (session alive)"
+                                 :else ""))))
+        (doseq [o oncall]
+          (println (format "%-20s %-28s %s" (:repo o) "(on call)" (:text o))))
+        (when (and (seq oncall) (not (:alive (serve-info))))
+          (println (serve-line)))))))
 
 (defn cmd-status
   "Everything at once, for UIs (a menu bar app calls it on every refresh): all
    threads with per-reader unread counts, waiting time and listener, the duty
-   records, and the open threads nobody is listening for. A pure read: no
-   seen marker moves, nothing is written or committed (not even the thread
-   numbering that list and read catch up on)."
+   records, the open threads nobody is listening for, the repos on call and
+   whether serve runs. A pure read: no seen marker moves, nothing is written
+   or committed (not even the thread numbering that list and read catch up on)."
   [opts]
   (let [me (caller opts)
         threads (all-threads)
         readers (into #{me} (mapcat core/participants) threads)
+        duty (duty-view)
         st (core/status {:now (core/now-utc) :me me :threads threads
                          :seen (into {} (map (juxt identity seen-map)) readers)
-                         :duty (duty-view)})]
+                         :duty duty :oncall (oncall-view duty) :serve (serve-info)})]
     (if (:json opts)
       (println (json/generate-string st {:pretty true}))
       (let [number-of (into {} (map (juxt :id :number)) (:threads st))
@@ -728,9 +929,202 @@
                            (if (pos? (:unread t)) (str (:unread t) " new") "")
                            (:subject t))))
         (println (str "on duty: " (if (seq listening) (str/join ", " listening) "nobody")))
+        (when-let [oc (seq (:oncall st))]
+          (println (str "on call: " (str/join ", " (map #(str (:repo %) (when (not= "on-call" (:state %)) (str " (" (:text %) ")"))) oc))
+                        (when-not (:alive (:serve st)) " (serve isn't running)"))))
         (println (str "undelivered: " (if-let [u (seq (:undelivered st))]
                                         (str/join ", " (map #(str "#" (number-of %) " " (owner-of %)) u))
                                         "none")))))))
+
+(defn cmd-oncall
+  "Lists the repos on call (--json: oncall-view's entries); `add [NAME DIR]`
+   registers one, by default the caller's repo at its main worktree (from the
+   directory, whoever the caller is: the user registers repos too); `remove
+   [NAME]` takes one off and keeps it off, since wait would otherwise put it
+   back."
+  [opts [sub & args]]
+  (case sub
+    "add" (let [[nm dir] (cond (second args) [(first args) (fs/normalize (fs/absolutize (second args)))]
+                               (first args) (fail "oncall add takes NAME and DIR, or neither for this repo")
+                               :else [(or (repo-name) (fail "not in a git repo; give NAME DIR")) (repo-root)])]
+            (when-not (core/valid-name? nm) (fail "bad name:" (pr-str nm)))
+            (when-not (fs/directory? dir) (fail "no such directory:" (str dir)))
+            (register-oncall! nm dir)
+            (println (str nm " is on call (" dir ")"))
+            (when-not (:alive (serve-info)) (println (serve-line))))
+    "remove" (let [nm (or (first args) (repo-name) (fail "not in a git repo; give NAME"))
+                   e (get (oncall-entries) nm)]
+               (when-not (core/valid-name? nm) (fail "bad name:" (pr-str nm)))
+               (spit-atomic! (oncall-file nm) (pr-str (assoc (or e {:repo nm}) :off true :removed (core/now-utc))))
+               (println (if (and e (not (:off e)))
+                          (str nm " is no longer on call; wait won't put it back (`oncall add` does)")
+                          (str nm " was not on call; wait won't put it on call either"))))
+    nil (let [v (oncall-view)]
+          (if (:json opts)
+            (println (json/generate-string v {:pretty true}))
+            (do (if (seq v)
+                  (doseq [o v] (println (format "%-20s %-40s %s" (:repo o) (:dir o) (:text o))))
+                  (println "nothing on call"))
+                (println (serve-line)))))
+    (fail "unknown oncall command" sub "(add or remove)")))
+
+;; ---------------------------------------------------------------- serve
+
+(def serve-idle-minutes
+  "How long serve leaves a listener tab it opened idle before closing it
+   (--idle-minutes). Claude Code's prompt cache lives one hour from the
+   session's last request, which is when the registry's statusUpdatedAt last
+   turned \"idle\": a session kept that long answers its next mail from the
+   cache, while one kept longer gains nothing over a fresh session, since its
+   next turn re-reads the whole context uncached."
+  60)
+
+(defn log!
+  "One line on stderr with the local time in front; under launchd it goes to
+   the log file."
+  [& msg]
+  (binding [*out* *err*]
+    (println (str (.format (java.time.LocalDateTime/now) (java.time.format.DateTimeFormatter/ofPattern "yyyy-MM-dd HH:mm:ss"))
+                  " " (str/join " " msg)))))
+
+(defn login-shell
+  "The shell a listener tab runs Claude Code from, so PATH is a normal tab's:
+   $SHELL, else the account's login shell (launchd may set no SHELL), else sh."
+  []
+  (let [s (System/getenv "SHELL")
+        user (System/getProperty "user.name")
+        look (fn [& cmd] (try (:out (apply p/shell {:out :string :err :string :continue true} cmd))
+                              (catch Exception _ nil)))]
+    (or (when-not (str/blank? s) s)
+        (if macos?
+          (some->> (look "dscl" "." "-read" (str "/Users/" user) "UserShell") (re-find #"UserShell:\s*(\S+)") second)
+          (some-> (look "getent" "passwd" user) str/trim (str/split #":") (get 6) not-empty))
+        "/bin/sh")))
+
+(defn- idle-ns [client]
+  (let [t (get client "idle_time")] (+ (* 1000000000 (or (get t "secs") 0)) (or (get t "nanos") 0))))
+
+(defn spawn-tab!
+  "Opens a listener tab for `repo` in `dir`: in the window of the pane the
+   user last focused, giving that pane its focus back, or in a new window
+   when there is none. {:pane :window :gui-pid}, or {:error} saying why not."
+  [repo dir]
+  (cond
+    (not (and dir (fs/directory? dir))) {:error (str "its directory is gone (" dir ")")}
+    (nil? (wezterm-bin)) {:error "wezterm not found (AGENT_MAIL_WEZTERM names it)"}
+    :else
+    (let [client (first (sort-by idle-ns (wez-json "list-clients")))
+          focused (get client "focused_pane_id")
+          window (when focused (some #(when (= focused (get % "pane_id")) (get % "window_id")) (wez-json "list")))
+          r (apply wez! "spawn" (concat (if window ["--window-id" window] ["--new-window"])
+                                        ["--cwd" dir "--" (login-shell) "-lic" (core/listener-command repo)]))
+          pane (when (zero? (:exit r)) (some-> (:out r) str/trim parse-long))]
+      (if pane
+        (do (when window (wez! "activate-pane" "--pane-id" focused))
+            {:pane pane :window window :gui-pid (get client "pid")})
+        {:error (str "wezterm spawn failed" (when-let [e (not-empty (str/trim (str (:err r))))] (str ": " (core/first-line e))))}))))
+
+(defn carry-out!
+  "Carries out one of core/oncall-actions, logs it, and returns serve's
+   memory after it. A spawn that fails backs off; a close that fails is
+   tried again next round."
+  [memory [kind repo & more :as action] now oncall]
+  (let [m (get memory repo {})
+        backed-off (fn [[_ _ until reason :as a]]
+                     (log! (str "back off " repo " until " (core/clock until) ": " reason))
+                     (core/remember memory a now))]
+    (case kind
+      :spawn (let [dir (get-in oncall [repo :dir])
+                   {:keys [pane window gui-pid error]} (spawn-tab! repo dir)]
+               (if error
+                 (backed-off (core/back-off repo m now error))
+                 (do (log! (str "spawn " repo ": pane " pane (if window (str " in window " window) " in a new window") ", " dir))
+                     (core/remember memory [:spawned repo pane gui-pid] now))))
+      :close (let [[pane] more
+                   r (wez! "kill-pane" "--pane-id" pane)]
+               (if (zero? (:exit r))
+                 (do (doseq [[f rec] (duty-files) :when (and (= repo (:repo rec)) (= pane (:pane rec)))]
+                       (fs/delete-if-exists f))
+                     (log! (str "close " repo ": pane " pane ", its session idle with nothing waiting"))
+                     (core/remember memory action now))
+                 (do (log! (str "close " repo ": pane " pane " failed: " (core/first-line (str (:err r)))))
+                     memory)))
+      :forget (do (log! (str "forget " repo ": pane " (:pane m) " is gone")) (core/remember memory action now))
+      :reset (do (log! (str "on duty: " repo)) (core/remember memory action now))
+      :back-off (backed-off action)
+      :drop (do (log! (str "drop " repo ": no longer on call")) (core/remember memory action now)))))
+
+(defn serve-round!
+  "One round: gathers what core/oncall-actions decides on, carries out its
+   actions and returns serve's memory after them. Reads no thread and asks
+   WezTerm nothing while nothing is on call and no tab is open."
+  [memory {:keys [idle-ms grace-ms]}]
+  (let [oncall (oncall-registered)]
+    (if (and (empty? oncall) (empty? memory))
+      memory
+      (let [now (System/currentTimeMillis)
+            duty (duty-view)
+            tabs? (some :pane (vals memory))
+            listed (when tabs? (wez-json "list"))
+            clients (when tabs? (wez-json "list-clients"))
+            actions (core/oncall-actions
+                     {:now now :oncall oncall :memory memory :duty duty
+                      :pending (set (keep #(when (= "open" (:status %)) (:owner %)) (all-threads)))
+                      :panes (when listed (set (keep #(get % "pane_id") listed)))
+                      :gui-pid (get (first (sort-by idle-ns clients)) "pid")
+                      :sessions (sessions-of duty) :idle-ms idle-ms :grace-ms grace-ms})]
+        (reduce #(carry-out! %1 %2 now oncall) memory actions)))))
+
+(defn write-serve-state! [memory interval]
+  (spit-atomic! serve-state-file
+                (pr-str {:pid (.pid (java.lang.ProcessHandle/current)) :heartbeat (core/now-utc)
+                         :interval interval :repos memory})))
+
+(defn claim-serve!
+  "Makes this process the one serve: refuses while another is alive (see
+   serve-info), takes over from a dead one. Under the store lock, so two
+   started at once cannot both win."
+  [interval]
+  (fs/create-dirs serve-dir)
+  (locked (fn []
+            (let [me (.pid (java.lang.ProcessHandle/current))
+                  {:keys [alive pid]} (serve-info)]
+              (when (and alive (not= pid me))
+                (fail (str "serve is already running (pid " pid ")")))
+              (spit (str serve-pid-file) (str me "\n"))
+              (write-serve-state! (or (:repos (serve-state)) {}) interval)))))
+
+(defn release-serve!
+  "Removes the pid file if it is still this process's."
+  []
+  (when (= (serve-pid) (.pid (java.lang.ProcessHandle/current)))
+    (fs/delete-if-exists serve-pid-file)))
+
+(defn cmd-serve
+  "The on-call daemon (see core/oncall-actions): a round every --interval
+   seconds (5), closing tabs idle for --idle-minutes (see serve-idle-minutes);
+   --once runs one round. Its memory and heartbeat go to duty/serve/state.edn
+   after every round. Exits when another serve has taken the pid file over."
+  [opts]
+  (let [interval (or (:interval opts) 5)
+        idle-minutes (or (:idle-minutes opts) serve-idle-minutes)
+        cfg {:idle-ms (* 60000 idle-minutes) :grace-ms core/oncall-grace-ms}
+        me (.pid (java.lang.ProcessHandle/current))]
+    (when (< interval 1) (fail "--interval must be at least 1"))
+    (claim-serve! interval)
+    (.addShutdownHook (Runtime/getRuntime) (Thread. ^Runnable release-serve!))
+    (log! (str "serve: pid " me ", a round every " interval "s, idle tabs closed after " idle-minutes "m"))
+    (loop [memory (or (:repos (serve-state)) {})]
+      (when-not (= me (serve-pid))
+        (log! (str "serve: pid " (serve-pid) " took over; exiting"))
+        (System/exit 0))
+      (let [memory (try (serve-round! memory cfg)
+                        (catch Exception e (log! "round failed:" (ex-message e)) memory))]
+        (write-serve-state! memory interval)
+        (when-not (:once opts)
+          (Thread/sleep (* 1000 interval))
+          (recur memory))))
+    (release-serve!)))
 
 (defn cmd-hook
   "SessionStart hook mode: one line listing the threads waiting on this repo;
@@ -779,7 +1173,23 @@
                                               from Claude Code's session registry, and a
                                               --timeout under 21600 (the listen skill's) earns
                                               a note on stderr: that is the old hourly loop
-  agent-mail who [--json]                     who is on duty
+  agent-mail who [--json]                     who is on duty, and who is on call
+  agent-mail oncall [--json]                  repos on call: when mail waits on one and nobody
+                                              is on duty, serve opens a listener tab for it
+  agent-mail oncall add [NAME DIR]            put a repo on call; no arguments: this repo, at
+                                              its main worktree. wait in a Claude Code session
+                                              does this for its repo the first time
+  agent-mail oncall remove [NAME]             take it off; wait won't put it back
+  agent-mail serve [--interval S] [--idle-minutes M] [--once]
+                                              the on-call daemon (`just install-serve` runs it
+                                              under launchd): every S (5) seconds it opens a
+                                              WezTerm tab running `claude \"/agent-mail-listen\"`
+                                              for an on-call repo that has mail and nobody on
+                                              duty, and closes a tab it opened once nothing
+                                              waits and its session has been idle M (60)
+                                              minutes: the prompt cache lives an hour, so a
+                                              session kept longer answers no cheaper than a
+                                              fresh one. One serve at a time
   agent-mail status [--json]                  everything at once, for UIs
   agent-mail hook                             SessionStart hook output
   agent-mail whoami                           who the caller is
@@ -795,6 +1205,7 @@ a timestamp when importing old threads; otherwise the tool stamps time.
 wait finds its session through CLAUDE_CODE_MESSAGING_SOCKET (and _TOKEN),
 which Claude Code exports to the commands it runs, and the session's name in
 <config>/sessions/$CLAUDE_PID.json (CLAUDE_CONFIG_DIR, else ~/.claude).
+serve runs AGENT_MAIL_WEZTERM, else wezterm on PATH, else WezTerm.app's own.
 Store: $AGENT_MAIL_DIR, else ~/.local/share/agent-mail.")
 
 (defn -main [argv]
@@ -811,6 +1222,8 @@ Store: $AGENT_MAIL_DIR, else ~/.local/share/agent-mail.")
         "list" (cmd-list opts)
         "wait" (cmd-wait opts)
         "who" (cmd-who opts)
+        "oncall" (cmd-oncall opts args)
+        "serve" (cmd-serve opts)
         "status" (cmd-status opts)
         "hook" (cmd-hook opts)
         "whoami" (println (caller opts))

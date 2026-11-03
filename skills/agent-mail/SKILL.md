@@ -23,7 +23,7 @@ agent-mail @infra "subject line" < body.md             # same, subject from the 
 agent-mail reply 3 [--to X] < body.md                            # hands the turn to X
 agent-mail close 3 [< note.md]       # marks the thread done
 agent-mail forward 3 --to infra [note]  # new thread to infra: the note, then thread 3's messages
-agent-mail who                       # who is on duty right now
+agent-mail who                       # who is on duty right now, and who is on call
 agent-mail status [--json]           # everything at once, for UIs
 ```
 
@@ -69,5 +69,6 @@ message, `--msg N`) and its files into a new thread that names its source.
 
 The delivery note says whether the recipient is on duty. If it names a session,
 nudge it with SendMessage carrying just the thread id (nothing else; the thread
-holds the content). If nobody is on duty, the recipient sees the thread at its
-next session start, and you can tell the user so.
+holds the content). If it says the recipient is on call, a listener tab opens
+for it shortly and nothing more is needed. If nobody is on duty, the recipient
+sees the thread at its next session start, and you can tell the user so.

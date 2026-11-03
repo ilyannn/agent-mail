@@ -1,6 +1,6 @@
 ;; agent-mail.core: the pure half of agent-mail. Text, time, frontmatter,
-;; thread state, the status view, wait announcements, draft extraction and
-;; argv parsing; nothing
+;; thread state, the status view, on-call decisions, wait announcements,
+;; draft extraction and argv parsing; nothing
 ;; here touches the store, the environment or a process. Loaded by
 ;; agent-mail.bb (and test.bb) from the repo's src/ directory; refusals are
 ;; thrown as ::usage ex-infos and turned into exit codes by the script.
@@ -259,16 +259,21 @@
 (defn listener
   "Who picks up an open thread: \"user\" when it waits on the user, \"on-duty\"
    when `on-duty?` (e.g. the set of repos with an on-duty record) holds for its
-   owner, else \"none\". nil for a closed thread, or one without messages yet."
-  [th on-duty?]
-  (when (and (= "open" (:status th)) (:owner th))
-    (cond (= "user" (:owner th)) "user"
-          (on-duty? (:owner th)) "on-duty"
-          :else "none")))
+   owner, \"on-call\" when `on-call?` does (a listener tab opens for it
+   shortly, see oncall-actions), else \"none\". nil for a closed thread, or one
+   without messages yet."
+  ([th on-duty?] (listener th on-duty? #{}))
+  ([th on-duty? on-call?]
+   (when (and (= "open" (:status th)) (:owner th))
+     (cond (= "user" (:owner th)) "user"
+           (on-duty? (:owner th)) "on-duty"
+           (on-call? (:owner th)) "on-call"
+           :else "none"))))
 
 (defn undelivered
-  "Ids of the threads nobody is listening for (listener \"none\"), longest
-   waiting first, then by number. No threshold: that is the reader's call."
+  "Ids of the threads nobody is listening for (listener \"none\"; an on-call
+   owner's tab is on its way), longest waiting first, then by number. No
+   threshold: that is the reader's call."
   [threads]
   (->> threads
        (filter #(= "none" (:listener %)))
@@ -284,11 +289,14 @@
    (closed ones too), newest-updated first, as a summary (flow included) with
    the caller's unread count, unread counts per participant, how long it has
    waited and who will pick it up; the duty records as given; and the
-   undelivered thread ids.
+   undelivered thread ids; the on-call repos and whether serve runs.
    `seen` maps each reader (the caller and every participant) to their seen
-   markers; `duty` is the duty records with :on-duty already decided."
-  [{:keys [now me threads seen duty]}]
+   markers; `duty` is the duty records with :on-duty already decided;
+   `oncall` is oncall-view's list and `serve` is {:alive :pid}. A repo counts
+   as on call only while serve is alive and the repo is not backing off."
+  [{:keys [now me threads seen duty oncall serve]}]
   (let [on-duty-repos (set (map :repo (filter :on-duty duty)))
+        on-call-repos (if (:alive serve) (set (map :repo (remove #(= "backing-off" (:state %)) oncall))) #{})
         ths (->> threads
                  (map (fn [th]
                         (assoc (summary th)
@@ -296,10 +304,188 @@
                                :unread-by (unread-by th seen)
                                :participants (participants th)
                                :waiting-s (waiting-s th now)
-                               :listener (listener th on-duty-repos))))
+                               :listener (listener th on-duty-repos on-call-repos))))
                  (sort-by :updated #(compare %2 %1))
                  vec)]
-    {:schema status-schema :now now :me me :threads ths :duty (vec duty) :undelivered (undelivered ths)}))
+    {:schema status-schema :now now :me me :threads ths :duty (vec duty) :undelivered (undelivered ths)
+     :oncall (vec oncall) :serve (or serve {:alive false :pid nil})}))
+
+;; ---------------------------------------------------------------- on call
+;; A repo on call gets a listener tab when mail waits on it and nobody is on
+;; duty: `agent-mail serve` opens a WezTerm tab running Claude Code with the
+;; listen skill, and closes it again once its session has idled with nothing
+;; waiting. serve's memory is repo -> {:pane :gui-pid :spawned-at :failures
+;; :until :reason}, times in epoch milliseconds (as Claude Code's registry has
+;; them); the functions here decide, serve gathers and carries out.
+
+(defn sh-quote
+  "`s` as one POSIX shell word: single-quoted, each ' written as '\\''. The
+   same text means the same in sh, bash, zsh and fish."
+  [s]
+  (str "'" (str/replace (str s) "'" "'\\''") "'"))
+
+(defn listener-command
+  "What a listener tab's login shell runs for `repo`: Claude Code named
+   \"📫 <repo>\" (its /resume entry and tab title) with the listen skill as
+   its first prompt. exec, so the tab closes when Claude Code exits."
+  [repo]
+  (str "exec claude --name " (sh-quote (str "📫 " repo)) " " (sh-quote "/agent-mail-listen")))
+
+(def oncall-grace-ms
+  "How long a tab serve opened has to come on duty before serve backs off:
+   Claude Code starting, loading the skill and arming its wait takes seconds,
+   so two minutes means something stopped it (a trust prompt, a missing
+   `claude`)."
+  120000)
+
+(defn back-off-ms
+  "How long serve leaves a repo alone after its `n`th failure in a row: two
+   minutes, doubling, at most an hour."
+  [n]
+  (min 3600000 (* 120000 (bit-shift-left 1 (min 10 (max 0 (dec n)))))))
+
+(defn back-off
+  "The action backing `repo` off after one more failure; `m` is serve's
+   memory of the repo, whose :failures count so far."
+  [repo m now reason]
+  [:back-off repo (+ now (back-off-ms (inc (or (:failures m) 0)))) reason])
+
+(defn- pane-sessions
+  "The live sessions (values of `sessions`) behind `repo`'s duty records that
+   name `pane`; none without a pane."
+  [repo pane duty sessions]
+  (when pane
+    (keep #(get sessions (:session-pid %)) (filter #(and (= repo (:repo %)) (= pane (:pane %))) duty))))
+
+(def closable-statuses
+  "The registry statuses that let serve close its tab: \"idle\", and
+   \"shell\", which Claude Code reports instead of \"idle\" between turns
+   while a background bash task runs. A listener's own wait always is one, so
+   between turns a listener is always \"shell\", and statusUpdatedAt marks
+   when its last turn ended. Serve only closes the tabs it opened, which are
+   listeners, so the cost is that other background work such a session
+   started and left running for the whole idle period ends with it.
+   \"busy\" (a turn) and \"waiting\" (blocked on the user) never close."
+  #{"idle" "shell"})
+
+(defn- idle-since?
+  "Whether registry status `s` is closable (see closable-statuses) and has
+   been for `ms` by `now`."
+  [s now ms]
+  (and (contains? closable-statuses (:status s)) (number? (:status-updated-at s))
+       (>= (- now (:status-updated-at s)) ms)))
+
+(defn oncall-actions
+  "What serve does this round, as data. `oncall` maps the registered repos to
+   {:dir}; `memory` is serve's (see above); `duty` the duty records with
+   :on-duty decided; `pending` the set of repos open threads wait on; `panes`
+   the set of WezTerm's pane ids, nil when wezterm could not tell; `gui-pid`
+   the WezTerm GUI's pid (a pane id from an earlier GUI means nothing);
+   `sessions` maps a live session pid to its registry {:status
+   :status-updated-at}. Only panes in `memory` are ever closed or forgotten:
+   sessions the user started are never touched. Per repo, in name order:
+   [:forget R]            its pane is gone (closed by the user, or an older GUI's)
+   [:drop R]              no longer on call and no tab left: forget it all
+   [:reset R]             it came on duty: clear the spawn and the backoff
+   [:close R P]           nothing waits on R, and every session behind R's
+                          duty records in pane P is idle for `idle-ms`
+   [:back-off R until why] the tab did not come on duty in `grace-ms`, closed
+                          first, or is open with nobody on duty
+   [:spawn R]             mail waits, nobody is on duty, no tab is on its way,
+                          and R is not backing off"
+  [{:keys [now oncall memory duty pending panes gui-pid sessions idle-ms grace-ms]}]
+  (let [grace-ms (or grace-ms oncall-grace-ms)
+        on-duty (set (map :repo (filter :on-duty duty)))]
+    (vec
+     (mapcat
+      (fn [repo]
+        (let [m (get memory repo {})
+              gone? (boolean (and (:pane m) panes
+                                  (or (not (contains? panes (:pane m)))
+                                      (and gui-pid (:gui-pid m) (not= gui-pid (:gui-pid m))))))
+              pane (when-not gone? (:pane m))
+              spawned (:spawned-at m)
+              duty? (contains? on-duty repo)
+              live (pane-sessions repo pane duty sessions)]
+          (cond-> (if gone? [[:forget repo]] [])
+            (and (not (contains? oncall repo)) (not pane)) (conj [:drop repo])
+            (and (or (contains? oncall repo) pane) duty? (or spawned (:until m) (:failures m))) (conj [:reset repo])
+            (or (contains? oncall repo) pane)
+            (into (cond
+                    (and pane panes (not (contains? pending repo)) (seq live) (every? #(idle-since? % now idle-ms) live))
+                    [[:close repo pane]]
+                    duty? []
+                    (and spawned gone?) [(back-off repo m now "its tab closed before a session came on duty")]
+                    (and spawned (>= (- now spawned) grace-ms)) [(back-off repo m now "no session came on duty")]
+                    spawned []
+                    (not (and (contains? oncall repo) (contains? pending repo))) []
+                    (and (:until m) (< now (:until m))) []
+                    (and pane (nil? panes)) []
+                    pane [(back-off repo m now (str "its tab (pane " pane ") is open, but nobody is on duty"))]
+                    :else [[:spawn repo]])))))
+      (sort (distinct (concat (keys oncall) (keys memory))))))))
+
+(defn remember
+  "serve's memory after `event` at `now`: an action of oncall-actions carried
+   out, or [:spawned R pane gui-pid] for a tab opened ([:spawn R] itself
+   changes nothing: it ends as :spawned or :back-off). A repo left with
+   nothing to remember is dropped."
+  [memory [kind repo & more] now]
+  (let [m (get memory repo {})
+        m (case kind
+            :spawned (let [[pane gui-pid] more]
+                       (cond-> (-> m (assoc :pane pane :spawned-at now) (dissoc :until :reason :gui-pid))
+                         gui-pid (assoc :gui-pid gui-pid)))
+            (:forget :close) (dissoc m :pane :gui-pid)
+            :reset (dissoc m :spawned-at :failures :until :reason)
+            :back-off (let [[until reason] more]
+                        (-> m (assoc :until until :reason reason :failures (inc (or (:failures m) 0)))
+                            (dissoc :spawned-at)))
+            :drop {}
+            m)]
+    (if (empty? m) (dissoc memory repo) (assoc memory repo m))))
+
+(defn clock
+  "Epoch milliseconds as the machine's local time of day, e.g. 05:40."
+  [ms]
+  (.format (.atZone (java.time.Instant/ofEpochMilli ms) (java.time.ZoneId/systemDefault))
+           (java.time.format.DateTimeFormatter/ofPattern "HH:mm")))
+
+(defn oncall-view
+  "Each registered repo with what serve is doing about it, for `oncall`,
+   `who` and `status`: {:repo :dir :state :pane :text}, plus :sessions on
+   duty, :idle-s of the session in serve's tab, and :until (a UTC stamp)
+   with :reason while backing off. :state is \"on-duty\", \"backing-off\",
+   \"starting\" (a tab is on its way), \"tab-open\" (serve's tab, nobody on
+   duty) or \"on-call\". Inputs as for oncall-actions."
+  [{:keys [now oncall memory duty sessions]}]
+  (vec
+   (for [[repo {:keys [dir]}] (sort-by key oncall)
+         :let [m (get memory repo {})
+               pane (:pane m)
+               names (vec (distinct (keep :session (filter #(and (= repo (:repo %)) (:on-duty %)) duty))))
+               on-duty? (boolean (some #(and (= repo (:repo %)) (:on-duty %)) duty))
+               s (first (pane-sessions repo pane duty sessions))
+               status-s (when (number? (:status-updated-at s)) (quot (- now (:status-updated-at s)) 1000))
+               idle-s (when (contains? closable-statuses (:status s)) status-s)
+               until (when (and (:until m) (< now (:until m))) (:until m))
+               state (cond on-duty? "on-duty" until "backing-off" (:spawned-at m) "starting"
+                           pane "tab-open" :else "on-call")
+               tab (str "tab open (pane " pane ")")]]
+     (cond-> {:repo repo :dir dir :state state :pane pane
+              :text (case state
+                      "on-duty" (if pane
+                                  (str tab ", on duty"
+                                       (when (:status s)
+                                         (str ", " (if idle-s "idle" (:status s)) (when status-s (str " " (duration status-s))))))
+                                  (str "on duty (session " (str/join ", " names) ")"))
+                      "backing-off" (str "backing off until " (clock until) ": " (:reason m))
+                      "starting" (str "tab opening" (when pane (str " (pane " pane ")")))
+                      "tab-open" (str tab ", nobody on duty")
+                      "on call")}
+       (seq names) (assoc :sessions names)
+       idle-s (assoc :idle-s idle-s)
+       until (assoc :until (fmt-utc (java.time.Instant/ofEpochMilli until)) :reason (:reason m))))))
 
 ;; ---------------------------------------------------------------- wait announcements
 
@@ -380,14 +566,14 @@
 
 ;; ---------------------------------------------------------------- argv
 
-(def value-opts #{"to" "subject" "as" "session" "date" "id" "timeout" "interval" "msg"})
+(def value-opts #{"to" "subject" "as" "session" "date" "id" "timeout" "interval" "msg" "idle-minutes"})
 (def flag-opts #{"json" "all" "edit" "once"})
-(def ^:private number-opts #{:timeout :interval})
+(def ^:private number-opts {:timeout "seconds" :interval "seconds" :idle-minutes "minutes"})
 
 (defn- finish-opts [opts]
-  (reduce (fn [o k]
+  (reduce (fn [o [k unit]]
             (if-let [v (get o k)]
-              (assoc o k (or (parse-long v) (throw (usage-error (str "--" (name k)) "needs a whole number of seconds, got" v))))
+              (assoc o k (or (parse-long v) (throw (usage-error (str "--" (name k)) "needs a whole number of" (str unit ",") "got" v))))
               o))
           opts number-opts))
 

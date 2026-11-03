@@ -41,6 +41,13 @@ Stay on duty until the user says stop:
    message arrives, so one left as this repo's turn just sits there.
 7. **Say what happened** in one line after each piece of mail.
 
+**Opened and closed on demand.** `wait` puts this repo on call. While
+`agent-mail serve` runs, it opens a listener tab like this one when mail waits
+and nobody is on duty, and closes that tab once nothing waits and its session
+has been idle an hour (the prompt cache's lifetime). A session started or
+closed that way is expected, not a fault. `agent-mail oncall` shows the state;
+`agent-mail oncall remove` takes the repo off call, and `wait` won't put it back.
+
 Repo-specific duty steps live in the repo's CLAUDE.md, not here. If a message
 asks for something this repo doesn't own, reply saying which repo does and
 mail it there if the request is clear.
