@@ -154,7 +154,10 @@
    (let [abs #(str/replace % "](files/" (str "](" files "/"))]
      (str "# " (:subject th) "\n"
           "thread: #" (:number th) " " (:id th) " · started by: " (:from th) " · waiting on: " (:owner th)
-          " · status: " (:status th) " · created: " (local-time (:created th)) "\n"
+          " · status: " (:status th) " · created: " (local-time (:created th))
+          (when-let [f (:forwarded-from th)]
+            (str " · forwarded from: " (when-let [n (:forwarded-from-number th)] (str "#" n " ")) f))
+          "\n"
           (when (< (count msgs) (:count th))
             (str "showing " (count msgs) " of " (:count th) " messages; `agent-mail read " (:number th) "` for all\n"))
           (str/join
@@ -164,6 +167,56 @@
                   (when (seq (:attachments m))
                     (str "attachments: " (str/join ", " (map #(str files "/" (subs % 6)) (:attachments m))) "\n"))
                   "\n" (abs (:body m)) "\n")))))))
+
+;; ---------------------------------------------------------------- forwarding
+
+(defn forward-subject
+  "A forward's subject: the source's with \"Fwd: \" in front, once."
+  [subject]
+  (if (str/starts-with? (str subject) "Fwd: ") subject (str "Fwd: " subject)))
+
+(defn pick-message
+  "The message `which` names in `th`: its 1-based position (`2`) or its file
+   name, as `read --json` gives it. Throws a usage error when there is none."
+  [th which]
+  (let [msgs (vec (:msgs th))
+        n (when (re-matches #"\d+" (str which)) (parse-long which))]
+    (or (if n (get msgs (dec n)) (some #(when (= which (:file %)) %) msgs))
+        (throw (usage-error "no message" (pr-str which) "in thread" (str "#" (:number th))
+                            (str "(it has " (count msgs) "; give a position or a file name)"))))))
+
+(defn file-refs
+  "The thread files `msgs` use, in order and once each: their attachments,
+   then files their bodies link to (`](files/x)`)."
+  [msgs]
+  (vec (distinct (concat (mapcat :attachments msgs)
+                         (for [m msgs, [_ ref] (re-seq #"\]\((files/[^)\s\"]+)" (str (:body m)))] ref)))))
+
+(defn forward-text
+  "The forwarded part of a forward's body: a line naming the source thread
+   (and how to read it), then each of `msgs` under a `### from → to · time`
+   heading, which nests under the message's own heading in `read`. The
+   bodies are kept as written: their files are copied under the same names."
+  [th msgs]
+  (let [all? (= (count msgs) (count (:msgs th)))
+        pos (when-not all? (inc (.indexOf ^java.util.List (vec (:msgs th)) (first msgs))))]
+    (str (if all?
+           (str "Forwarded thread #" (:number th) " **" (:subject th) "**, started by " (:from th)
+                ", " (count msgs) (if (= 1 (count msgs)) " message" " messages"))
+           (str "Forwarded message " pos " of " (count (:msgs th)) " from thread #" (:number th)
+                " **" (:subject th) "**"))
+         " (`agent-mail read " (:id th) "`)\n"
+         (str/join
+          (for [m msgs]
+            (str "\n### " (:from m) " → " (:to m) " · " (local-time (:date m))
+                 (when (:status m) (str " · " (:status m))) "\n\n"
+                 (str/trim (str (:body m))) "\n"))))))
+
+(defn forward-body
+  "The whole body of a forward: the note, a rule, then the forwarded text;
+   without a note, the forwarded text alone."
+  [note forwarded]
+  (if (str/blank? note) forwarded (str (str/trim note) "\n\n---\n\n" forwarded)))
 
 ;; ---------------------------------------------------------------- status
 
@@ -327,7 +380,7 @@
 
 ;; ---------------------------------------------------------------- argv
 
-(def value-opts #{"to" "subject" "as" "session" "date" "id" "timeout" "interval"})
+(def value-opts #{"to" "subject" "as" "session" "date" "id" "timeout" "interval" "msg"})
 (def flag-opts #{"json" "all" "edit" "once"})
 (def ^:private number-opts #{:timeout :interval})
 

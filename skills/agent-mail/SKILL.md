@@ -22,6 +22,7 @@ agent-mail send --to infra --subject "…" < body.md     # prints the thread id
 agent-mail @infra "subject line" < body.md             # same, subject from the text
 agent-mail reply 3 [--to X] < body.md                            # hands the turn to X
 agent-mail close 3 [< note.md]       # marks the thread done
+agent-mail forward 3 --to infra [note]  # new thread to infra: the note, then thread 3's messages
 agent-mail who                       # who is on duty right now
 agent-mail status [--json]           # everything at once, for UIs
 ```
@@ -30,6 +31,11 @@ Bodies are Markdown on stdin, as trailing words, or both: the words lead and a
 file or pipe on stdin follows after a blank line. Write long ones to a scratch
 file first. `--attach FILE` copies a file into the thread; `read` prints
 attachments as absolute paths, so an image can be read straight from the thread.
+
+To bring someone into a thread that is still open, `reply --to` them: they see
+the whole thread and it becomes their turn. `forward` is for a closed thread,
+or for starting a separate effort from one: it copies the thread (or one
+message, `--msg N`) and its files into a new thread that names its source.
 
 ## When to send
 

@@ -345,6 +345,37 @@
         (is (= "> a\n> b\nInline.\nBottom." r))))
     (is (= "> a\n>\n> b" (core/quote-lines "a\n\nb")))))
 
+;; ================================================================ unit: forwarding
+
+(deftest forward-helpers
+  (let [m1 {:from "a" :to "b" :date "2026-11-01T08:00:00Z" :file "m1.md" :body "Look at ![x](files/x.png)" :attachments ["files/x.png"]}
+        m2 {:from "b" :to "a" :date "2026-11-01T09:00:00Z" :file "m2.md" :body "See [log](files/run.log \"the log\") and [x](files/x.png)" :status "done"}
+        th {:id "2026-11-01-keys" :number 4 :subject "Keys" :from "a" :msgs [m1 m2]}]
+    (testing "the subject gets Fwd: once"
+      (is (= "Fwd: Keys" (core/forward-subject "Keys")))
+      (is (= "Fwd: Keys" (core/forward-subject "Fwd: Keys"))))
+    (testing "a message by position or by file name"
+      (is (= m2 (core/pick-message th "2")))
+      (is (= m1 (core/pick-message th "m1.md")))
+      (is (usage-thrown? #(core/pick-message th "3")))
+      (is (usage-thrown? #(core/pick-message th "0")))
+      (is (usage-thrown? #(core/pick-message th "nope.md"))))
+    (testing "the files messages use: attachments, then files their bodies link to, once each"
+      (is (= ["files/x.png" "files/run.log"] (core/file-refs [m1 m2])))
+      (is (= ["files/run.log" "files/x.png"] (core/file-refs [m2]))))
+    (testing "the forwarded text names the thread and nests each message under a heading"
+      (let [all (core/forward-text th [m1 m2])
+            one (core/forward-text th [m2])]
+        (is (str/starts-with? all "Forwarded thread #4 **Keys**, started by a, 2 messages (`agent-mail read 2026-11-01-keys`)\n"))
+        (is (str/includes? all (str "\n### a → b · " (core/local-time (:date m1)) "\n\nLook at ![x](files/x.png)\n")))
+        (is (str/includes? all (str "\n### b → a · " (core/local-time (:date m2)) " · done\n")))
+        (is (str/starts-with? one "Forwarded message 2 of 2 from thread #4 **Keys** (`agent-mail read 2026-11-01-keys`)\n"))
+        (is (not (str/includes? one "### a → b")))))
+    (testing "the note comes first, then a rule; no note, no rule"
+      (is (= "Please check\n\n---\n\nFWD" (core/forward-body "  Please check\n" "FWD")))
+      (is (= "FWD" (core/forward-body nil "FWD")))
+      (is (= "FWD" (core/forward-body " \n" "FWD"))))))
+
 ;; ================================================================ unit: argv
 
 (deftest argv-parsing
@@ -353,6 +384,7 @@
   (is (= {:args ["send" "--to" "x" "-h"] :opts {:attach [] :to "b"}}
          (core/parse-argv ["send" "--to" "b" "--" "--to" "x" "-h"])) "-- ends options")
   (is (= ["a" "b"] (:attach (:opts (core/parse-argv ["send" "--attach" "a" "--attach" "b"])))))
+  (is (= {:args ["forward" "7"] :opts {:attach [] :to "c" :msg "2"}} (core/parse-argv ["forward" "7" "--msg" "2" "--to" "c"])))
   (is (= 5 (:timeout (:opts (core/parse-argv ["wait" "--timeout" "5"])))))
   (is (= 2 (:interval (:opts (core/parse-argv ["wait" "--interval" "2" "--"])))) "numbers are parsed even when -- ends the options")
   (is (true? (:once (:opts (core/parse-argv ["wait" "--once"])))))
@@ -549,6 +581,66 @@
               (is (= (:count before) (:count (thread-json id))))
               (is (= 3 (count (files-of id))))
               (is (str/blank? (store-git "status" "--porcelain")) "the store stays clean"))))))))
+
+(deftest forward-a-thread
+  (with-store
+    (with-dir [d]
+      (let [shot (str (fs/path d "shot.png")) log (str (fs/path d "run.log")) extra (str (fs/path d "extra.txt"))
+            _ (spit shot "pixels") _ (spit log "lines") _ (spit extra "more")
+            src (out {:who "a"} "send" "--to" "b" "--subject" "Rotate the key" "--attach" shot "Rotate it, see ![s](files/shot.png)")
+            _ (out {:who "b"} "reply" src "--attach" log "Done, log attached; the shot again: ![s](files/shot.png)")
+            files-of (fn [id] (sort (map #(str (fs/file-name %)) (fs/list-dir (fs/path *store* "threads" id "files")))))]
+        (testing "the whole thread, with a note on the command line"
+          (let [before (commits)
+                r (am {:who "b"} "forward" "1" "--to" "c" "Can you double-check this?")
+                id (str/trim (:out r))
+                th (thread-json id)
+                [m] (:msgs th)]
+            (is (zero? (:exit r)))
+            (is (str/includes? (:err r) "→ c:") "a delivery note, as for send")
+            (is (= "Fwd: Rotate the key" (:subject th)))
+            (is (= src (:forwarded-from th)))
+            (is (= ["b" "c" "open"] [(:from th) (:owner th) (:status th)]))
+            (is (str/starts-with? (:body m) "Can you double-check this?\n\n---\n\nForwarded thread #1 **Rotate the key**, started by a, 2 messages"))
+            (is (str/includes? (:body m) "### a → b · "))
+            (is (str/includes? (:body m) "### b → a · "))
+            (is (= ["files/shot.png" "files/run.log"] (:attachments m)) "the files the messages use, copied")
+            (is (= ["run.log" "shot.png"] (files-of id)))
+            (is (= "pixels" (slurp (str (fs/path *store* "threads" id "files" "shot.png")))))
+            (is (= (inc before) (commits)))
+            (is (str/includes? (store-git "log" "-1" "--format=%s") "b → c: Fwd: Rotate the key"))
+            (testing "read names the source by number; status and list carry it"
+              (is (str/includes? (out {} "read" id) (str "forwarded from: #1 " src)))
+              (is (str/includes? (out {} "read" id) (str "](" (fs/path *store* "threads" id "files" "shot.png") ")"))
+                  "links into the copied files resolve")
+              (is (= src (:forwarded-from (first (filter #(= id (:id %)) (:threads (json/parse-string (out {} "status" "--json") true)))))))
+              (is (= src (:forwarded-from (first (filter #(= id (:id %)) (list-json "--all")))))))
+            (is (= 2 (:count (thread-json src))) "the source is left as it was")))
+        (testing "one message, by position, without a note: the files its body links to come along"
+          (let [id (out {:who "user"} "forward" src "--to" "d" "--msg" "2")
+                [m] (:msgs (thread-json id))]
+            (is (str/starts-with? (:body m) "Forwarded message 2 of 2 from thread #1 **Rotate the key**"))
+            (is (not (str/includes? (:body m) "### a → b")))
+            (is (= ["files/run.log" "files/shot.png"] (:attachments m)))))
+        (testing "by file name, with a note on stdin, a subject and an attachment of its own"
+          (let [file (:file (first (:msgs (thread-json src))))
+                id (out {:who "user" :in (fs/file log)} "forward" src "--to" "d" "--msg" file "--subject" "Look" "--attach" extra)
+                th (thread-json id)
+                [m] (:msgs th)]
+            (is (= "Look" (:subject th)))
+            (is (str/starts-with? (:body m) "lines\n\n---\n\nForwarded message 1 of 2"))
+            (is (= ["files/shot.png" "files/extra.txt"] (:attachments m)))))
+        (testing "refusals leave nothing behind"
+          (let [n (count (fs/list-dir (fs/path *store* "threads")))
+                refused (fn [& args] (let [r (apply am {:who "b"} args)] (and (= 1 (:exit r)) (:err r))))]
+            (is (str/includes? (refused "forward" "1") "forward needs --to NAME"))
+            (is (str/includes? (refused "forward" "--to" "c") "forward needs a thread"))
+            (is (str/includes? (refused "forward" "1" "--to" "b") "refusing to mail yourself"))
+            (is (str/includes? (refused "forward" "1" "--to" "c" "--msg" "9") "no message \"9\" in thread #1"))
+            (is (str/includes? (refused "forward" "99" "--to" "c") "no thread #99"))
+            (is (str/includes? (refused "forward" "1" "--to" "c" "--attach" (str (fs/path d "gone"))) "attachment not found"))
+            (is (= n (count (fs/list-dir (fs/path *store* "threads")))))
+            (is (str/blank? (store-git "status" "--porcelain")))))))))
 
 (deftest bodies-from-stdin-and-argv
   (with-store

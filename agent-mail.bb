@@ -459,10 +459,51 @@
          (println id)
          (when-not close? (delivered! me to id (:subject th))))))))
 
+(defn cmd-forward
+  "A new thread to --to carrying thread ID, or only its message --msg (a
+   position or a file name), after the caller's note. The note is optional:
+   the trailing text, then stdin as for send, but nothing is waited for on a
+   terminal. The files the forwarded messages use are copied under their own
+   names, so the links in them keep working, and listed on the new message
+   with any --attach; thread.md records `forwarded-from`."
+  [opts args]
+  (ensure-store!)
+  (let [from (caller opts)
+        to (or (:to opts) (fail "forward needs --to NAME"))
+        _ (when-not (core/valid-name? to) (fail "bad recipient name:" (pr-str to)))
+        _ (when (= from to) (fail "refusing to mail yourself (" from ")"))
+        src (if (first args) (resolve-id (first args)) (fail "forward needs a thread: agent-mail forward ID --to NAME"))
+        th (fold src)
+        msgs (if (:msg opts) [(core/pick-message th (:msg opts))] (vec (:msgs th)))
+        _ (when (empty? msgs) (fail "thread" (str "#" (:number th)) "has no messages"))
+        note (if (seq (rest args)) (body-from (rest args)) (stdin-content))
+        _ (check-attachments! (:attach opts))
+        refs (filter #(fs/regular-file? (fs/path (thread-dir src) %)) (core/file-refs msgs))
+        subject (or (:subject opts) (core/forward-subject (:subject th)))
+        body (core/forward-body note (core/forward-text th msgs))
+        created (core/now-utc)]
+    (locked
+     (fn []
+       (let [id (core/new-id subject created (thread-ids))
+             number (next-number)]
+         (fs/create-dirs (thread-dir id))
+         (spit (str (fs/path (thread-dir id) "thread.md"))
+               (str (core/fm-str {:subject subject :from from :created created :number number :forwarded-from src}) "\n"))
+         (let [copied (attach! id (map #(fs/path (thread-dir src) %) refs))
+               own (attach! id (:attach opts))]
+           (write-msg! id {:from from :to to :date created :attachments (vec (distinct (concat copied own))) :body body}))
+         (commit! (str "↪️ " from " → " to ": " subject))
+         (println id)
+         (delivered! from to id subject))))))
+
 (defn files-dir [id] (str (fs/path (thread-dir id) "files")))
 (defn render-thread
-  ([th] (core/render-thread th (files-dir (:id th))))
-  ([th msgs] (core/render-thread th (files-dir (:id th)) msgs)))
+  "The thread as Markdown; a forward's header names its source by number too."
+  ([th] (render-thread th (:msgs th)))
+  ([th msgs]
+   (let [src (:forwarded-from th)
+         n (when src (try (:number (fold src)) (catch Exception _ nil)))]
+     (core/render-thread (cond-> th n (assoc :forwarded-from-number n)) (files-dir (:id th)) msgs))))
 
 (defn editor-cmd
   "AGENT_MAIL_EDITOR, else $VISUAL, else $EDITOR, else on macOS `open -W` (the
@@ -718,6 +759,10 @@
                                               your editor; what you write (inline or at the end)
                                               is sent when you close it
   agent-mail close ID [text…]                 marks the thread done
+  agent-mail forward ID --to NAME [--msg N] [--subject S] [--attach FILE]… [text…] [< note.md]
+                                              new thread to NAME: your note (optional), then
+                                              the whole thread, or only its message N (a
+                                              position or file name), with its attachments
   (open, reply, read and close without ID offer a picker: fzf when installed)
   agent-mail list [--all] [--json]            open threads whose turn is mine
   agent-mail read ID [--json]                 the whole thread; ID is the number from `list`
@@ -760,6 +805,7 @@ Store: $AGENT_MAIL_DIR, else ~/.local/share/agent-mail.")
         "send" (cmd-send opts args)
         "reply" (cmd-reply opts args {})
         "close" (cmd-reply opts args {:close? true})
+        "forward" (cmd-forward opts args)
         "read" (cmd-read opts args)
         "open" (cmd-open opts args)
         "list" (cmd-list opts)
