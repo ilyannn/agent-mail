@@ -102,14 +102,19 @@ public struct AgentInfo: Hashable, Sendable {
     /// The user's own row, whose mailbox is every thread the user takes part in.
     public var isMe: Bool
     public var onDuty: Bool
+    /// On call: `agent-mail serve` opens a listener tab for it when mail
+    /// waits and nobody is on duty (MailStatus.onCallRepos).
+    public var onCall: Bool
     /// Open threads waiting on this participant: its sidebar badge.
     public var waiting: Int
     public var sessions: [DutyRecord]
 
-    public init(name: String, isMe: Bool = false, onDuty: Bool = false, waiting: Int = 0, sessions: [DutyRecord] = []) {
+    public init(name: String, isMe: Bool = false, onDuty: Bool = false, onCall: Bool = false, waiting: Int = 0,
+                sessions: [DutyRecord] = []) {
         self.name = name
         self.isMe = isMe
         self.onDuty = onDuty
+        self.onCall = onCall
         self.waiting = waiting
         self.sessions = sessions
     }
@@ -126,13 +131,13 @@ public struct AgentInfo: Hashable, Sendable {
     }
 
     /// The sidebar row's tooltip: who it is (on duty, and in which sessions,
-    /// for a repo), then what the badge counts.
+    /// or on call, for a repo), then what the badge counts.
     public var tooltip: String {
         var who: String
         if isMe {
             who = "you (\(name)): every thread you take part in"
         } else {
-            who = "\(name): " + (onDuty ? "on duty" : "nobody on duty")
+            who = "\(name): " + (onDuty ? "on duty" : onCall ? "on call — a tab opens when mail comes" : "nobody on duty")
             let live = sessions.filter(\.onDuty).map { "\($0.session) (\($0.state))" }
             if !live.isEmpty { who += " — " + live.joined(separator: ", ") }
         }
@@ -142,7 +147,7 @@ public struct AgentInfo: Hashable, Sendable {
     /// The sidebar row's VoiceOver label; it names the count only when the
     /// badge shows one.
     public var accessibilityLabel: String {
-        var parts = isMe ? ["\(name) (you)"] : [name, onDuty ? "on duty" : "not on duty"]
+        var parts = isMe ? ["\(name) (you)"] : [name, onDuty ? "on duty" : onCall ? "on call" : "not on duty"]
         if waiting > 0 { parts.append(waitingText) }
         return parts.joined(separator: ", ")
     }
@@ -155,7 +160,7 @@ public struct MailboxIndex: Sendable, Equatable {
     /// Every thread, newest first (ThreadOrder.newestFirst).
     public let allMail: [ThreadSummary]
     /// The sidebar's Participants: the user (`me`) first, then every repo on
-    /// duty or in a thread, by name.
+    /// duty, on call or in a thread, by name.
     public let participants: [AgentInfo]
     private let allMailOpenFirst: [ThreadSummary]
     private let byID: [String: ThreadSummary]
@@ -175,13 +180,16 @@ public struct MailboxIndex: Sendable, Equatable {
         allMailOpenFirst = newestFirst.filter(\.isOpen) + newestFirst.filter { !$0.isOpen }
 
         let duty = status?.duty ?? []
-        let repos = Set(duty.map(\.repo)).union(threads.flatMap(\.participants)).subtracting([me])
+        let onCall = status?.onCallRepos ?? []
+        let repos = Set(duty.map(\.repo)).union(threads.flatMap(\.participants))
+            .union((status?.oncall ?? []).map(\.repo)).subtracting([me])
             .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
         participants = ([me] + repos).map { name in
             let sessions = duty.filter { $0.repo == name }
             return AgentInfo(name: name,
                              isMe: name == me,
                              onDuty: sessions.contains(where: \.onDuty),
+                             onCall: onCall.contains(name),
                              waiting: threads.filter { $0.isWaiting(on: name) }.count,
                              sessions: sessions)
         }

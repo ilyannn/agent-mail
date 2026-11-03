@@ -224,6 +224,27 @@ import Testing
         #expect(duty.participant("user")?.onDuty == false)
     }
 
+    @Test func onCallReposSayATabOpens() throws {
+        func index(alive: Bool) -> MailboxIndex {
+            MailboxIndex(status: MailStatus(now: .now, me: "user", threads: [],
+                                            duty: [DutyRecord(repo: "website", session: "s1", onDuty: true)],
+                                            oncall: [OnCallRepo(repo: "infra"), OnCallRepo(repo: "website"),
+                                                     OnCallRepo(repo: "docs", state: "backing-off")],
+                                            serve: ServeInfo(alive: alive, pid: 1)))
+        }
+        let up = index(alive: true)
+        #expect(up.agents.map(\.name) == ["docs", "infra", "website"], "on-call repos are listed without threads")
+        let infra = try #require(up.participant("infra"))
+        #expect(infra.onCall && !infra.onDuty)
+        #expect(infra.tooltip == "infra: on call — a tab opens when mail comes\nNothing waiting on infra")
+        #expect(infra.accessibilityLabel == "infra, on call")
+        #expect(up.participant("website")?.tooltip == "website: on duty — s1 (waiting)\nNothing waiting on website",
+                "on duty wins")
+        #expect(up.participant("docs")?.onCall == false, "backing off: no tab comes")
+        #expect(index(alive: false).participant("infra")?.tooltip == "infra: nobody on duty\nNothing waiting on infra",
+                "serve isn't running")
+    }
+
     @Test func agentsSeenOnlyOnDutyAreListed() {
         let st = MailStatus(now: .now, me: "user", threads: [],
                             duty: [DutyRecord(repo: "docs", session: "s", onDuty: true)])

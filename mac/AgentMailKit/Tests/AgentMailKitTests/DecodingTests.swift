@@ -50,6 +50,25 @@ import Testing
         #expect(rec.heartbeat != nil)
     }
 
+    @Test func onCallAndServeDecode() throws {
+        let st = try AgentMailJSON.decodeStatus(Data("""
+            {"schema": 1, "now": "2026-11-03T05:00:00.000Z", "me": "user", "threads": [], "duty": [], "undelivered": [],
+             "oncall": [{"repo": "infra", "dir": "/x/infra", "state": "on-call", "pane": null, "text": "on call"},
+                        {"repo": "docs", "dir": "/x/docs", "state": "backing-off", "pane": 41,
+                         "until": "2026-11-03T05:40:00.000Z", "reason": "no session came on duty",
+                         "text": "backing off until 06:40: no session came on duty"}],
+             "serve": {"alive": true, "pid": 4242}}
+            """.utf8))
+        #expect(st.oncall == [OnCallRepo(repo: "infra", dir: "/x/infra", state: "on-call"),
+                              OnCallRepo(repo: "docs", dir: "/x/docs", state: "backing-off", pane: 41)])
+        #expect(st.serve == ServeInfo(alive: true, pid: 4242))
+        #expect(st.onCallRepos == ["infra"], "a repo backing off gets no tab")
+        let older = try AgentMailJSON.decodeStatus(Fixture.data("status"))
+        #expect(older.oncall.isEmpty, "a CLI from before on call")
+        #expect(older.serve == nil)
+        #expect(older.onCallRepos.isEmpty)
+    }
+
     @Test func threadFixtureDecodes() throws {
         let th = try AgentMailJSON.decodeThread(Fixture.data("read"))
         #expect(th.id == "2026-10-31-deploy-the-new-site")

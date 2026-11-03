@@ -18,15 +18,76 @@ public struct MailStatus: Sendable, Equatable, Decodable {
     public var duty: [DutyRecord]
     /// Ids of open threads nobody listens for, longest waiting first.
     public var undelivered: [String]
+    /// Repos on call (`agent-mail oncall`): `agent-mail serve` opens a
+    /// listener tab for one when mail waits and nobody is on duty. Empty from
+    /// a CLI that predates on call.
+    public var oncall: [OnCallRepo]
+    /// Whether `agent-mail serve` runs; nil from a CLI that predates it.
+    public var serve: ServeInfo?
+
+    enum CodingKeys: String, CodingKey {
+        case schema, now, me, threads, duty, undelivered, oncall, serve
+    }
 
     public init(schema: Int = MailStatus.supportedSchema, now: Date, me: String,
-                threads: [ThreadSummary], duty: [DutyRecord] = [], undelivered: [String] = []) {
+                threads: [ThreadSummary], duty: [DutyRecord] = [], undelivered: [String] = [],
+                oncall: [OnCallRepo] = [], serve: ServeInfo? = nil) {
         self.schema = schema
         self.now = now
         self.me = me
         self.threads = threads
         self.duty = duty
         self.undelivered = undelivered
+        self.oncall = oncall
+        self.serve = serve
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        schema = try c.decode(Int.self, forKey: .schema)
+        now = try c.decode(Date.self, forKey: .now)
+        me = try c.decode(String.self, forKey: .me)
+        threads = try c.decode([ThreadSummary].self, forKey: .threads)
+        duty = try c.decode([DutyRecord].self, forKey: .duty)
+        undelivered = try c.decode([String].self, forKey: .undelivered)
+        oncall = try c.decodeIfPresent([OnCallRepo].self, forKey: .oncall) ?? []
+        serve = try c.decodeIfPresent(ServeInfo.self, forKey: .serve)
+    }
+
+    /// The repos for which a listener tab opens when mail comes: on call,
+    /// not backing off, while serve runs (core/status's rule).
+    public var onCallRepos: Set<String> {
+        guard serve?.alive == true else { return [] }
+        return Set(oncall.filter { $0.state != "backing-off" }.map(\.repo))
+    }
+}
+
+/// A repo on call, as `status` lists it (core/oncall-view).
+public struct OnCallRepo: Sendable, Equatable, Hashable, Decodable {
+    public var repo: String
+    /// Where its listener tab starts.
+    public var dir: String?
+    /// `on-duty`, `starting`, `tab-open`, `backing-off` or `on-call`.
+    public var state: String
+    /// The WezTerm pane of the tab serve opened for it, if one is open.
+    public var pane: Int?
+
+    public init(repo: String, dir: String? = nil, state: String = "on-call", pane: Int? = nil) {
+        self.repo = repo
+        self.dir = dir
+        self.state = state
+        self.pane = pane
+    }
+}
+
+/// The on-call daemon, `agent-mail serve`.
+public struct ServeInfo: Sendable, Equatable, Hashable, Decodable {
+    public var alive: Bool
+    public var pid: Int?
+
+    public init(alive: Bool, pid: Int? = nil) {
+        self.alive = alive
+        self.pid = pid
     }
 }
 
@@ -56,7 +117,8 @@ public struct ThreadSummary: Sendable, Equatable, Hashable, Identifiable, Decoda
     public var flow: [String]
     /// Seconds an open thread has waited on its owner; nil once closed.
     public var waitingSeconds: Int?
-    /// `user`, `on-duty` or `none` for an open thread; nil when closed.
+    /// `user`, `on-duty`, `on-call` (a listener tab opens for the owner
+    /// shortly) or `none` for an open thread; nil when closed.
     public var listener: String?
     /// The thread this one forwards (`agent-mail forward`), nil for any
     /// other thread and from a CLI that predates forwarding.
