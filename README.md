@@ -107,7 +107,8 @@ unread count and a three-pane window:
   Waiting filters.
 - Threads rendered as Markdown.
 - Reply, Forward and new mail written inline.
-- Notifications.
+- Notifications, each kind with a sound you pick in Settings › General: the
+  system's, or one of three made for the app.
 
 The app reads and writes only through the CLI, as `user`. To build it you need
 Xcode 26 or later:

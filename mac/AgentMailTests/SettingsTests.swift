@@ -21,7 +21,37 @@ import Testing
             #expect(s.mailbox == .inbox)
             #expect(s.threadOrder == .newestFirst)
             #expect(s.participantFilter == .all)
+            #expect(s.messageSound == .systemDefault)
+            #expect(s.trafficSound == .systemDefault)
         }
+    }
+
+    @Test func notificationSoundsRoundTrip() {
+        withSettings { s in
+            let choices: [NotificationSoundChoice] = [.none, .bundled("Envelope"), .system("Glass"), .systemDefault]
+            for choice in choices {
+                s.messageSound = choice
+                #expect(s.messageSound == choice)
+                s.trafficSound = choice
+                #expect(s.trafficSound == choice)
+                #expect(NotificationSoundChoice(rawValue: choice.rawValue) == choice)
+            }
+            #expect(choices.map(\.rawValue) == ["none", "bundled:Envelope", "system:Glass", "default"])
+        }
+    }
+
+    @Test func anUnknownSoundIsTheDefault() {
+        for raw in ["", "chime", "bundled:", "system:", "None", "file:Glass"] {
+            #expect(NotificationSoundChoice(rawValue: raw) == .systemDefault)
+        }
+        let suite = "agent-mail-tests-\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.set("chime", forKey: "messageSound")
+        defaults.set("bundled:", forKey: "trafficSound")
+        let s = AppSettings(defaults: defaults)
+        #expect(s.messageSound == .systemDefault)
+        #expect(s.trafficSound == .systemDefault)
     }
 
     @Test func participantFilterRoundTrips() {

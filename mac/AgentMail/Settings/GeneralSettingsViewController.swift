@@ -1,5 +1,6 @@
-// General: launch at login (SMAppService), the Dock icon policy, the CLI
-// path (override, or what was found), and which store is in use.
+// General: launch at login (SMAppService), the Dock icon policy, the sound
+// of each kind of notification, the CLI path (override, or what was found),
+// and which store is in use.
 import AgentMailKit
 import AppKit
 import Observation
@@ -13,6 +14,12 @@ final class GeneralSettingsViewController: NSViewController {
     private let loginNote = NSTextField.wrapping("")
     private let loginButton = NSButton(title: "Open Login Items…", target: nil, action: nil)
     private let dockPopup = NSPopUpButton()
+    private let messageSoundPopup = NSPopUpButton()
+    private let messageSoundPlay = NSButton()
+    private let trafficSoundPopup = NSPopUpButton()
+    private let trafficSoundPlay = NSButton()
+    /// The sound the Play button started, held so it plays to the end.
+    private var previewSound: NSSound?
     private let cliField = NSTextField()
     private let cliStatus = NSTextField.wrapping("")
     private let storeLabel = NSTextField.wrapping("", color: .labelColor)
@@ -42,6 +49,8 @@ final class GeneralSettingsViewController: NSViewController {
         }
         dockPopup.target = self
         dockPopup.action = #selector(dockChanged(_:))
+        let messageSoundRow = soundRow(messageSoundPopup, play: messageSoundPlay, kind: "message")
+        let trafficSoundRow = soundRow(trafficSoundPopup, play: trafficSoundPlay, kind: "agent traffic")
 
         cliField.placeholderString = "Find automatically"
         cliField.target = self
@@ -63,6 +72,8 @@ final class GeneralSettingsViewController: NSViewController {
             [NSTextField.label("Login:"), loginCheckbox],
             [NSGridCell.emptyContentView, stack([loginNote, loginButton])],
             [NSTextField.label("Dock icon:"), dockPopup],
+            [NSTextField.label("Sound for mail to you:"), messageSoundRow],
+            [NSTextField.label("Sound for agent traffic:"), trafficSoundRow],
             [NSTextField.label("Command-line tool:"), cliRow],
             [NSGridCell.emptyContentView, cliStatus],
             [NSTextField.label("Store:"), stack([storeLabel, reveal])],
@@ -108,6 +119,8 @@ final class GeneralSettingsViewController: NSViewController {
         super.viewWillAppear()
         updateLogin()
         if let i = DockIconPolicy.allCases.firstIndex(of: settings.dockPolicy) { dockPopup.selectItem(at: i) }
+        select(settings.messageSound, in: messageSoundPopup)
+        select(settings.trafficSound, in: trafficSoundPopup)
         cliField.stringValue = settings.cliPath ?? ""
         updateCLI()
         let source = switch store.location.source {
@@ -159,6 +172,80 @@ final class GeneralSettingsViewController: NSViewController {
         settings.dockPolicy = policy
         dock.update()
         if NSApp.activationPolicy() == .regular { NSApp.activate() }
+    }
+
+    // MARK: Sounds
+
+    /// A popup of the sounds (Default, None, the app's own, then the
+    /// system's) and a button that plays the one chosen.
+    private func soundRow(_ popup: NSPopUpButton, play: NSButton, kind: String) -> NSStackView {
+        for (i, section) in NotificationSoundChoice.sections().enumerated() {
+            if i > 0 { popup.menu?.addItem(.separator()) }
+            for choice in section {
+                // Not addItem(withTitle:), which drops an item of the same title.
+                let item = NSMenuItem(title: choice.title, action: nil, keyEquivalent: "")
+                item.representedObject = choice.rawValue
+                popup.menu?.addItem(item)
+            }
+        }
+        popup.target = self
+        popup.action = #selector(soundChanged(_:))
+        popup.setAccessibilityLabel("Sound for \(kind)")
+        play.image = NSImage(systemSymbolName: "play.fill", accessibilityDescription: "Play \(kind) sound")
+        play.imagePosition = .imageOnly
+        play.bezelStyle = .push
+        play.setAccessibilityLabel("Play \(kind) sound")
+        play.toolTip = "Play"
+        play.target = self
+        play.action = #selector(playSound(_:))
+        let row = NSStackView(views: [popup, play])
+        row.spacing = 6
+        return row
+    }
+
+    private func choice(in popup: NSPopUpButton) -> NotificationSoundChoice {
+        NotificationSoundChoice(rawValue: popup.selectedItem?.representedObject as? String ?? "")
+    }
+
+    /// Selects the choice; one that isn't listed (a system sound since
+    /// removed) shows as Default, which is what the notification plays.
+    private func select(_ choice: NotificationSoundChoice, in popup: NSPopUpButton) {
+        popup.select(popup.itemArray.first { $0.representedObject as? String == choice.rawValue } ?? popup.itemArray.first)
+        updatePlay(for: popup)
+    }
+
+    private func updatePlay(for popup: NSPopUpButton) {
+        let play = popup === messageSoundPopup ? messageSoundPlay : trafficSoundPlay
+        if case .none = choice(in: popup) { play.isEnabled = false } else { play.isEnabled = true }
+    }
+
+    @objc private func soundChanged(_ sender: NSPopUpButton) {
+        if sender === messageSoundPopup {
+            settings.messageSound = choice(in: sender)
+        } else {
+            settings.trafficSound = choice(in: sender)
+        }
+        updatePlay(for: sender)
+    }
+
+    /// Plays the chosen sound: Default is the system alert sound.
+    @objc private func playSound(_ sender: NSButton) {
+        let choice = choice(in: sender === messageSoundPlay ? messageSoundPopup : trafficSoundPopup)
+        previewSound?.stop()
+        previewSound = nil
+        switch choice {
+        case .none:
+            break
+        case .systemDefault:
+            NSSound.beep()
+        case .bundled, .system:
+            guard let url = choice.previewURL, let sound = NSSound(contentsOf: url, byReference: true) else {
+                NSSound.beep()
+                return
+            }
+            previewSound = sound
+            sound.play()
+        }
     }
 
     // MARK: CLI

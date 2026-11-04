@@ -106,6 +106,30 @@ func message(_ file: String, from: String, to: String, thread: String = "t1", bo
         #expect(h.center.added.last?.content.categoryIdentifier == NotificationController.trafficCategory)
     }
 
+    @Test func eachKindPlaysItsOwnSound() async throws {
+        let h = try Harness()
+        #expect(h.settings.messageSound == .systemDefault)
+        h.controller.post([message("a.md", from: "infra", to: "user")], index: .empty)
+        await h.waitForPosts(1)
+        #expect(h.center.added.last?.content.sound != nil)
+
+        h.settings.messageSound = .none
+        h.controller.post([message("b.md", from: "infra", to: "user")], index: .empty)
+        await h.waitForPosts(2)
+        let toMe = try #require(h.center.added.last)
+        #expect(toMe.identifier == "b.md")
+        #expect(toMe.content.sound == nil)
+
+        h.settings.notifyAgentTraffic = true
+        h.settings.trafficSound = .bundled("Prompt")
+        h.controller.post([message("c.md", from: "infra", to: "website")], index: .empty)
+        await h.waitForPosts(3)
+        let traffic = try #require(h.center.added.last)
+        #expect(traffic.identifier == "c.md")
+        #expect(traffic.content.categoryIdentifier == NotificationController.trafficCategory)
+        #expect(traffic.content.sound != nil)
+    }
+
     @Test func aBurstPostsOnlyTheNewest() async throws {
         let h = try Harness()
         let messages = (1...7).map { message("\($0).md", from: "infra", to: "user") }

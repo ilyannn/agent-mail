@@ -1,7 +1,8 @@
 // Notifications for new mail: one per new message file (the file name is
 // the identifier, the thread id groups them), with an inline Reply and
-// Close Thread. Replies go to the CLI and the action completes when it
-// exits; a failure is an alert and the text becomes the thread's draft.
+// Close Thread, and the sound Settings picks for its kind. Replies go to the
+// CLI and the action completes when it exits; a failure is an alert and the
+// text becomes the thread's draft.
 import AgentMailKit
 import AppKit
 import Observation
@@ -91,7 +92,7 @@ final class NotificationController: NSObject, UNUserNotificationCenterDelegate {
             content.body = MarkdownHTML.plainPreview(m.body, limit: 200)
             content.threadIdentifier = m.threadID
             content.categoryIdentifier = toMe ? Self.messageCategory : Self.trafficCategory
-            content.sound = .default
+            content.sound = (toMe ? settings.messageSound : settings.trafficSound).unSound
             content.userInfo = ["thread": m.threadID, "from": from, "file": m.file]
             let request = UNNotificationRequest(identifier: m.file, content: content, trigger: nil)
             Task {

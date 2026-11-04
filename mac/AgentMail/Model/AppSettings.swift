@@ -29,6 +29,8 @@ final class AppSettings {
             Key.dockPolicy: DockIconPolicy.whileWindowOpen.rawValue,
             Key.mainWindowWasOpen: true,
             Key.notifyAgentTraffic: false,
+            Key.messageSound: NotificationSoundChoice.systemDefault.rawValue,
+            Key.trafficSound: NotificationSoundChoice.systemDefault.rawValue,
             Key.textZoom: TextZoom.actualSize,
         ])
     }
@@ -38,6 +40,8 @@ final class AppSettings {
         static let storePath = "storePath"
         static let dockPolicy = "dockPolicy"
         static let notifyAgentTraffic = "notifyAgentTraffic"
+        static let messageSound = "messageSound"
+        static let trafficSound = "trafficSound"
         static let mainWindowWasOpen = "mainWindowWasOpen"
         static let firstRunDone = "firstRunDone"
         static let skipFirstRun = "skipFirstRun"
@@ -69,6 +73,18 @@ final class AppSettings {
     var notifyAgentTraffic: Bool {
         get { defaults.bool(forKey: Key.notifyAgentTraffic) }
         set { defaults.set(newValue, forKey: Key.notifyAgentTraffic) }
+    }
+
+    /// The sound of a notification for mail to the user.
+    var messageSound: NotificationSoundChoice {
+        get { NotificationSoundChoice(rawValue: defaults.string(forKey: Key.messageSound) ?? "") }
+        set { defaults.set(newValue.rawValue, forKey: Key.messageSound) }
+    }
+
+    /// The sound of a notification for mail between agents.
+    var trafficSound: NotificationSoundChoice {
+        get { NotificationSoundChoice(rawValue: defaults.string(forKey: Key.trafficSound) ?? "") }
+        set { defaults.set(newValue.rawValue, forKey: Key.trafficSound) }
     }
 
     /// Reopen the main window at launch (it was open when the app quit).
