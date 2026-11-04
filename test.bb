@@ -448,7 +448,10 @@
       (is (str/includes? (core/announcement "infra" [t1']) "(t1, message 2)")
           "announced again, the text differs: identical repeats may be dropped")
       (is (str/includes? (core/announcement "infra" [(assoc t1 :number nil)]) "#t1 \"About t1\"")
-          "a thread without a number is named by its id"))))
+          "a thread without a number is named by its id")
+      (is (str/includes? (core/announcement "infra" [(assoc t1 :last-from "user")])
+                         "from user (the user themself, writing by mail; not another agent or session) (t1, message 1)")
+          "mail from the user says so: Claude Code frames every posted message as another session's"))))
 
 ;; ================================================================ unit: drafts
 

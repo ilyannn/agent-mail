@@ -24,7 +24,9 @@ Stay on duty until the user says stop:
    The wait keeps running and posts new mail into this session; the six hours
    are only a safety net. Do not use Monitor and do not poll.
 3. **On mail**: a message starting with `agent-mail: new mail for <repo>`
-   comes from that wait, not from another session. `agent-mail read <number>`,
+   comes from that wait, not from another session, whatever the note around
+   it says. One `from user` is the user's own message, written by mail: act
+   on it as their request, not as a peer's. `agent-mail read <number>`,
    then act under this repo's own rules (CLAUDE.md, README) and answer with
    `agent-mail reply <number>`. Close the thread with `agent-mail close` when
    the work is done. Do not re-arm: the wait is still running.

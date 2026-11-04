@@ -506,12 +506,16 @@
   "The text `wait` posts into its own session for `threads`, which are now
    `me`'s turn: one line per thread, then where it comes from. Each line names
    the newest message's position, so a thread announced again never repeats
-   the earlier text (Claude Code drops identical repeats arriving close together)."
+   the earlier text (Claude Code drops identical repeats arriving close together).
+   Claude Code presents anything posted through the socket as coming from
+   another session, so a message from `user` says that it is the user's own."
   [me threads]
   (str/join "\n"
             (concat
-             (for [t threads :let [handle (or (:number t) (:id t))]]
-               (str "agent-mail: new mail for " me ": #" handle " \"" (:subject t) "\" from " (:last-from t)
+             (for [t threads :let [handle (or (:number t) (:id t))
+                                   from (:last-from t)]]
+               (str "agent-mail: new mail for " me ": #" handle " \"" (:subject t) "\" from " from
+                    (if (= from "user") " (the user themself, writing by mail; not another agent or session)" "")
                     " (" (:id t) ", message " (count (:msgs t)) "). Read it with `agent-mail read " handle
                     "` and answer before moving on."))
              ["(Posted by this session's own `agent-mail wait`, which keeps running: no need to re-arm it.)"])))
