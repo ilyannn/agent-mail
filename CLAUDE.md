@@ -19,6 +19,7 @@ tool, sent by mail from other repos, are this repo's to answer.
   - `AgentMail/`: the app target.
   - `project.yml`: XcodeGen; the Xcode project isn't committed.
   - `mac/justfile`: the app's recipes.
+  - `mac/scripts/sounds.bb`: synthesizes the app's notification sounds.
 - `.github/workflows/ci.yml`: `just check` on Ubuntu and macOS, plus the app
   build and tests on macos-latest.
 

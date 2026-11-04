@@ -32,6 +32,10 @@ run *args: build
 icon *args:
     bb scripts/icon.bb {{args}}
 
+# Regenerate the app's notification sounds, AgentMail/Resources/Sounds/*.caf, with scripts/sounds.bb
+sounds:
+    bb scripts/sounds.bb
+
 # Create the self-signed code-signing identity "Agent Mail Local" in the login keychain (once)
 signing-cert *args:
     bb scripts/signing_cert.bb {{args}}
