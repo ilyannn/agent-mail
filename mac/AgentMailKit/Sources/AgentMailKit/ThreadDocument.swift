@@ -6,8 +6,10 @@
 // its body, and its attachments (links, image thumbnails, Markdown files
 // rendered in a collapsible section). Long read messages start folded with
 // the middle in a <details>, which works without JavaScript; unread ones and
-// the newest never do. The newest is marked so the view can scroll to it.
-// A forward's preview is the same cards without the header or buttons.
+// the newest never do. Unread messages (new to the reader) carry the class
+// `unread`, and the newest the id `newest`, so the view can scroll to the
+// first unread one, else the newest. A forward's preview is the same cards
+// without the header or buttons.
 import Foundation
 
 public enum ThreadDocument {
@@ -16,16 +18,19 @@ public enum ThreadDocument {
 
     /// - Parameters:
     ///   - css: the stylesheet, inlined (a linked one would need a looser CSP).
-    ///   - expanded: message files shown unfolded however long (the unread
-    ///     ones); the newest always is.
+    ///   - unread: message files new to the reader: marked unread and never
+    ///     folded; the view scrolls to the first.
+    ///   - expanded: message files shown unfolded however long without being
+    ///     marked (say, ones unread earlier this session); unread ones and the
+    ///     newest always are.
     ///   - readAttachment: the text of a Markdown attachment by name, or nil
     ///     to only link it.
     ///   - forwardedFrom: the thread this one forwards, linked from the header
     ///     (a bare id when the index doesn't know it).
     ///   - forwards: the threads that forward this one, linked from the header.
     ///   - formatDate: local time for a message date.
-    public static func html(thread: ThreadDetail, me: String, css: String, expanded: Set<String> = [],
-                            forwardedFrom: ThreadSummary? = nil, forwards: [ThreadSummary] = [],
+    public static func html(thread: ThreadDetail, me: String, css: String, unread: Set<String> = [],
+                            expanded: Set<String> = [], forwardedFrom: ThreadSummary? = nil, forwards: [ThreadSummary] = [],
                             readAttachment: (String) -> String? = { _ in nil },
                             formatDate: (Date) -> String) -> String {
         let e = MarkdownHTML.escape
@@ -52,8 +57,9 @@ public enum ThreadDocument {
             """
         for (i, m) in thread.msgs.enumerated() {
             let newest = i == thread.msgs.count - 1
-            body += card(m, index: i, thread: thread.id, me: me, newest: newest, unread: expanded.contains(m.file),
-                         threadIsOpen: thread.isOpen, readAttachment: readAttachment, formatDate: formatDate)
+            body += card(m, index: i, thread: thread.id, me: me, newest: newest, unread: unread.contains(m.file),
+                         expanded: expanded.contains(m.file), threadIsOpen: thread.isOpen,
+                         readAttachment: readAttachment, formatDate: formatDate)
         }
         return document(title: thread.subject, css: css, body: body)
     }
@@ -118,12 +124,14 @@ public enum ThreadDocument {
         """
     }
 
-    /// One message. A preview card has no buttons and is never folded.
+    /// One message. A preview card has no buttons and is never folded; an
+    /// expanded one isn't either.
     static func card(_ m: Message, index i: Int, thread: String, me: String, newest: Bool, unread: Bool,
-                     preview: Bool = false, threadIsOpen: Bool = true,
+                     expanded: Bool = false, preview: Bool = false, threadIsOpen: Bool = true,
                      readAttachment: (String) -> String?, formatDate: (Date) -> String) -> String {
         let e = MarkdownHTML.escape
-        let folded = !preview && MessageFolding.startsFolded(body: m.body, isUnread: unread, isNewest: newest)
+        let unfolded = unread || expanded
+        let folded = !preview && MessageFolding.startsFolded(body: m.body, isUnread: unfolded, isNewest: newest)
             ? MarkdownHTML.renderFolded(m.body, thread: thread) : nil
         let rendered = folded == nil ? MarkdownHTML.renderBody(m.body, thread: thread) : nil
         let inlineImages = folded?.inlineImages ?? rendered?.inlineImages ?? []
@@ -154,7 +162,7 @@ public enum ThreadDocument {
         } else if let rendered {
             out += "<div class=\"body\">\n\(rendered.html)</div>\n"
         }
-        out += attachments(m.attachments, thread: thread, inlineImages: inlineImages, open: preview || unread || newest,
+        out += attachments(m.attachments, thread: thread, inlineImages: inlineImages, open: preview || unfolded || newest,
                            readAttachment: readAttachment)
         out += "</article>\n"
         return out
@@ -239,5 +247,18 @@ extension ThreadDetail {
     public func unreadFiles(me: String, count: Int) -> Set<String> {
         guard count > 0 else { return [] }
         return Set(msgs.filter { $0.from != me }.suffix(count).map(\.file))
+    }
+
+    /// The messages new to `me`, by a status line that may count another
+    /// copy of the thread: `summary.unread` of its `summary.count` messages.
+    /// Messages from others beyond those (the status hasn't seen them yet)
+    /// are new too; a cached copy that lacks the newest messages leaves their
+    /// share of the count out, taking them as from others, rather than mark
+    /// older messages it does hold.
+    public func unreadFiles(me: String, summary: ThreadSummary) -> Set<String> {
+        let extra = msgs.count - summary.count
+        let count = extra >= 0 ? summary.unread + msgs.suffix(extra).filter { $0.from != me }.count
+            : summary.unread + extra
+        return unreadFiles(me: me, count: count)
     }
 }

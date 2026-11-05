@@ -1,7 +1,8 @@
 // The thread view: the whole thread rendered as one HTML document in a
 // WKWebView (content JavaScript off, strict CSP, attachments served by a
-// scheme handler, every click decided by LinkPolicy), the newest message
-// scrolled into view, and below it a pane that writes in one of three modes:
+// scheme handler, every click decided by LinkPolicy), the first message new
+// to me (else the newest) scrolled into view, and below it a pane that writes
+// in one of three modes:
 // Reply, to whoever wrote last that isn't me (or the sender of the card
 // whose Reply was clicked); Forward, which hands an open thread on to anyone
 // else (`reply --to X`, To an editable combo box, Esc goes back to Reply);
@@ -656,15 +657,17 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
         "preview|\(message ?? "*")|\(thread.contentFingerprint)"
     }
 
+    /// The thread with what is new to me marked unread (the view scrolls to
+    /// the first of it), and what was new earlier this session unfolded.
     private func render(_ detail: ThreadDetail) {
-        let unread = detail.unreadFiles(me: me, count: store.index.thread(detail.id)?.unread ?? 0)
+        let unread = store.index.thread(detail.id).map { detail.unreadFiles(me: me, summary: $0) } ?? []
         let expanded = expandedFiles[detail.id, default: []].union(unread)
         expandedFiles[detail.id] = expanded
         let files = store.filesDirectory(detail.id)
         schemeHandler.thread = (detail.id, files)
         let (source, forwards) = related(detail)
-        let html = ThreadDocument.html(thread: detail, me: me, css: css + Self.systemColorsCSS(), expanded: expanded,
-                                       forwardedFrom: source, forwards: forwards,
+        let html = ThreadDocument.html(thread: detail, me: me, css: css + Self.systemColorsCSS(), unread: unread,
+                                       expanded: expanded, forwardedFrom: source, forwards: forwards,
                                        readAttachment: { Self.readText(named: $0, in: files) }) { [dateStyle] in
             $0.formatted(dateStyle)
         }

@@ -153,6 +153,28 @@ import Testing
         #expect(th.unreadFiles(me: "user", count: 2) == ["2.md", "4.md"])
         #expect(th.unreadFiles(me: "user", count: 0) == [])
     }
+
+    @Test func unreadFilesAllowForAStatusOfAnotherCopy() {
+        let th = ThreadDetail(id: "t", subject: "s", msgs: [
+            Message(file: "1.md", from: "infra", to: "user", date: nil, body: "a"),
+            Message(file: "2.md", from: "user", to: "infra", date: nil, body: "b"),
+            Message(file: "3.md", from: "infra", to: "user", date: nil, body: "c"),
+            Message(file: "4.md", from: "user", to: "infra", date: nil, body: "d"),
+            Message(file: "5.md", from: "infra", to: "user", date: nil, body: "e"),
+        ])
+        func summary(count: Int, unread: Int) -> ThreadSummary {
+            ThreadSummary(id: "t", subject: "s", count: count, unread: unread)
+        }
+        #expect(th.unreadFiles(me: "user", summary: summary(count: 5, unread: 2)) == ["3.md", "5.md"], "the same copy")
+        #expect(th.unreadFiles(me: "user", summary: summary(count: 5, unread: 0)) == [])
+        // The status predates 5.md (from infra) and 4.md (mine): 5.md is new too.
+        #expect(th.unreadFiles(me: "user", summary: summary(count: 3, unread: 1)) == ["3.md", "5.md"])
+        #expect(th.unreadFiles(me: "user", summary: summary(count: 3, unread: 0)) == ["5.md"])
+        // A cached copy without the two newest of 7, both unread: nothing it
+        // holds is, rather than 3.md and 5.md.
+        #expect(th.unreadFiles(me: "user", summary: summary(count: 7, unread: 2)) == [])
+        #expect(th.unreadFiles(me: "user", summary: summary(count: 7, unread: 3)) == ["5.md"])
+    }
 }
 
 @Suite struct ThreadDocumentTests {
@@ -279,12 +301,30 @@ import Testing
             Message(file: "2.md", from: "infra", to: "user", date: nil, body: long),
             Message(file: "3.md", from: "infra", to: "user", date: nil, body: long),
         ])
-        let html = ThreadDocument.html(thread: th, me: "user", css: "", expanded: ["2.md"]) { _ in "" }
+        let html = ThreadDocument.html(thread: th, me: "user", css: "", unread: ["2.md"]) { _ in "" }
         #expect(html.contains("<article class=\"msg folded\" id=\"m1\">"))
         #expect(html.contains("<article class=\"msg unread\" id=\"m2\">"))
         #expect(html.contains("<article class=\"msg newest\" id=\"newest\">"))
         #expect(html.components(separatedBy: "<details class=\"fold\">").count == 2)
         #expect(html.contains("<summary><span class=\"more\">Show 12 more lines</span><span class=\"less\">Hide 12 lines</span></summary>"))
+    }
+
+    @Test func onlyWhatIsNewNowIsMarkedUnread() {
+        let long = FoldingTests.paragraphs
+        let th = ThreadDetail(id: "t", subject: "s", msgs: [
+            Message(file: "1.md", from: "infra", to: "user", date: nil, body: long),
+            Message(file: "2.md", from: "infra", to: "user", date: nil, body: long),
+            Message(file: "3.md", from: "infra", to: "user", date: nil, body: long),
+            Message(file: "4.md", from: "infra", to: "user", date: nil, body: long),
+        ])
+        // 1.md was new when the thread was first shown; now 3.md is.
+        let html = ThreadDocument.html(thread: th, me: "user", css: "", unread: ["3.md"],
+                                       expanded: ["1.md", "3.md"]) { _ in "" }
+        #expect(html.contains("<article class=\"msg\" id=\"m1\">"), "unfolded, not marked: the view doesn't scroll to it")
+        #expect(html.contains("<article class=\"msg folded\" id=\"m2\">"))
+        #expect(html.contains("<article class=\"msg unread\" id=\"m3\">"))
+        #expect(html.components(separatedBy: "class=\"dot\"").count == 2, "one unread dot")
+        #expect(html.components(separatedBy: "<details class=\"fold\">").count == 2, "only 2.md folds")
     }
 }
 
