@@ -222,6 +222,12 @@ final class MailStore {
     /// when it is a participant's.
     var shownThreads: [ThreadSummary] { index.threads(in: mailbox, order: threadOrder, filter: participantFilter) }
 
+    /// Whether the thread list holds the draft's row: in the mailboxes the
+    /// thread it starts will be in (MailboxIndex.showsDraft).
+    var showsDraftRow: Bool {
+        newDraft.map { index.showsDraft($0, in: mailbox, filter: participantFilter) } ?? false
+    }
+
     /// Whether the thread list holds thread `id`.
     func isShown(_ id: String) -> Bool {
         index.threads(in: mailbox, filter: participantFilter).contains { $0.id == id }

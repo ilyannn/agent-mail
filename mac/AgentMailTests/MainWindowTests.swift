@@ -123,7 +123,7 @@ import Testing
         }
     }
 
-    @Test func theDraftIsARowAtTheTopOfEveryMailbox() async {
+    @Test func theDraftIsARowAtTheTopOfTheMailboxesItsThreadWillBeIn() async {
         await withStore { store in
             store.mailbox = .allMail
             store.select(threadID: "b")
@@ -142,18 +142,44 @@ import Testing
             await settle { rowIDs(list).last == "row* c" }
             #expect(rowIDs(list) == ["row  /draft", "row  a", "row  b", "row* c"], "the draft stays")
 
+            // It will wait on infra: not in the Inbox, but in infra's mailbox.
             store.mailbox = .inbox
+            await settle { rowIDs(list).count == 1 }
+            #expect(rowIDs(list) == ["row  a"])
+            store.mailbox = .agent("infra")
+            await settle { rowIDs(list).count == 4 }
+            #expect(rowIDs(list) == ["row  /draft", "row  a", "row  b", "row  c"])
+
+            // Not in website's mailbox until it is to website.
+            store.mailbox = .agent("website")
+            await settle { rowIDs(list) == ["row  c"] }
+            #expect(rowIDs(list) == ["row  c"])
+            store.editDraft { $0.to = "website" }
             await settle { rowIDs(list).count == 2 }
-            #expect(rowIDs(list) == ["row  /draft", "row  a"])
+            #expect(rowIDs(list) == ["row  /draft", "row  c"])
+            #expect(list.debugRows()[1] == "row  /draft | Draft, New Message, to website")
+
+            // My own mailbox holds it, To or not, as the filter allows.
+            store.mailbox = .agent("user")
+            store.participantFilter = .waiting
+            await settle { rowIDs(list) == ["row  a"] }
+            #expect(rowIDs(list) == ["row  a"], "it won't wait on me")
+            store.participantFilter = .sent
+            await settle { rowIDs(list).count == 2 }
+            #expect(rowIDs(list) == ["row  /draft", "row  b"], "I start it")
+            store.participantFilter = .all
+            store.editDraft { $0.to = "" }
+            await settle { rowIDs(list).count == 3 }
+            #expect(rowIDs(list) == ["row  /draft", "row  a", "row  b"])
 
             store.showDraft()
             store.editDraft { $0.subject = "Rotate keys" }
             await settle { list.debugRows()[1].contains("Rotate keys") }
-            #expect(list.debugRows()[1] == "row* /draft | Draft, Rotate keys, to infra")
+            #expect(list.debugRows()[1] == "row* /draft | Draft, Rotate keys, Draft")
 
             store.discardDraft()
-            await settle { rowIDs(list).count == 1 }
-            #expect(rowIDs(list) == ["row  a"], "c isn't in the Inbox, so nothing is selected")
+            await settle { rowIDs(list).count == 2 }
+            #expect(rowIDs(list) == ["row  a", "row  b"], "nothing was selected before the draft")
             #expect(store.newDraft == nil && !store.isShowingDraft)
         }
     }

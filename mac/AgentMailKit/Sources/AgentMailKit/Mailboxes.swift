@@ -217,6 +217,19 @@ public struct MailboxIndex: Sendable, Equatable {
         }
     }
 
+    /// Whether the new-thread draft's row shows in `mailbox`: wherever the
+    /// thread it starts will be once sent. So All Mail, the user's own
+    /// mailbox, and the recipient's once To names one, as `filter` allows
+    /// (the user's own is Sent, the recipient's Received and Waiting); never
+    /// the Inbox (it will wait on the recipient) or Undelivered.
+    public func showsDraft(_ draft: NewThreadDraft, in mailbox: Mailbox, filter: ParticipantFilter = .all) -> Bool {
+        guard case let .agent(name) = mailbox else { return mailbox == .allMail }
+        let to = Formatting.isValidName(draft.recipient) && draft.recipient != me ? draft.recipient : nil
+        let thread = ThreadSummary(id: "", subject: draft.rowTitle, from: me, owner: to,
+                                   participants: [me] + (to.map { [$0] } ?? []))
+        return thread.participants.contains(name) && filter.includes(thread, for: name)
+    }
+
     /// How many threads `filter` leaves in participant `name`'s mailbox.
     /// `.waiting` equals the participant's sidebar badge.
     public func count(_ filter: ParticipantFilter, for name: String) -> Int {

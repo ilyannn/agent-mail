@@ -3,9 +3,10 @@
 // scroll position survive live refreshes and re-sorting. Rows show the
 // thread's flow, subject, age, an unread dot and a state icon; visible rows
 // are refreshed in place after each snapshot. The new-thread draft, while
-// there is one, is a row pinned at the top of every mailbox. Above the
-// list, a participant's mailbox has a scope bar: All, Sent, Received,
-// Waiting (the participant filter).
+// there is one, is a row pinned at the top of the mailboxes its thread will
+// be in once sent: All Mail, mine, and the recipient's. Above the list, a
+// participant's mailbox has a scope bar: All, Sent, Received, Waiting (the
+// participant filter).
 import AgentMailKit
 import AppKit
 import Observation
@@ -189,7 +190,7 @@ final class ThreadListViewController: NSViewController, NSTableViewDelegate, NSM
         let anchor = resorted ? selectedRowOffset() : nil
         var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
         snapshot.appendSections([0])
-        snapshot.appendItems((store.newDraft == nil ? [] : [Self.draftRow]) + ids)
+        snapshot.appendItems((store.showsDraftRow ? [Self.draftRow] : []) + ids)
         applying = true
         defer { applying = false }
         let animate = !resorted && (view.window?.isVisible ?? false) && dataSource.snapshot().numberOfItems > 0

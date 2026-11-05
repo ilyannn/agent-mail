@@ -113,6 +113,27 @@ import Testing
         #expect(say(nil) == "Forwarding the thread, after your note")
     }
 
+    @Test func theDraftShowsWhereItsThreadWillBe() {
+        let index = MailboxIndex(status: MailStatus(now: .now, me: "user", threads: []))
+        func shown(_ draft: NewThreadDraft, filter: ParticipantFilter = .all) -> [String] {
+            let mailboxes: [Mailbox] = [.inbox, .undelivered, .allMail, .agent("user"), .agent("infra"), .agent("docs")]
+            return mailboxes.filter { index.showsDraft(draft, in: $0, filter: filter) }.map(\.title)
+        }
+        var d = NewThreadDraft()
+        #expect(shown(d) == ["All Mail", "user"], "no recipient yet: mine and All Mail")
+        d.to = " infra "
+        #expect(shown(d) == ["All Mail", "user", "infra"], "and the recipient's")
+        #expect(shown(d, filter: .sent) == ["All Mail", "user"], "I start it")
+        #expect(shown(d, filter: .received) == ["All Mail", "infra"])
+        #expect(shown(d, filter: .waiting) == ["All Mail", "infra"], "it will wait on infra, not on me")
+        d.to = "in fra"
+        #expect(shown(d) == ["All Mail", "user"], "not a name")
+        d.to = "user"
+        #expect(shown(d) == ["All Mail", "user"], "not to myself")
+        let forward = NewThreadDraft(to: "docs", forward: ForwardSource(threadID: "t"))
+        #expect(shown(forward) == ["All Mail", "user", "docs"], "a forward too")
+    }
+
     @Test func recipientsAreValidNamesOtherThanMe() {
         #expect(Formatting.isValidRecipient("infra", me: "user"))
         #expect(!Formatting.isValidRecipient("user", me: "user"))
