@@ -261,6 +261,31 @@ import Testing
         }
     }
 
+    @Test func aParticipantsMenuStartsANewMessageToIt() async throws {
+        try await withStore { store in
+            let sidebar = SidebarViewController(store: store)
+            let thread = ThreadViewController(store: store)
+            sidebar.onNewMessage = { thread.newMessage(to: $0) }
+            let window = show(thread)
+            defer { window.close() }
+            let items = sidebar.menuItems(forParticipant: "infra")
+            #expect(items.map(\.title) == ["New Message to infra", "", "Copy Name"])
+            let compose = try #require(items.first)
+            #expect(NSApp.sendAction(try #require(compose.action), to: compose.target, from: compose))
+            #expect(store.isShowingDraft)
+            #expect(store.newDraft?.to == "infra")
+            #expect(state(thread, "mode") == "newThread to=\"infra\" items=[\"infra\", \"website\"]")
+            #expect(state(thread, "draftHeader").contains("info=\"New thread to infra\""))
+
+            // My own row: a new message, to nobody yet.
+            store.discardDraft()
+            let mine = try #require(sidebar.menuItems(forParticipant: "user").first)
+            #expect(mine.title == "New Message")
+            #expect(NSApp.sendAction(try #require(mine.action), to: mine.target, from: mine))
+            #expect(store.newDraft?.to == "")
+        }
+    }
+
     @Test func theReplyBoxIsInTheBodiesTypeAndFollowsTheZoom() async {
         await withStore { store in
             let thread = ThreadViewController(store: store)

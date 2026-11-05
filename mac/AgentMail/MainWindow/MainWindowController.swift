@@ -86,6 +86,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             self?.thread.closeThread()
         }
         list.onContextForward = { [weak self] id in self?.thread.forward(threadID: id) }
+        sidebar.onNewMessage = { [weak self] to in self?.thread.newMessage(to: to) }
         list.onContextDiscard = { [weak self] in
             self?.store.showDraft()
             self?.thread.discardDraft()

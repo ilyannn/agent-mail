@@ -2,7 +2,8 @@
 // and Participants (the user first, then every repo on duty or in a thread
 // with an on-duty dot; each counts the open threads waiting on it). Driven by
 // a diffable data source keyed by row identity; counts are refreshed in
-// place, never with reloadData().
+// place, never with reloadData(). A participant's context menu starts a new
+// message to it.
 import AgentMailKit
 import AppKit
 import Observation
@@ -12,12 +13,15 @@ enum SidebarRow: Hashable {
     case mailbox(Mailbox)
 }
 
-final class SidebarViewController: NSViewController, NSTableViewDelegate {
+final class SidebarViewController: NSViewController, NSTableViewDelegate, NSMenuDelegate {
     private let store: MailStore
     private let tableView = NSTableView()
     private var dataSource: NSTableViewDiffableDataSource<Int, SidebarRow>!
     private var applying = false
     private var observation: Task<Void, Never>?
+    /// New Message from a participant's menu: to that repo, or to nobody
+    /// yet from the user's own row.
+    var onNewMessage: (String?) -> Void = { _ in }
 
     init(store: MailStore) {
         self.store = store
@@ -36,6 +40,9 @@ final class SidebarViewController: NSViewController, NSTableViewDelegate {
         tableView.allowsEmptySelection = false
         tableView.delegate = self
         tableView.setAccessibilityLabel("Mailboxes and participants")
+        let menu = NSMenu()
+        menu.delegate = self
+        tableView.menu = menu
         let scroll = NSScrollView()
         scroll.documentView = tableView
         scroll.hasVerticalScroller = true
@@ -156,6 +163,42 @@ final class SidebarViewController: NSViewController, NSTableViewDelegate {
         guard !applying, case let .mailbox(mailbox)? = dataSource.itemIdentifier(forRow: tableView.selectedRow)
         else { return }
         store.mailbox = mailbox
+    }
+
+    // MARK: Context menu
+
+    /// Participants have a menu; mailboxes and headers don't.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let row = tableView.clickedRow
+        guard row >= 0, case let .mailbox(.agent(name))? = dataSource.itemIdentifier(forRow: row) else { return }
+        for item in menuItems(forParticipant: name) { menu.addItem(item) }
+    }
+
+    /// New Message to the participant (plain New Message on the user's own
+    /// row: not to myself), then Copy Name, for `agent-mail @NAME`.
+    func menuItems(forParticipant name: String) -> [NSMenuItem] {
+        func item(_ title: String, _ action: Selector) -> NSMenuItem {
+            let i = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            i.target = self
+            i.representedObject = name
+            return i
+        }
+        let isMe = name == store.index.me
+        return [item(isMe ? "New Message" : "New Message to \(name)", #selector(contextNewMessage(_:))),
+                .separator(),
+                item("Copy Name", #selector(contextCopyName(_:)))]
+    }
+
+    @objc private func contextNewMessage(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        onNewMessage(name == store.index.me ? nil : name)
+    }
+
+    @objc private func contextCopyName(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(name, forType: .string)
     }
 }
 
