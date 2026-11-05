@@ -10,7 +10,7 @@
 // heading, "No messages yet" (or, for a forward of a closed thread, the
 // forwarded messages read-only), and the pane with To, Discard and Send.
 // ⌘↩ or ⇧⌘D sends. The text size (View menu, pinch) is a page zoom kept in
-// AppSettings.
+// AppSettings; the reply box, in the message bodies' type, follows it.
 import AgentMailKit
 import AppKit
 import Observation
@@ -161,6 +161,9 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
     /// draft's header follows so its subject sits where a thread's does.
     private static let pageWidth: CGFloat = 696
     private static let pagePadding = (top: CGFloat(22), side: CGFloat(24))
+    /// The message bodies' type at actual size (thread.css: `body`'s
+    /// font-size and line-height), which the reply box follows.
+    static let bodyType = (size: CGFloat(17), lineHeight: CGFloat(1.6))
 
     /// The web view, and over it the draft's header (subject, what goes
     /// along) and "No messages yet", shown in draft mode only.
@@ -216,7 +219,14 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
             noMessages.centerYAnchor.constraint(equalTo: below.centerYAnchor, constant: -20),
             noMessages.leadingAnchor.constraint(greaterThanOrEqualTo: topPane.leadingAnchor, constant: 16),
         ])
+        applyZoom()
+    }
+
+    /// The native views that follow the page's zoom: the draft's header and
+    /// the reply box.
+    private func applyZoom() {
         applyHeaderZoom()
+        applyEditorZoom()
     }
 
     /// The draft's header at the page's zoom, so it lines up with the
@@ -233,6 +243,25 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
         headerMaxWidth.constant = Self.pageWidth * z
         headerFill.constant = -2 * Self.pagePadding.side * z
         headerInset.constant = Self.pagePadding.side * z
+    }
+
+    /// The reply box in the type of the message bodies at the page's zoom:
+    /// the system font at their size, lines as far apart as theirs.
+    private func applyEditorZoom() {
+        let font = NSFont.systemFont(ofSize: Self.bodyType.size * CGFloat(webView.pageZoom))
+        let paragraph = NSMutableParagraphStyle()
+        // CSS spreads its line height around the glyphs; here the extra
+        // goes between lines, so the caret keeps the text's height.
+        paragraph.lineSpacing = max(0, Self.bodyType.lineHeight * font.pointSize
+            - (font.ascender - font.descender + font.leading))
+        replyView.font = font
+        replyView.defaultParagraphStyle = paragraph
+        replyView.typingAttributes[.font] = font
+        replyView.typingAttributes[.paragraphStyle] = paragraph
+        if let storage = replyView.textStorage, storage.length > 0 {
+            storage.addAttributes([.font: font, .paragraphStyle: paragraph],
+                                  range: NSRange(location: 0, length: storage.length))
+        }
     }
 
     /// To and status on top, the text, then the hint and the buttons:
@@ -609,10 +638,27 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
                 + "smartQuotes=\(replyView.isAutomaticQuoteSubstitutionEnabled) "
                 + "spelling=\(replyView.isContinuousSpellCheckingEnabled) undo=\(replyView.allowsUndo)",
             "thread.zoom: page=\(webView.pageZoom) setting=\(store.settings.textZoom)",
+            "thread.replyFont: \(replyFontDescription)",
             "thread.expanded: \(expandedFiles[rendered?.id ?? ""].map { $0.sorted() } ?? [])",
             "thread.schemeLog: \(schemeHandler.log.suffix(12))",
             "thread.opened: \(debugOpened)",
         ]
+    }
+
+    /// The reply box's type: its text's font and line spacing at the start
+    /// and end ("same" when they agree), or when empty what typing gets.
+    private var replyFontDescription: String {
+        func describe(_ attrs: [NSAttributedString.Key: Any]) -> String {
+            let font = attrs[.font] as? NSFont
+            let spacing = (attrs[.paragraphStyle] as? NSParagraphStyle)?.lineSpacing ?? 0
+            return "\(font?.familyName ?? "?") \(font?.pointSize ?? 0) lineSpacing=\((spacing * 10).rounded() / 10)"
+        }
+        guard let storage = replyView.textStorage, storage.length > 0 else {
+            return describe(replyView.typingAttributes) + " (typing)"
+        }
+        let first = describe(storage.attributes(at: 0, effectiveRange: nil))
+        let last = describe(storage.attributes(at: storage.length - 1, effectiveRange: nil))
+        return first + (first == last ? "" : ", last \(last)")
     }
 
     /// The thread's web view, for the debug hooks' scripts and clicks.
@@ -788,7 +834,7 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
         let z = TextZoom.clamp(zoom)
         store.settings.textZoom = z
         webView.pageZoom = z
-        applyHeaderZoom()
+        applyZoom()
     }
 
     func makeTextBigger() { setTextZoom(TextZoom.bigger(than: textZoom)) }
@@ -800,7 +846,7 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
         let z = TextZoom.clamp((pinchZoom ?? webView.pageZoom) * (1 + step))
         pinchZoom = z
         webView.pageZoom = z
-        applyHeaderZoom()
+        applyZoom()
         if ended {
             pinchZoom = nil
             setTextZoom(z)

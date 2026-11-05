@@ -261,6 +261,39 @@ import Testing
         }
     }
 
+    @Test func theReplyBoxIsInTheBodiesTypeAndFollowsTheZoom() async {
+        await withStore { store in
+            let thread = ThreadViewController(store: store)
+            let window = show(thread)
+            defer { window.close() }
+            thread.setTextZoom(1)
+            let system = NSFont.systemFont(ofSize: 17).familyName ?? "?"
+            #expect(thread.replyView.font == NSFont.systemFont(ofSize: 17), "thread.css: body at 17px")
+            #expect(state(thread, "replyFont").hasPrefix("\(system) 17.0 lineSpacing="))
+            #expect(state(thread, "replyFont").hasSuffix("(typing)"))
+            let spacing = (thread.replyView.defaultParagraphStyle?.lineSpacing ?? 0)
+            #expect(spacing > 4 && spacing < 10, "lines 1.6 × 17pt apart")
+
+            thread.replyView.string = "Hello\nthere"
+            thread.makeTextBigger()
+            #expect(thread.textZoom == 1.1)
+            thread.setTextZoom(1.5)
+            #expect(state(thread, "replyFont").hasPrefix("\(system) 25.5 "), "all of the text, scaled with the page")
+            let style = thread.replyView.textStorage?.attribute(.paragraphStyle, at: 0, effectiveRange: nil)
+            let bigger = (style as? NSParagraphStyle)?.lineSpacing ?? 0
+            #expect(bigger > spacing * 1.3 && bigger < spacing * 1.7)
+            thread.replyView.setSelectedRange(NSRange(location: 11, length: 0))
+            thread.replyView.insertText("!", replacementRange: thread.replyView.selectedRange())
+            #expect(!state(thread, "replyFont").contains("last"), "typed text too")
+
+            // Another thread's text, set by the selection, takes the zoom too.
+            thread.replyView.string = "Other"
+            #expect(state(thread, "replyFont").hasPrefix("\(system) 25.5 "))
+            thread.makeTextActualSize()
+            #expect(thread.replyView.font?.pointSize == 17)
+        }
+    }
+
     /// One line of the thread view's debug state, without its label.
     func state(_ thread: ThreadViewController, _ key: String) -> String {
         let prefix = "thread.\(key): "
