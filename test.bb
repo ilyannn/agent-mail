@@ -46,7 +46,10 @@
   "Starts agent-mail as `who` (nil = detect from cwd) in `dir` without waiting;
    deref the result for {:exit :out :err}."
   [{:keys [dir in] :as o} & args]
-  (apply p/process {:out :string :err :string :in (or in "") :dir (or dir (str *store*)) :extra-env (env-for o)}
+  (apply p/process (cond-> {:out :string :err :string :dir (or dir (str *store*)) :extra-env (env-for o)}
+                     ;; :open leaves stdin a pipe nobody writes to or closes, as an
+                     ;; agent's shell does; anything else is the whole of stdin.
+                     (not= in :open) (assoc :in (or in "")))
          launcher args))
 
 (defn am
@@ -806,6 +809,17 @@
       (let [id (out {:who "a"} "@b" "q")]
         (is (= id (out {:who "b" :in "answer\nover two lines\n"} "reply" id)))
         (is (= "answer\nover two lines" (:body (last (:msgs (thread-json id))))))))
+    (testing "close with no text takes a note from stdin but never waits for one"
+      (let [id (out {:who "a"} "@b" "done?")
+            proc (start {:who "b" :in :open} "close" id)]
+        (is (.waitFor (:proc proc) 10 java.util.concurrent.TimeUnit/SECONDS)
+            "an open, empty stdin is not read")
+        (when (.isAlive (:proc proc)) (.destroyForcibly (:proc proc)))
+        (is (= id (str/trim (:out @proc))))
+        (is (= "Closed." (:body (last (:msgs (thread-json id)))))))
+      (let [id (out {:who "a"} "@b" "done?")]
+        (is (= id (out {:who "b" :in "All done.\n"} "close" id)))
+        (is (= "All done." (:body (last (:msgs (thread-json id))))) "a pipe is the note")))
     (testing "text on the command line plus a file on stdin: the text leads, the file follows"
       (with-dir [d]
         (let [f (fs/file d "body.md")

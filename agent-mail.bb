@@ -635,7 +635,9 @@
     (System/exit 0))
   (let [me (caller opts)
         id (if (first args) (resolve-id (first args)) (pick-thread me))
-        body (body-from (rest args))
+        ;; close's note is optional, so with no text it takes what stands ready
+        ;; on stdin and never waits: an agent's shell leaves stdin open and empty.
+        body (if (and close? (empty? (rest args))) (stdin-content) (body-from (rest args)))
         body (if (and close? (str/blank? body)) "Closed." body)
         _ (when (str/blank? body) (fail "empty body"))
         _ (check-attachments! (:attach opts))
@@ -1162,7 +1164,8 @@
   agent-mail reply ID [--edit]                no text on a terminal: what's new opens quoted in
                                               your editor; what you write (inline or at the end)
                                               is sent when you close it
-  agent-mail close ID [text…]                 marks the thread done
+  agent-mail close ID [text…] [< note.md]     marks the thread done; the note is optional and
+                                              nothing is waited for on stdin
   agent-mail forward ID --to NAME [--msg N] [--subject S] [--attach FILE]… [text…] [< note.md]
                                               new thread to NAME: your note (optional), then
                                               the whole thread, or only its message N (a
