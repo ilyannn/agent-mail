@@ -6,7 +6,8 @@
 // the thread's attachment directory through the agent-mail-file scheme
 // (ThreadLinks.swift), and `![](files/x.png)` is shown inline; other images
 // stay links (the page loads nothing from the network), and local paths stay
-// text with the path as a tooltip. Smart punctuation is off: swift-markdown
+// text with the path as a tooltip. A bare http(s) URL in text is a link too
+// (see bareURLs), since agents rarely write [text](url). Smart punctuation is off: swift-markdown
 // turns `"` and `--` into curly quotes and dashes by default, which misquotes
 // commands. A long body can also be rendered folded: the first and last few
 // lines with the middle in a <details> (see renderFolded).
@@ -130,6 +131,59 @@ public enum MarkdownHTML {
         return url.absoluteString
     }
 
+    /// The text cut into plain runs and bare http(s) URLs (the Bool), the way
+    /// GitHub autolinks them: a URL runs to whitespace or `<`, then loses
+    /// trailing sentence punctuation and any closing parenthesis or bracket it
+    /// didn't open, so "(see https://x.example/a)." links only the address.
+    static func bareURLs(_ text: String) -> [(String, Bool)] {
+        var parts = [(String, Bool)]()
+        var rest = Substring(text)
+        while let start = rest.range(of: "http", options: .caseInsensitive) {
+            let candidate = rest[start.lowerBound...]
+            let lower = candidate.prefix(8).lowercased()
+            let schemeEnd: Int? = lower.hasPrefix("https://") ? 8 : lower.hasPrefix("http://") ? 7 : nil
+            let boundary = start.lowerBound == rest.startIndex
+                ? (parts.last.map { !($0.0.last?.isLetter ?? false) } ?? true)
+                : !rest[rest.index(before: start.lowerBound)].isLetter
+            guard let schemeEnd, boundary else {
+                let next = rest.index(after: start.lowerBound)
+                append(&parts, String(rest[..<next]))
+                rest = rest[next...]
+                continue
+            }
+            var url = candidate.prefix { !$0.isWhitespace && $0 != "<" }
+            while let last = url.last {
+                if ".,;:!?'\"*_~".contains(last) {
+                    url = url.dropLast()
+                } else if last == ")", url.filter({ $0 == ")" }).count > url.filter({ $0 == "(" }).count {
+                    url = url.dropLast()
+                } else if last == "]", url.filter({ $0 == "]" }).count > url.filter({ $0 == "[" }).count {
+                    url = url.dropLast()
+                } else {
+                    break
+                }
+            }
+            append(&parts, String(rest[..<start.lowerBound]))
+            if url.count > schemeEnd {
+                parts.append((String(url), true))
+            } else {
+                append(&parts, String(url))
+            }
+            rest = rest[url.endIndex...]
+        }
+        append(&parts, String(rest))
+        return parts
+    }
+
+    private static func append(_ parts: inout [(String, Bool)], _ text: String) {
+        guard !text.isEmpty else { return }
+        if let last = parts.last, !last.1 {
+            parts[parts.count - 1].0 += text
+        } else {
+            parts.append((text, false))
+        }
+    }
+
     /// A path on this Mac (`/x`, `~/x`, `file:`): not a link, shown as text.
     static func isLocalPath(_ destination: String) -> Bool {
         let d = destination.trimmingCharacters(in: .whitespaces)
@@ -219,6 +273,8 @@ private struct SafeHTMLWalker: MarkupWalker {
     private var alignments: [Table.ColumnAlignment?] = []
     private var column = 0
     private var inHead = false
+    /// Inside a link or image: its text is never linked again.
+    private var inLink = 0
 
     init(thread: String?) { self.thread = thread }
 
@@ -334,7 +390,16 @@ private struct SafeHTMLWalker: MarkupWalker {
 
     // Inlines
 
-    mutating func visitText(_ t: Text) { result += esc(t.string) }
+    mutating func visitText(_ t: Text) {
+        guard inLink == 0 else { result += esc(t.string); return }
+        for (text, isURL) in MarkdownHTML.bareURLs(t.string) {
+            if isURL, let dest = MarkdownHTML.safeDestination(text, thread: nil) {
+                result += "<a href=\"\(esc(dest))\">\(esc(text))</a>"
+            } else {
+                result += esc(text)
+            }
+        }
+    }
     mutating func visitSoftBreak(_ b: SoftBreak) { result += "\n" }
     mutating func visitLineBreak(_ b: LineBreak) { result += "<br>\n" }
     mutating func visitInlineCode(_ c: InlineCode) { result += "<code>\(esc(c.code))</code>" }
@@ -346,6 +411,8 @@ private struct SafeHTMLWalker: MarkupWalker {
 
     mutating func visitLink(_ link: Link) {
         let raw = link.destination ?? ""
+        inLink += 1
+        defer { inLink -= 1 }
         guard let dest = MarkdownHTML.safeDestination(raw, thread: thread) else {
             if MarkdownHTML.isLocalPath(raw) {
                 result += "<span class=\"local-path\" title=\"\(esc(raw))\">"

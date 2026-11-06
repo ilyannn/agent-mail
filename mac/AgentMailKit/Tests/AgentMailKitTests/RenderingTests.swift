@@ -47,6 +47,34 @@ import Testing
         #expect(html.contains("<a href=\"https://example.org\">https://example.org</a>"))
     }
 
+    @Test func bareURLsAreLinks() {
+        // Agents write URLs bare more often than as [text](url).
+        let html = MarkdownHTML.render("PR is open: https://example.com/o/r/pull/1 (two commits).")
+        #expect(html == "<p>PR is open: <a href=\"https://example.com/o/r/pull/1\">https://example.com/o/r/pull/1</a>"
+            + " (two commits).</p>\n")
+        func link(_ s: String) -> String? {
+            let h = MarkdownHTML.render(s)
+            guard let a = h.range(of: "<a href=\""), let b = h.range(of: "\">", range: a.upperBound..<h.endIndex)
+            else { return nil }
+            return String(h[a.upperBound..<b.lowerBound])
+        }
+        // Sentence punctuation after a URL is not part of it, balanced parentheses are.
+        #expect(link("See https://example.com/a.") == "https://example.com/a")
+        #expect(link("Done (https://example.com/b), thanks!") == "https://example.com/b")
+        #expect(link("Read https://en.example.org/wiki/Foo_(bar)?") == "https://en.example.org/wiki/Foo_(bar)")
+        #expect(link("**https://example.com/c**") == "https://example.com/c")
+        // Query strings are escaped; `<` ends the URL.
+        #expect(link("Try http://example.com/s?q=1&r=2") == "http://example.com/s?q=1&amp;r=2")
+        #expect(MarkdownHTML.render("x https://e.example/<b>").contains("<a href=\"https://e.example/\">"))
+        // Only http(s); never inside code or inside a link that already has a target.
+        #expect(link("ftp://example.com/x and javascript:alert(1)") == nil)
+        #expect(link("`https://example.com/code`") == nil)
+        #expect(link("```\nhttps://example.com/block\n```") == nil)
+        let named = MarkdownHTML.render("[https://a.example](https://b.example)")
+        #expect(named == "<p><a href=\"https://b.example\">https://a.example</a></p>\n")
+        #expect(link("https://") == nil)
+    }
+
     @Test func attachmentsCannotEscapeTheirDirectory() {
         #expect(MarkdownHTML.safeDestination("files/../../etc/passwd", thread: thread) == nil)
         #expect(MarkdownHTML.safeDestination("files/..%2F..%2Fetc%2Fpasswd", thread: thread) == nil)
