@@ -151,6 +151,14 @@
   (core/unread (:msgs th) who (get (seen-map who) (:id th))))
 
 (defn open-for [who] (filter #(and (= who (:owner %)) (= "open" (:status %))) (all-threads)))
+(defn news-for
+  "Closed threads with news for `who` (see core/closed-news?): a reply closed
+   straight after it was sent is never `who`'s turn, so open-for misses it."
+  [who]
+  (let [seen (seen-map who)]
+    (filter #(core/closed-news? % who (get seen (:id %))) (all-threads))))
+(defn mail-for "What waits on `who`: open threads whose turn it is, then closed ones with news."
+  [who] (concat (open-for who) (news-for who)))
 
 (defn pick-thread
   "No thread given: let the user choose. Candidates are the open threads whose
@@ -581,12 +589,16 @@
 (defn body-from
   "The message body: the command-line text, then whatever stdin holds after a
    blank line, so `@NAME \"subject\" < body.md` reads as subject plus body;
-   with no text, all of stdin (asking for it on a terminal)."
+   with no text, all of stdin (asking for it on a terminal). A lone `-` means
+   \"the body is on stdin\": what stands ready there, never waited for."
   [args]
-  (if (seq args)
+  (cond
+    (= ["-"] (vec args)) (str (stdin-content))
+    (seq args)
     (let [text (str/join " " args)
           more (stdin-content)]
       (if (str/blank? more) text (str text "\n\n" (str/trim more))))
+    :else
     (do (when (System/console)
           (binding [*out* *err*] (println "agent-mail: reading the body from stdin, end with Ctrl-D")))
         (slurp *in*))))
@@ -771,7 +783,7 @@
 (defn cmd-list [opts]
   (ensure-numbers!)
   (let [me (caller opts)
-        ths (if (:all opts) (all-threads) (open-for me))
+        ths (if (:all opts) (all-threads) (mail-for me))
         ths (map #(assoc % :unread (count (unread % me))) (sort-by :updated ths))]
     (if (:json opts)
       (println (json/generate-string (map core/summary ths) {:pretty true}))
@@ -860,7 +872,7 @@
       (let [live (session-name)
             session (or live given fallback)
             mismatch? (boolean (and live given (not= live given)))
-            pending (open-for me)
+            pending (mail-for me)
             mail? (boolean (seq pending))
             {:keys [fresh] :as next-state} (core/announce announced pending)]
         (when (and sock (claude-pid) (not (pid-alive? (claude-pid))))
@@ -1150,7 +1162,11 @@
                  (println (format "agent-mail: %d thread%s waiting on %s: %s. Read with `agent-mail read <number>`."
                                   (count ths) (if (= 1 (count ths)) "" "s") who
                                   (str/join "; " (map #(format "#%d %s \"%s\" from %s" (:number %) (:id %) (:subject %) (:last-from %)) ths)))))]
-      (when-let [m (seq (open-for me))] (line me m)))
+      (when-let [m (seq (open-for me))] (line me m))
+      (when-let [m (seq (news-for me))]
+        (println (format "agent-mail: %d closed thread%s with news for %s, not read yet: %s. Read with `agent-mail read <number>`; nothing to answer."
+                         (count m) (if (= 1 (count m)) "" "s") me
+                         (str/join "; " (map #(format "#%d %s \"%s\" closed by %s" (:number %) (:id %) (:subject %) (:last-from %)) m))))))
     (catch Throwable _ nil))
   (System/exit 0))
 
@@ -1171,12 +1187,14 @@
                                               the whole thread, or only its message N (a
                                               position or file name), with its attachments
   (open, reply, read and close without ID offer a picker: fzf when installed)
-  agent-mail list [--all] [--json]            open threads whose turn is mine
+  agent-mail list [--all] [--json]            open threads whose turn is mine, then closed
+                                              ones with news for me: a reply or a close I
+                                              haven't read (read it and it drops off)
   agent-mail read ID [--json]                 the whole thread; ID is the number from `list`
                                               (7 or #7), the full id, or a unique fragment
   agent-mail open ID                          open what's new to you in your Markdown app
   agent-mail wait [--session NAME] [--timeout S] [--interval S] [--once]
-                                              waits for threads whose turn is mine. In a Claude
+                                              waits for what `list` shows. In a Claude
                                               Code session it keeps running and posts each one
                                               into the session, again only on a newer message;
                                               elsewhere, with --once, or if a post fails, it
