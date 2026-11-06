@@ -206,6 +206,24 @@
     (is (= ["001.md"] (map :file (core/unread msgs "a" nil))) "own messages are never unread")
     (is (= 3 (count (core/unread msgs "c" nil))) "a bystander has it all unread")))
 
+(deftest closed-news-reaches-whoever-missed-it
+  ;; "a" asks "b" (meta :from "a"); wait announces only open threads, so a
+  ;; reply closed before its next poll needs to be news of its own.
+  (let [meta {:subject "S" :from "a" :created "2026-10-31T10:00:00.000Z" :number "1"}
+        th (fn [& msgs] (core/thread-state meta "id" msgs))
+        answered-and-closed (th (msg 0 "a" "b") (msg 1 "b" "a") (msg 2 "b" "a" :status "done"))]
+    (is (core/closed-news? answered-and-closed "a" nil) "the reply and the close came together: news for the asker")
+    (is (core/closed-news? answered-and-closed "a" "000.md"))
+    (is (not (core/closed-news? answered-and-closed "a" "002.md")) "read: no longer news")
+    (is (not (core/closed-news? (th (msg 0 "a" "b") (msg 1 "b" "a")) "a" nil)) "still open: that is ordinary mail")
+    (is (core/closed-news? (th (msg 0 "a" "b") (msg 1 "b" "a" :status "done")) "a" nil)
+        "closed by the other side, with or without a note, is news to whoever started it")
+    (is (not (core/closed-news? (th (msg 0 "a" "b") (msg 1 "b" "a") (msg 2 "a" "b" :status "done")) "b" "000.md"))
+        "the asker's close of an answered thread is not news to the answerer")
+    (is (core/closed-news? (th (msg 0 "a" "b") (msg 1 "b" "a") (msg 2 "a" "b") (msg 3 "a" "b" :status "done")) "b" "001.md")
+        "but a reply to them before it is")
+    (is (not (core/closed-news? answered-and-closed "c" nil)) "a bystander is never told")))
+
 (deftest resolve-id-rules
   (let [ids ["2026-10-30-vault" "2026-10-31-vault-2" "2026-10-31-dns"]
         number-of {"2026-10-30-vault" 1 "2026-10-31-vault-2" 2 "2026-10-31-dns" 3}
@@ -454,7 +472,12 @@
           "a thread without a number is named by its id")
       (is (str/includes? (core/announcement "infra" [(assoc t1 :last-from "user")])
                          "from user (the user themself, writing by mail; not another agent or session) (t1, message 1)")
-          "mail from the user says so: Claude Code frames every posted message as another session's"))))
+          "mail from the user says so: Claude Code frames every posted message as another session's"))
+    (testing "a closed thread with news says so, and that it needs reading, not an answer"
+      (let [line (first (str/split-lines (core/announcement "infra" [(assoc t1 :status "done")])))]
+        (is (str/starts-with? line "agent-mail: closed, with news for infra: #1 \"About t1\" closed by web (t1, message 1)."))
+        (is (str/includes? line "nothing to answer"))
+        (is (not (str/includes? line "answer before moving on")))))))
 
 ;; ================================================================ unit: drafts
 
@@ -579,6 +602,30 @@
         (is (empty? (ids "infra")))
         (is (str/includes? (out {} "list" "--all") "done"))))))
 
+(deftest a-reply-closed-at-once-still-reaches-the-asker
+  (with-store
+    (let [id (out {:who "website"} "@infra" "Which TTL?")]
+      (out {:who "infra"} "reply" id "300.")
+      (out {:who "infra"} "close" id)
+      (testing "list, wait and the hook all show it to the asker, as closed"
+        (is (= [id] (ids "website")))
+        (is (str/includes? (out {:who "website"} "list") " done "))
+        (is (= [id] (str/split-lines (out {:who "website"} "wait" "--once" "--timeout" "5"))))
+        (is (str/includes? (out {:who "website"} "hook")
+                           (str "1 closed thread with news for website, not read yet: #1 " id " \"Which TTL?\" closed by infra"))))
+      (testing "nothing for the side that closed it"
+        (is (empty? (ids "infra"))))
+      (testing "reading it clears it"
+        (out {:who "website"} "read" id)
+        (is (empty? (ids "website")))
+        (is (str/blank? (out {:who "website"} "hook")))))
+    (testing "the asker's own close is no news to the answerer"
+      (let [id (out {:who "website"} "@infra" "Another")]
+        (out {:who "infra"} "reply" id "Done.")
+        (out {:who "website"} "close" id "Thanks.")
+        (is (empty? (ids "infra")))
+        (is (empty? (ids "website")))))))
+
 (deftest long-thread-turn-passing
   (with-store
     (let [id (out {:who "website"} "@infra" "Need a DNS record")
@@ -608,8 +655,10 @@
           (is (= "infra" (:owner th)) "the closing note goes to infra")
           (is (= "done" (:status (last (:msgs th)))))
           (is (= "Thanks, all set." (:body (last (:msgs th))))))
-        (is (empty? (ids "infra")))
+        (is (= [id] (ids "infra")) "infra never read \"300 is fine.\", its answer: news, though closed")
         (is (empty? (ids "website")))
+        (out {:who "infra"} "read" id)
+        (is (empty? (ids "infra")))
         (is (str/includes? (out {} "read" id) "· done"))))))
 
 (deftest redirect-to-a-third-party
@@ -629,7 +678,8 @@
           (is (= "done" (:status th)))
           (is (= "user" (:to (last (:msgs th)))))
           (is (= "billing" (:from (last (:msgs th))))))
-        (is (every? empty? (map ids ["user" "infra" "website" "billing"])))))))
+        (is (= [id] (ids "infra")) "infra never read the user's OK: news, though closed")
+        (is (every? empty? (map ids ["user" "website" "billing"])))))))
 
 (deftest same-millisecond-messages-keep-their-order
   (with-store

@@ -125,6 +125,17 @@
   [msgs who mark]
   (filter #(and (not= who (:from %)) (or (nil? mark) (pos? (compare (:file %) mark)))) msgs))
 
+(defn closed-news?
+  "A closed thread with news `who` would otherwise never hear of (`mark` is the
+   last file they read): unread, addressed to them, a reply, or the close of a
+   thread they started. `wait` announces a thread only while it is open and
+   `who`'s turn, so a reply closed before its next poll went unannounced. The
+   asker's own close of an answered thread is not news to the answerer."
+  [th who mark]
+  (and (= "done" (:status th))
+       (boolean (some #(and (= who (:to %)) (or (nil? (:status %)) (= who (:from th))))
+                      (unread (:msgs th) who mark)))))
+
 (defn other-party
   "Whom a reply from `me` goes to: the last writer that isn't me, else the owner."
   [th me]
@@ -504,7 +515,8 @@
 
 (defn announcement
   "The text `wait` posts into its own session for `threads`, which are now
-   `me`'s turn: one line per thread, then where it comes from. Each line names
+   `me`'s turn, or closed with news for `me` (see closed-news?): one line per
+   thread, then where it comes from. Each line names
    the newest message's position, so a thread announced again never repeats
    the earlier text (Claude Code drops identical repeats arriving close together).
    Claude Code presents anything posted through the socket as coming from
@@ -513,11 +525,15 @@
   (str/join "\n"
             (concat
              (for [t threads :let [handle (or (:number t) (:id t))
-                                   from (:last-from t)]]
-               (str "agent-mail: new mail for " me ": #" handle " \"" (:subject t) "\" from " from
+                                   from (:last-from t)
+                                   closed? (= "done" (:status t))]]
+               (str "agent-mail: " (if closed? "closed, with news for " "new mail for ") me ": #" handle
+                    " \"" (:subject t) "\" " (if closed? "closed by " "from ") from
                     (if (= from "user") " (the user themself, writing by mail; not another agent or session)" "")
                     " (" (:id t) ", message " (count (:msgs t)) "). Read it with `agent-mail read " handle
-                    "` and answer before moving on."))
+                    (if closed?
+                      "`; there is nothing to answer in it. To follow up, start a new thread or `agent-mail forward` it."
+                      "` and answer before moving on.")))
              ["(Posted by this session's own `agent-mail wait`, which keeps running: no need to re-arm it.)"])))
 
 ;; ---------------------------------------------------------------- drafts

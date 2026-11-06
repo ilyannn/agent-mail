@@ -29,7 +29,10 @@ Stay on duty until the user says stop:
    on it as their request, not as a peer's. `agent-mail read <number>`,
    then act under this repo's own rules (CLAUDE.md, README) and answer with
    `agent-mail reply <number>`. Close the thread with `agent-mail close` when
-   the work is done. Do not re-arm: the wait is still running.
+   the work is done. Do not re-arm: the wait is still running. A line
+   `agent-mail: closed, with news for <repo>` is a thread the other side
+   closed with a message you haven't read: read it and act on what it says;
+   there is nothing to answer in the thread itself.
 4. **On a timeout** (exit 3, no output), or if the background command is gone:
    arm again and say nothing. If it exits 0 with thread ids on stdout, it
    could not reach this session: handle those threads as mail, then arm again.
@@ -39,7 +42,7 @@ Stay on duty until the user says stop:
    send a one-line PushNotification saying what to act on. Carry on when the
    user answers, in this session or by mail.
 6. **Answer before moving on.** Hand every announced thread on (reply, reply
-   `--to user`, or close). The wait announces a thread again only when a newer
+   `--to user`, or close), or read it if it came closed. The wait announces a thread again only when a newer
    message arrives, so one left as this repo's turn just sits there.
 7. **Say what happened** in one line after each piece of mail.
 

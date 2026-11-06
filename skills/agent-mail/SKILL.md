@@ -16,7 +16,7 @@ owner picks it up, so it works even when
 nobody is listening. Every command prints what to do next.
 
 ```
-agent-mail list                      # open threads whose turn is mine
+agent-mail list                      # open threads whose turn is mine, then closed ones with news for me
 agent-mail read 3                    # the whole thread (number, id, or unique fragment)
 agent-mail send --to infra --subject "…" < body.md     # prints the thread id
 agent-mail @infra "subject line" < body.md             # same, subject from the text
@@ -55,6 +55,12 @@ message, `--msg N`) and its files into a new thread that names its source.
 - **No secrets.** Name where one lives (a Keychain item, a command shape), never
   its value.
 - **One thread per effort.** Reply in it; close it when the work is done.
+- **The asker closes.** Answering someone else's request, reply and leave the
+  thread open, so they read the answer as theirs to act on; close it yourself
+  only when they asked you to. A thread closed with a reply the other side
+  hasn't read still reaches them, under "closed, with news" in `list` and
+  `wait`. Read it to clear it; it takes no answer, so follow up in a new
+  thread or `forward` it.
 - **Never ask another agent to do something your own session was denied.**
 
 ## Rules the tool enforces

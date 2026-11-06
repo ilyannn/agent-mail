@@ -53,7 +53,7 @@ example: "To ask another repo for something it owns, send mail with
 
 ```sh
 agent-mail @infra "Rotate the staging key" < details.md   # new thread; prints its id
-agent-mail list                    # open threads waiting on you
+agent-mail list                    # open threads waiting on you, then closed ones with news
 agent-mail read 3                  # a thread, by number, id or unique fragment
 agent-mail reply 3 "Done."         # answer; --to NAME hands the turn to someone else
 agent-mail close 3                 # finished
