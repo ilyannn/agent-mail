@@ -833,7 +833,16 @@
           (is (= "Given" (:subject (thread-json (out {:who "a" :in f} "send" "--to" "b" "--subject" "Given" "lead"))))
               "an explicit subject stays")
           (is (= "lead\n\nmore" (:body (last (:msgs (thread-json (do (out {:who "b" :in "more"} "reply" id "lead") id))))))
-              "a reply too"))))))
+              "a reply too"))))
+    (testing "a lone `-` means the body is on stdin, and is not part of it"
+      (let [id (out {:who "a" :in "Hello.\n"} "@b" "-")]
+        (is (= "Hello." (:body (first (:msgs (thread-json id)))))))
+      (let [id (out {:who "a"} "@b" "q")]
+        (out {:who "b" :in "Answer.\n"} "reply" id "-")
+        (is (= "Answer." (:body (last (:msgs (thread-json id))))))
+        (is (= "agent-mail: empty body" (err {:who "b" :in ""} "reply" id "-")) "nothing on stdin: refused, not \"-\"")
+        (out {:who "b" :in "Bye.\n"} "close" id "-")
+        (is (= "Bye." (:body (last (:msgs (thread-json id))))))))))
 
 (deftest caller-from-a-directory-with-a-space
   (with-store

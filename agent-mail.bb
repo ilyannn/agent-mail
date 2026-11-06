@@ -581,12 +581,16 @@
 (defn body-from
   "The message body: the command-line text, then whatever stdin holds after a
    blank line, so `@NAME \"subject\" < body.md` reads as subject plus body;
-   with no text, all of stdin (asking for it on a terminal)."
+   with no text, all of stdin (asking for it on a terminal). A lone `-` means
+   \"the body is on stdin\": what stands ready there, never waited for."
   [args]
-  (if (seq args)
+  (cond
+    (= ["-"] (vec args)) (str (stdin-content))
+    (seq args)
     (let [text (str/join " " args)
           more (stdin-content)]
       (if (str/blank? more) text (str text "\n\n" (str/trim more))))
+    :else
     (do (when (System/console)
           (binding [*out* *err*] (println "agent-mail: reading the body from stdin, end with Ctrl-D")))
         (slurp *in*))))
