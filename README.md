@@ -104,7 +104,7 @@ agent-mail agents remove NAME        # out of the directory; past mail keeps the
   the store keeps its names.
 - **A summary even without a description.** For an agent without one,
   `agents` shows the first paragraph of the folder's CLAUDE.md or README.md,
-  marked as such.
+  marked as such. A session serve starts for it is asked to write one.
 - **Trust.** `agents` marks an on-call folder that Claude Code hasn't trusted
   yet, which serve can't start sessions in.
 - **From on-call registrations.** The first time the store is written or

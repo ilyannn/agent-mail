@@ -765,20 +765,31 @@
        "agree with it by SendMessage which of you handles both. The one taking over writes in the other thread, "
        "which makes serve post that thread's later messages to it."))
 
+(defn describe-sentence
+  "What the first prompt asks of a session whose agent has no description
+   in the directory yet."
+  [agent]
+  (str agent " has no description in the agent directory yet: write one with `agent-mail agents describe " agent
+       " < about.md`, saying what this folder owns and what to ask it for."))
+
 (defn first-prompt
   "The first prompt of the session serve starts for thread `th`, now
    `agent`'s turn: what started it and for which thread, what to do, that
    later messages come into it and how it relates to the sessions of other
-   threads (related-sentence); then the also-line `also`."
-  [agent th also]
-  (let [n (or (:number th) (:id th))]
-    (str "agent-mail serve started this session for thread #" n " for " agent " from " (from-who (:last-from th))
-         ", \"" (:subject th) "\" (" (:id th) ", message " (count (:msgs th)) "). "
-         "Read it with `agent-mail read " n "` and act on it under this folder's own rules (CLAUDE.md). "
-         "Answer with `agent-mail reply " n "`; close it with `agent-mail close " n "` when the work is done. "
-         "Later messages in this thread are posted into this session. "
-         related-sentence "\n"
-         also)))
+   threads (related-sentence); with `describe?`, a request to describe the
+   agent (describe-sentence); then the also-line `also`."
+  ([agent th also] (first-prompt agent th also {}))
+  ([agent th also {:keys [describe?]}]
+   (let [n (or (:number th) (:id th))]
+     (str "agent-mail serve started this session for thread #" n " for " agent " from " (from-who (:last-from th))
+          ", \"" (:subject th) "\" (" (:id th) ", message " (count (:msgs th)) "). "
+          "Read it with `agent-mail read " n "` and act on it under this folder's own rules (CLAUDE.md). "
+          "Answer with `agent-mail reply " n "`; close it with `agent-mail close " n "` when the work is done. "
+          "Later messages in this thread are posted into this session. "
+          related-sentence
+          (when describe? (str " " (describe-sentence agent)))
+          "\n"
+          also))))
 
 (defn posted-text
   "What serve posts into the session holding thread `th` for `agent` (or
@@ -932,12 +943,14 @@
       [:resume t (or (:session-id k) sid) (posted-text agent th wrote? (also sid))
        (merge info {:name (:name k) :kind (:kind k) :warm-until warm})]
       :else
-      [:start agent t (first-prompt agent th (also nil))
+      [:start agent t (first-prompt agent th (also nil) {:describe? (false? (get-in oncall [agent :described]))})
        (assoc info :name (thread-session-name agent (or (:number th) t)))])))
 
 (defn serve-actions
   "What serve does this round, as data. `oncall` maps the agents on call to
-   {:dir}; `threads` are every thread; `memory` is serve's (see above);
+   {:dir :described}, :described false when the directory has no
+   description of the agent (the first prompt asks for one); `threads` are
+   every thread; `memory` is serve's (see above);
    `on-duty` the agents a listener's duty record covers, whose threads serve
    leaves to it (a wait still running code from before 9 Nov 2026, or a
    classic one); `live` the running sessions as agents-items gives them,

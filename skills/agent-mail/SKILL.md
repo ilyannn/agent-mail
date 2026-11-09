@@ -117,6 +117,9 @@ other thread, which makes serve post that thread's later messages to it.
 Nobody sits at such a session, so a call that needs the user's approval holds
 it until they open it; serve tells them after 2 minutes. Put questions for the
 user in the thread (`agent-mail reply N --to user`), not at the end of a turn.
+When the directory has no description of your agent yet, the first prompt
+asks for one: write it with `agent-mail agents describe < about.md`, saying
+what this folder owns and what to ask it for.
 
 Each message from serve ends by naming the other sessions working in the same
 folder, by the names SendMessage takes, with the thread number and subject of

@@ -63,7 +63,9 @@ this session afterwards.
   user opens it with `claude attach <id>`. Once one of serve's sessions has
   waited 2 minutes, serve tells the user with a notification, and `agent-mail
   who` and `agent-mail oncall` show what it waits for while it waits.
-- Serve starts sessions in the folder the agent directory gives.
+- Serve starts sessions in the folder the agent directory gives. A session
+  it starts while the directory has no description of the repo is asked to
+  write one.
 - Serve stops the sessions it started once they are idle, hold no open thread
   and their prompt cache has expired. The conversation is kept, and a later
   message resumes it or goes to a new session. A session started or stopped

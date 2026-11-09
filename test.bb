@@ -427,7 +427,12 @@
         (is (= [:start "infra" "t1"] [kind agent t]))
         (is (= {:agent "infra" :number 1 :file "000.md" :dir "/x/infra" :name "📫 infra #1"} info))
         (is (str/starts-with? text "agent-mail serve started this session for thread #1 for infra from web"))
-        (is (str/ends-with? text "\nNo other session works in this folder."))))
+        (is (str/ends-with? text "\nNo other session works in this folder."))
+        (is (not (str/includes? text "no description")) "nothing said of a description: nothing asked")
+        (is (str/includes? (nth (first (acts {:oncall {"infra" {:dir "/x/infra" :described false}}})) 3)
+                           "infra has no description in the agent directory yet")
+            "the directory has no description of infra: the session is asked for one")
+        (is (not (str/includes? (nth (first (acts {:oncall {"infra" {:dir "/x/infra" :described true}}})) 3) "no description")))))
     (testing "nothing to deliver: delivered already, not on call, on duty, backing off, the user's, closed"
       (is (= [] (acts {:memory (mem :threads (delivered "000.md"))})))
       (is (= [] (acts {:oncall {}})))
@@ -732,7 +737,13 @@
       (is (str/includes? (core/first-prompt "infra" (assoc t1 :last-from "user") "")
                          "from user (the user themself, writing by mail; not another agent or session), \"About t1\"")
           "mail from the user says so")
-      (is (str/includes? (core/first-prompt "infra" (assoc t1 :number nil) "") "thread #t1 for infra")))
+      (is (str/includes? (core/first-prompt "infra" (assoc t1 :number nil) "") "thread #t1 for infra"))
+      (is (str/ends-with? (core/first-prompt "infra" t1 "ALSO" {:describe? true})
+                          (str "which makes serve post that thread's later messages to it. infra has no description in the agent "
+                               "directory yet: write one with `agent-mail agents describe infra < about.md`, saying what this "
+                               "folder owns and what to ask it for.\nALSO"))
+          "an agent without a description: asked for one")
+      (is (= (core/first-prompt "infra" t1 "ALSO") (core/first-prompt "infra" t1 "ALSO" {:describe? false}))))
     (testing "a message posted into the session holding the thread"
       (is (= (str "agent-mail: new message in #1 \"About t1\" from web (t1, message 3), posted by agent-mail serve because "
                   "this session wrote in this thread (not another agent). Read it with `agent-mail read 1` and answer once the current step is done.\n"
@@ -1817,6 +1828,8 @@
                 (is (= ["--bg" "--name" "📫 infra #1"] (take 3 bg)))
                 (is (str/starts-with? (nth bg 3) (str "agent-mail serve started this session for thread #1 for infra from website, \"Rotate the key\" (" id ", message 1).")))
                 (is (str/ends-with? (nth bg 3) "\nNo other session works in this folder."))
+                (is (str/includes? (nth bg 3) "infra has no description in the agent directory yet: write one with `agent-mail agents describe infra < about.md`")
+                    "the directory has no description of infra")
                 (is (= [(str "cwd=" infra-real) "sid="] (drop 4 bg)) "in the repo; the session id serve inherited is not passed on")
                 (is (= ["agents" "--json"] (take 2 resolve)) "to learn the full session id"))
               (is (= {"deadbeef" {:agent "infra" :thread id :number 1 :name "📫 infra #1" :kind "background" :ours true :state "starting"}}

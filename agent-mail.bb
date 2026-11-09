@@ -492,10 +492,10 @@
 
 (defn oncall-agents
   "The agents serve delivers for: those on call in the directory, kind
-   claude, name -> {:dir}."
+   claude, name -> {:dir :described}."
   ([] (oncall-agents (directory)))
   ([d] (into (sorted-map) (for [[nm e] d :when (and (:oncall e) (= "claude" (:kind e)))]
-                            [nm {:dir (:dir e)}]))))
+                            [nm {:dir (:dir e) :described (boolean (:description e))}]))))
 
 ;; ---- what Claude Code says of a folder
 
