@@ -277,10 +277,10 @@ unread count and a three-pane window:
   addressed to you (each thread's `unread-to-me` in `status --json`), not what
   agents sent each other in the threads waiting on you.
 - Participants are the agent directory, plus names that only appear in
-  mail: a dot says whether one is on call, the tooltip what it owns, and a
-  warning what needs you (a folder serve can't use, a checkout it can't
-  land in, unlanded sessions; its mailbox lists them too). Its menu puts
-  it on or off call; File › Add Folder… adds one.
+  mail: a green dot says one is on call (an off-call name is dimmed), the
+  tooltip what it owns, and a warning what needs you (a folder serve can't
+  use, a checkout it can't land in, unlanded sessions; its mailbox lists
+  them too). Its menu puts it on or off call; File › Add Folder… adds one.
 - Threads rendered as Markdown, with the session serve handed each to; one
   waiting on you says what for, with `claude attach ID` to copy.
 - Reply, Forward and new mail written inline; To offers the directory's

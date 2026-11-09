@@ -1,13 +1,13 @@
 // The sidebar: a source list with Mailboxes (Inbox, Undelivered, All Mail)
 // and Participants (the user first, then every agent in the directory and
 // every other name in a thread; each counts the open threads waiting on it).
-// A participant's dot says who picks its mail up: green on duty, grey on
-// call, hollow otherwise; a warning symbol after its name says something
-// needs the user (a folder serve can't use), its tooltip what. Driven by a
-// diffable data source keyed by row identity; counts are refreshed in place,
-// never with reloadData(). A participant's context menu starts a new message
-// to it and puts a directory agent on or off call; every row's offers Add
-// Folder….
+// A participant's dot says who picks its mail up: green on duty or on call,
+// hollow with the name dimmed otherwise; a warning symbol after its name
+// says something needs the user (a folder serve can't use), its tooltip
+// what. Driven by a diffable data source keyed by row identity; counts are
+// refreshed in place, never with reloadData(). A participant's context menu
+// starts a new message to it and puts a directory agent on or off call;
+// every row's offers Add Folder….
 import AgentMailKit
 import AppKit
 import Observation
@@ -125,23 +125,33 @@ final class SidebarViewController: NSViewController, NSTableViewDelegate, NSMenu
                 let who = index.participant(name) ?? AgentInfo(name: name, isMe: name == index.me)
                 let notices = who.notices
                 cell.show(title: name, image: Self.icon(for: who), count: count, tip: who.tooltip,
-                          accessibility: who.accessibilityLabel,
+                          accessibility: who.accessibilityLabel, dimmed: Self.isDimmed(who),
                           warning: notices.isEmpty ? nil : notices.map(\.text).joined(separator: "\n"))
             }
         }
     }
 
-    /// A participant's dot: the user's own figure; green and filled on duty;
-    /// filled grey on call (serve starts a session when mail comes); hollow
-    /// when nothing picks its mail up.
+    /// A participant's dot: the user's own figure; green and filled on duty,
+    /// or on call while serve runs (it starts a session when mail comes);
+    /// a green ring on call while serve doesn't run; hollow grey when nothing
+    /// picks its mail up, whose name is dimmed too (isDimmed(_:)).
     static func icon(for who: AgentInfo) -> NSImage? {
         if who.isMe {
             return NSImage(systemSymbolName: "person.fill", accessibilityDescription: "You")?
                 .withSymbolConfiguration(.init(paletteColors: [.tertiaryLabelColor]))
         }
         if who.onDuty { return NSImage.dot(.systemGreen, label: "On duty") }
-        if who.onCall { return NSImage.dot(.secondaryLabelColor, label: "On call") }
+        if who.onCall {
+            return who.serveRunning ? NSImage.dot(.systemGreen, label: "On call")
+                : NSImage.dot(.systemGreen, filled: false, label: "On call, serve isn’t running")
+        }
         return NSImage.dot(.tertiaryLabelColor, filled: false, label: who.inDirectory ? "Off call" : "Not on duty")
+    }
+
+    /// Whether a participant's name is dimmed: nothing picks its mail up
+    /// (off call, or not in the directory); never the user's own.
+    static func isDimmed(_ who: AgentInfo) -> Bool {
+        !who.isMe && !who.onDuty && !who.onCall
     }
 
     private func symbol(_ name: String, _ label: String) -> NSImage? {
@@ -337,8 +347,10 @@ final class SidebarCell: NSTableCellView {
     /// `warning`: what needs the user, the warning symbol's tooltip; nil
     /// hides the symbol.
     func show(title text: String, image: NSImage? = nil, count n: Int = 0, tip: String? = nil,
-              accessibility: String? = nil, warning warningText: String? = nil) {
+              accessibility: String? = nil, dimmed: Bool = false, warning warningText: String? = nil) {
         title.stringValue = text
+        // Headers keep their own colour, set once in init.
+        if imageView != nil { title.textColor = dimmed ? .secondaryLabelColor : .labelColor }
         icon.image = image
         count.stringValue = n > 0 ? "\(n)" : ""
         toolTip = tip
@@ -351,7 +363,8 @@ final class SidebarCell: NSTableCellView {
     /// The icon's and the warning's descriptions, for the debug dump.
     var debugIcons: String {
         guard imageView != nil else { return "" }
-        var out = " | icon: \(icon.image?.accessibilityDescription ?? "-")"
+        var out = (title.textColor == .secondaryLabelColor ? " | dimmed" : "")
+            + " | icon: \(icon.image?.accessibilityDescription ?? "-")"
         if !warning.isHidden { out += " | warn: \(warning.toolTip?.replacingOccurrences(of: "\n", with: " / ") ?? "")" }
         return out
     }

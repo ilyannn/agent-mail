@@ -82,6 +82,23 @@ import Testing
         #expect(add.action == #selector(MailActions.addFolder(_:)))
     }
 
+    @Test func aParticipantsDotAndNameSayWhoPicksItsMailUp() {
+        func icon(_ who: AgentInfo) -> String? { SidebarViewController.icon(for: who)?.accessibilityDescription }
+        let onCall = AgentInfo(name: "infra", entry: DirectoryEntry(name: "infra"), directoryKnown: true, serveRunning: true)
+        #expect(icon(onCall) == "On call")
+        #expect(!SidebarViewController.isDimmed(onCall))
+        var noServe = onCall
+        noServe.serveRunning = false
+        #expect(icon(noServe) == "On call, serve isn’t running", "a green ring: nothing delivers until serve runs")
+        #expect(!SidebarViewController.isDimmed(noServe))
+        let off = AgentInfo(name: "notes", entry: DirectoryEntry(name: "notes", onCall: false), directoryKnown: true)
+        #expect(icon(off) == "Off call")
+        #expect(SidebarViewController.isDimmed(off))
+        #expect(icon(AgentInfo(name: "x", onDuty: true)) == "On duty")
+        #expect(!SidebarViewController.isDimmed(AgentInfo(name: "x", onDuty: true)))
+        #expect(!SidebarViewController.isDimmed(AgentInfo(name: "user", isMe: true)))
+    }
+
     @Test func theSidebarListsTheDirectory() async throws {
         try await withStore { store in
             store.debugShow(Self.directoryStatus)
@@ -98,10 +115,12 @@ import Testing
             #expect(docs.hasSuffix(" | icon: On call | warn: Claude Code hasn’t trusted /x/docs yet, so serve can’t "
                 + "start a session there: run `claude` in it once and accept the question."))
             #expect(docs.contains("| tip: docs: on call — serve starts a session for each thread / Owns the docs. / "))
-            #expect(rows.first { $0.hasPrefix("sidebar  notes") }?.hasSuffix(" | icon: Off call") == true)
+            #expect(rows.first { $0.hasPrefix("sidebar  notes") }?.hasSuffix(" | dimmed | icon: Off call") == true)
             #expect(rows.first { $0.hasPrefix("sidebar  website") }
                 == "sidebar  website, not on duty | tip: website: not in the agent directory / Nothing waiting on website"
-                + " | icon: Not on duty")
+                + " | dimmed | icon: Not on duty")
+            #expect(!rows.contains { $0.hasPrefix("sidebar  infra") && $0.contains("| dimmed") }, "on call: not dimmed")
+            #expect(!rows.contains { $0.hasPrefix("sidebar  user") && $0.contains("| dimmed") }, "never the user")
 
             #expect(sidebar.debugMenu(for: .agent("docs")) == ["New Message to docs", "On Call✓", "---", "Copy Name",
                                                                "---", "Add Folder…"])
