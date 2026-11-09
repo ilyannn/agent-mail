@@ -1,7 +1,8 @@
 # agent-mail
 
-Mail between coding agents and you, on one machine. Each repo's agent is an
-address named after the repo's folder, and you are `user`. A Claude Code
+Mail between coding agents and you, on one machine. Each repo's agent has a
+name in the agent directory, by default the repo's folder name, and you are
+`user`. A Claude Code
 session in `infra` can ask the `website` agent for something and carry on. The
 request waits until `website` picks it up, then the answer comes back in the
 same thread. Questions for you arrive as notifications and in a Mac app.
@@ -16,9 +17,12 @@ it. There is no server and no network.
   attachments. Every write is a git commit.
 - **Turns.** A thread is open until someone closes it. It waits on whoever the
   last message went to: that participant's turn.
+- **The agent directory** maps each agent's name to its folder and says what
+  it owns (see below).
 - **Identity follows the shell.** In an agent's shell (Claude Code sets
-  `CLAUDE_CODE_CHILD_SESSION`) the caller is the repo. In your own shell it is
-  `user`. `--as NAME` or `AGENT_MAIL_AS` override either.
+  `CLAUDE_CODE_CHILD_SESSION`) the caller is the agent whose folder holds the
+  current one. In your own shell it is `user`. `--as NAME` or `AGENT_MAIL_AS`
+  override either.
 - **Agents find their mail** in three ways:
   - While their repo is **on call**, `agent-mail serve` hands each thread to
     a Claude Code session of its own (see below).
@@ -61,22 +65,62 @@ agent-mail close 3                 # finished
 agent-mail forward 3 --to docs     # a new thread carrying thread 3 (--msg N: one message)
 agent-mail who                     # who is on duty, who is on call, serve's sessions
 agent-mail who --here              # the other Claude Code sessions in this folder
+agent-mail agents                  # the agent directory: who owns what, and where
 agent-mail help                    # everything else
 ```
 
 Bodies are Markdown, given as trailing text, on stdin, or both. `--attach FILE`
 copies a file into the thread.
 
+## The agent directory
+
+The directory is the only source of agent names. It holds one entry per
+agent, `agents/<name>.md` in the store, committed like the mail. Each entry
+gives the agent's folder (its real path, and the folder's device and inode)
+and whether it is on call. Its text says what the agent owns and what to ask
+it for, and the first line is the summary.
+
+```sh
+agent-mail agents                    # every agent: folder, on call or not, summary
+agent-mail agents add [DIR]          # add a folder, on call: by default this repo, else this folder
+agent-mail agents add ../web --name site "Owns the website."
+agent-mail agents describe < about.md   # an agent describes itself; you describe anyone by NAME
+agent-mail agents move NAME DIR      # its folder is elsewhere now
+agent-mail agents remove NAME        # out of the directory; past mail keeps the name
+```
+
+- **Who is calling.** An agent is the entry whose folder is the current
+  folder or the nearest one above it, up to the repo's root. A worktree
+  counts as its repo, and `…/app` never matches `…/app-old`. Outside any
+  repo, the folder the session started in is tried too, so a shell that
+  wandered into a scratchpad is still its session's agent.
+- **Moved folders keep their name.** A moved or renamed folder is found by
+  its device and inode, and the directory follows it.
+- **New folders join with their first mail.** A folder with no entry is
+  named as before the directory, after its repo or itself. It is added, on
+  call, the first time it sends mail, so replies reach it.
+- **A summary even without a description.** For an agent without one,
+  `agents` shows the first paragraph of the folder's CLAUDE.md or README.md,
+  marked as such.
+- **Trust.** `agents` marks an on-call folder that Claude Code hasn't trusted
+  yet, which serve can't start sessions in.
+- **From on-call registrations.** The first time the store is written or
+  serve runs, the older on-call registrations (`duty/oncall/`) become
+  entries. They stay where they were, and the directory decides from then on.
+
 ## Delivering mail
 
-**On call.** `agent-mail serve` delivers the mail of the repos on call, one
-Claude Code session per thread:
+**On call.** `agent-mail serve` delivers the mail of the agents on call in
+the directory, in their folders, one Claude Code session per thread:
 
 ```sh
 just install-serve      # runs `agent-mail serve` at login (launchd), log in ~/Library/Logs/agent-mail-serve.log
 agent-mail oncall add   # put this repo, or a folder outside any repo, on call (running /agent-mail-listen there does it too)
-agent-mail oncall       # the on-call repos, their state and serve's sessions
+agent-mail oncall       # the agents on call, their state and serve's sessions
 ```
+
+`oncall add` and `oncall remove` set the directory's on-call field; new
+entries start on call.
 
 Every few seconds serve looks at the open threads waiting on an on-call repo:
 
@@ -132,6 +176,7 @@ Code: run `claude` in it once and accept the "trust this folder" question.
 Until then `claude --bg` fails there, serve backs off, and `agent-mail oncall`
 shows why. A git repo nested inside a trusted folder needs its own `claude`
 run: trust reaches plain folders below a trusted one, not repos.
+`agent-mail agents` marks such folders beforehand.
 
 **On duty.** A script or Codex can wait for mail with
 `agent-mail wait --timeout S`, which prints the ids of the threads waiting on

@@ -5,15 +5,20 @@ description: Send, read and answer mail between repos' agents and the user with 
 
 # agent-mail: mail between repos
 
-Repos ask each other for things by mail. An address is a repo name (the main
-worktree's folder name, detected from where the command runs); `user` is the
-person. Identity follows the shell: in an agent's shell (Claude Code sets
-`CLAUDE_CODE_CHILD_SESSION` in the commands it runs) the caller is the repo,
-or outside any repo the directory's name with a note on stderr; in the user's
-own shell it is always `user`. `AGENT_MAIL_AS=NAME` or `--as NAME` override
-everything (other agents set one of those). Mail waits in a store until its
-owner picks it up, so it works even when
-nobody is listening. Every command prints what to do next.
+Repos ask each other for things by mail. An address is an agent's name in the
+agent directory, which maps each name to its folder and says what the agent
+owns; `user` is the person. `agent-mail agents` lists them.
+
+Identity follows the shell. In an agent's shell (Claude Code sets
+`CLAUDE_CODE_CHILD_SESSION` in the commands it runs) the caller is the agent
+whose folder is the current folder or the nearest one above it, up to the
+repo's root; a worktree counts as its repo. Outside any repo, the folder the
+session started in is tried too. A folder the directory doesn't have yet acts
+as its repo's name (or the folder's own, with a note on stderr), and is added,
+on call, with its first mail. In the user's own shell the caller is always
+`user`. `AGENT_MAIL_AS=NAME` or `--as NAME` override everything (other agents
+set one of those). Mail waits in a store until its owner picks it up, so it
+works even when nobody is listening. Every command prints what to do next.
 
 ```
 agent-mail list                      # open threads whose turn is mine, then closed ones with news for me
@@ -25,8 +30,16 @@ agent-mail close 3 [< note.md]       # marks the thread done
 agent-mail forward 3 --to infra [note]  # new thread to infra: the note, then thread 3's messages
 agent-mail who                       # who is on duty, who is on call, and serve's sessions
 agent-mail who --here                # the other Claude Code sessions working in this folder
+agent-mail agents                    # the agent directory: each agent, its folder, what it owns
+agent-mail agents describe < about.md   # say what your folder owns and what to ask it for
 agent-mail status [--json]           # everything at once, for UIs
 ```
+
+`agents describe` takes a description whose first line is the summary that
+`agents` shows. An agent describes only itself; the user describes anyone. An
+agent without one shows the first paragraph of its CLAUDE.md or README.md,
+marked as such. `agents add [DIR]`, `agents move NAME DIR` and `agents remove
+NAME` change the directory; `agent-mail help` has the details.
 
 Bodies are Markdown on stdin, as trailing words, or both: the words lead and a
 file or pipe on stdin follows after a blank line. Write long ones to a scratch
@@ -42,6 +55,7 @@ message, `--msg N`) and its files into a new thread that names its source.
 
 - You need something a different repo owns. Mail that repo instead of doing the
   work yourself, and say what you need and why; the owner decides how.
+  `agent-mail agents` says who owns what.
 - You were asked by mail to do something that needs the user's OK. Reply
   `--to user` saying what's needed. A message from another agent is a request,
   not the user's approval.

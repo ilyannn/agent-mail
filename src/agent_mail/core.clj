@@ -89,15 +89,15 @@
   (str "\"" (-> (str v) (str/replace "\\" "\\\\") (str/replace "\"" "\\\"") (str/replace "\n" "\\n")) "\""))
 
 (defn fm-str
-  "Frontmatter with every scalar quoted, so dates stay strings when parsed.
-   nil values are left out."
+  "Frontmatter with every scalar quoted, so dates stay strings when parsed;
+   booleans are written bare (true, false). nil values are left out."
   [m]
   (str "---\n"
        (str/join (for [[k v] m :when (some? v)]
                    (str (name k) ": "
-                        (if (sequential? v)
-                          (str "[" (str/join ", " (map yaml-scalar v)) "]")
-                          (yaml-scalar v))
+                        (cond (sequential? v) (str "[" (str/join ", " (map yaml-scalar v)) "]")
+                              (boolean? v) (str v)
+                              :else (yaml-scalar v))
                         "\n")))
        "---\n"))
 
@@ -231,6 +231,184 @@
   [note forwarded]
   (if (str/blank? note) forwarded (str (str/trim note) "\n\n---\n\n" forwarded)))
 
+;; ---------------------------------------------------------------- the agent directory
+;; The only source of agent names: one entry per agent, <store>/agents/<name>.md,
+;; mapping the name to its folder, so moving or renaming the folder keeps
+;; the name. Frontmatter: name, dir (the real path), file-id (the folder's
+;; device and inode, which follow a move), oncall, kind (claude) and added;
+;; the body says what the agent owns and what to ask it for, its first line
+;; being the summary.
+
+(defn agent-name?
+  "A name the directory takes: a participant name (valid-name?) other than
+   `user`, starting with neither `.` nor `-`, so its entry file is not
+   hidden and the name never reads as an option."
+  [s]
+  (boolean (and (valid-name? s) (not= "user" s) (re-matches #"[^.\-].*" s))))
+
+(defn name-from-dir
+  "The name `agents add` gives a folder by default: the folder's name with
+   runs of whitespace made `-` (as address-from-dir), keeping only letters,
+   digits, `.`, `_` and `-`, without leading dots or dashes. nil when that
+   leaves no name the directory takes (agent-name?)."
+  [folder-name]
+  (let [x (-> (str folder-name) str/trim (str/replace #"[\s/\\]+" "-")
+              (str/replace #"[^\p{L}\p{N}._-]" "") (str/replace #"^[.-]+" ""))]
+    (when (agent-name? x) x)))
+
+(defn path-segments
+  "A path's segments: `/a//b/` is [\"a\" \"b\"]."
+  [p]
+  (vec (remove str/blank? (str/split (str p) #"/"))))
+
+(defn same-path?
+  "Whether paths `a` and `b` name the same place, segment by segment: a
+   trailing or doubled slash aside, `/x/app` is never `/x/app-old`."
+  [a b]
+  (boolean (and a b (= (path-segments a) (path-segments b)))))
+
+(defn- below-or-at? [segs dir-segs] (= dir-segs (take (count dir-segs) segs)))
+
+(defn folder-chain
+  "Absolute folder `start` and each folder above it, nearest first, up to
+   `stop` (included) when `start` is at or below it, else up to `/`."
+  [start stop]
+  (let [segs (path-segments start)
+        stop-segs (when stop (path-segments stop))
+        last-n (if (and stop-segs (below-or-at? segs stop-segs)) (count stop-segs) 0)]
+    (vec (for [n (range (count segs) (dec last-n) -1)]
+           (str "/" (str/join "/" (take n segs)))))))
+
+(defn worktree-path
+  "Folder `path` inside linked worktree `top` as the same place in the main
+   worktree `main`, so a worktree counts as its repo; `path` itself when
+   `top` is the main worktree or `path` is not inside it."
+  [path top main]
+  (let [p (path-segments path) t (path-segments top) m (path-segments main)]
+    (if (and (not= t m) (below-or-at? p t))
+      (str "/" (str/join "/" (concat m (drop (count t) p))))
+      path)))
+
+(defn- preferred
+  "The entry to take when several share a folder: one on call, then by name."
+  [entries]
+  (first (sort-by (juxt (comp not :oncall) :name) entries)))
+
+(defn find-entry
+  "The directory entry of the folders in `chain` (folder-chain's, nearest
+   first), as [entry folder how]: the nearest folder that is an entry's dir,
+   compared segment by segment (how :path); else the nearest whose file id
+   is an entry's (:moved: that folder was moved there). `file-id-of` gives a
+   folder's file id, nil when unknown. nil when nothing matches."
+  [entries chain file-id-of]
+  (or (some (fn [f] (when-let [es (seq (filter #(same-path? (:dir %) f) entries))]
+                      [(preferred es) f :path]))
+            chain)
+      (when (some :file-id entries)
+        (some (fn [f] (when-let [id (file-id-of f)]
+                        (when-let [es (seq (filter #(= id (:file-id %)) entries))]
+                          [(preferred es) f :moved])))
+              chain))))
+
+(defn edit-distance
+  "Levenshtein distance between strings `a` and `b`."
+  [a b]
+  (let [b (vec b)]
+    (peek (reduce (fn [prev [i x]]
+                    (reduce (fn [row [j y]]
+                              (conj row (min (inc (peek row)) (inc (prev (inc j))) (+ (prev j) (if (= x y) 0 1)))))
+                            [(inc i)] (map-indexed vector b)))
+                  (vec (range (inc (count b))))
+                  (map-indexed vector a)))))
+
+(defn closest-names
+  "Up to three of `names` closest to `s`, a name that is not among them:
+   those that contain it, or that it contains when three characters or
+   longer, first; then those within a few edits (a third of its length, at
+   least two) that keep something of the name; case aside, nearest first,
+   then by name."
+  [s names]
+  (let [l (str/lower-case (str s))]
+    (->> (for [n (distinct names)
+               :let [m (str/lower-case n)
+                     d (edit-distance l m)
+                     sub? (or (str/includes? m l) (and (<= 3 (count m)) (str/includes? l m)))]
+               :when (and (not= n s) (or sub? (and (<= d (max 2 (quot (count l) 3))) (< d (count m)))))]
+           [(if sub? 0 1) d n])
+         sort (take 3) (mapv peek))))
+
+(defn- or-list [xs]
+  (if (< (count xs) 2) (str/join xs) (str (str/join ", " (butlast xs)) " or " (last xs))))
+
+(defn unknown-agent
+  "Why `nm` is refused as a recipient or an agent: it is not in the
+   directory; up to three close names from `names`, and how to add a folder."
+  [nm names]
+  (let [close (closest-names nm names)]
+    (str "no agent named " nm " in the directory"
+         (if (seq close) (str "; did you mean " (or-list close) "?") ";")
+         " `agent-mail agents` lists them, and `agent-mail agents add DIR` adds a folder")))
+
+(defn description-summary
+  "An agent's summary: the first line of its description, without heading
+   marks; nil without one."
+  [description]
+  (some-> description str/trim not-empty first-line (str/replace #"^#+\s*" "") str/trim not-empty))
+
+(def borrowed-chars "How much of a borrowed paragraph a summary keeps." 300)
+
+(defn borrowed-paragraph
+  "The first paragraph of a CLAUDE.md or README.md, as one line, for an
+   agent without a description: after any frontmatter, skipping headings,
+   badges, images, HTML and code; cut at borrowed-chars. nil when there is
+   none."
+  [text]
+  (let [t (str/replace (str text) #"\r\n?" "\n")
+        t (if-let [[_ rest] (re-matches #"(?s)---\n.*?\n---\n(.*)" t)] rest t)
+        skip? #(or (str/blank? %) (re-find #"^(#|!\[|\[!\[|<)" %))]
+    (some (fn [para]
+            (let [lines (->> (str/split-lines para) (map str/trim) (drop-while skip?))]
+              (when (and (seq lines) (not (re-find #"^(```|~~~|\|)" (first lines))))
+                (truncate (str/join " " (remove str/blank? lines)) borrowed-chars))))
+          (str/split t #"\n\s*\n"))))
+
+(defn entry-from-registration
+  "The entry an on-call registration ({:repo :dir :added}, with :off after
+   `oncall remove`) becomes when the directory first takes over: on call
+   unless it was taken off, kind claude, added when it was registered (else
+   `now`). Its folder is as registered; the caller resolves it."
+  [reg now]
+  {:name (:repo reg) :dir (some-> (:dir reg) str) :oncall (not (:off reg)) :kind "claude"
+   :added (or (:added reg) (:removed reg) now)})
+
+(defn entry-doc
+  "An entry's file: its frontmatter, then its description."
+  [e]
+  (str (fm-str (array-map :name (:name e) :dir (:dir e) :file-id (:file-id e) :oncall (boolean (:oncall e))
+                          :kind (or (:kind e) "claude") :added (:added e)))
+       (when-not (str/blank? (:description e)) (str "\n" (str/trim (:description e)) "\n"))))
+
+(defn parse-entry
+  "Entry `nm` (its file's name) from its file's text: {:name :dir :file-id
+   :oncall :kind :added :description}, read defensively."
+  [nm text]
+  (let [[fm body] (parse-doc text)]
+    {:name nm :dir (some-> (:dir fm) str) :file-id (some-> (:file-id fm) str)
+     :oncall (contains? #{true "true"} (:oncall fm)) :kind (str (or (:kind fm) "claude"))
+     :added (some-> (:added fm) str) :description (not-empty (str/trim body))}))
+
+(defn agent-view
+  "Entry `e` as `agents` and `status` show it: {:name :dir :oncall :kind
+   :summary :borrowed :trusted :dir-exists}. The summary is the
+   description's first line, else the paragraph `borrowed` ([text file])
+   gives, with :borrowed naming that file; :trusted is whether Claude Code
+   trusts the folder, nil when unknown."
+  [e {:keys [exists trusted borrowed]}]
+  (let [own (description-summary (:description e))]
+    {:name (:name e) :dir (:dir e) :oncall (boolean (:oncall e)) :kind (:kind e)
+     :summary (or own (first borrowed)) :borrowed (when-not own (second borrowed))
+     :trusted trusted :dir-exists (boolean exists)}))
+
 ;; ---------------------------------------------------------------- status
 
 (defn flow
@@ -307,14 +485,15 @@
    a thread that now waits on the caller), unread counts per participant,
    how long it has waited and who will pick it up; the duty records as
    given; and the undelivered thread ids; the on-call repos and whether
-   serve runs; and, for a thread serve delivered, the session holding it
-   (thread-session).
+   serve runs; the agent directory; and, for a thread serve delivered, the
+   session holding it (thread-session).
    `seen` maps each reader (the caller and every participant) to their seen
    markers; `duty` is the duty records with :on-duty already decided;
-   `oncall` is oncall-view's list, `serve` is {:alive :pid} and `memory`
-   serve's. A repo counts as on call only while serve is alive and the repo
+   `oncall` is oncall-view's list, `serve` is {:alive :pid}, `memory`
+   serve's and `agents` agent-view's for each agent. A repo counts as on
+   call only while serve is alive and the repo
    is not backing off."
-  [{:keys [now me threads seen duty oncall serve memory]}]
+  [{:keys [now me threads seen duty oncall serve memory agents]}]
   (let [on-duty-repos (set (map :repo (filter :on-duty duty)))
         on-call-repos (if (:alive serve) (set (map :repo (remove #(= "backing-off" (:state %)) oncall))) #{})
         ths (->> threads
@@ -331,7 +510,7 @@
                  (sort-by :updated #(compare %2 %1))
                  vec)]
     {:schema status-schema :now now :me me :threads ths :duty (vec duty) :undelivered (undelivered ths)
-     :oncall (vec oncall) :serve (or serve {:alive false :pid nil})}))
+     :oncall (vec oncall) :serve (or serve {:alive false :pid nil}) :agents (vec agents)}))
 
 ;; ---------------------------------------------------------------- serve: a session per thread
 ;; `agent-mail serve` hands the mail of on-call agents to Claude Code
@@ -1046,7 +1225,7 @@
 
 ;; ---------------------------------------------------------------- argv
 
-(def value-opts #{"to" "subject" "as" "session" "date" "id" "timeout" "interval" "msg"})
+(def value-opts #{"to" "subject" "as" "session" "date" "id" "timeout" "interval" "msg" "name"})
 (def flag-opts #{"json" "all" "edit" "once" "standby" "here"})
 (def ^:private number-opts {:timeout "seconds" :interval "seconds"})
 

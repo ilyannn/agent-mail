@@ -57,7 +57,14 @@
           (Thread/sleep 100)
           (recur (inc n))))))
 
-(declare ensure-numbers!)
+(declare ensure-numbers! migrate-directory!)
+
+(defn real-dir
+  "Directory `d` with symbolic links resolved, as Claude Code records a
+   session's folder and the agent directory keeps it; `d` itself when it
+   does not resolve."
+  [d]
+  (try (str (fs/real-path d)) (catch Exception _ (str d))))
 
 (defn ensure-identity!
   "Commits need an author; use a local one when git has none configured (CI,
@@ -78,6 +85,7 @@
                 (spit (str (fs/path store ".gitignore")) "duty/\ndrafts/\nview/\nseen/\n")
                 (git "add" "-A")
                 (git "commit" "-q" "-m" "📬 init: agent-mail store")))))
+  (migrate-directory!)
   (ensure-numbers!))
 
 (defn commit! [msg]
@@ -254,32 +262,7 @@
     (fs/move tmp (fs/path dir nm))
     nm))
 
-;; ---------------------------------------------------------------- identity, duty
-
-(defn repo-root
-  "The main working tree of the repo the command runs in: the parent of git's
-   common dir, so a worktree still counts as its repo. nil outside any repo."
-  []
-  (let [r (p/shell {:out :string :err :string :continue true} "git" "rev-parse" "--git-common-dir")]
-    (when (zero? (:exit r))
-      (-> (:out r) str/trim fs/path fs/absolutize fs/normalize fs/parent))))
-
-(defn repo-name
-  "Basename of the main working tree of the repo the command runs in (see
-   repo-root). nil outside any repo."
-  []
-  (some-> (repo-root) fs/file-name core/address-from-dir))
-
-(defn here
-  "The folder the command runs in, as on-call registrations take it: the
-   repo's main worktree (see repo-root), or outside any repo the directory
-   itself with :plain true, which caller acts as there. :name is the address
-   derived from the folder's name, nil when none can be."
-  []
-  (if-let [root (repo-root)]
-    {:name (core/address-from-dir (fs/file-name root)) :dir root}
-    (let [cwd (fs/normalize (fs/absolutize "."))]
-      {:name (core/address-from-dir (fs/file-name cwd)) :dir cwd :plain true})))
+;; ---------------------------------------------------------------- duty
 
 (defn agent-session?
   "True inside a coding agent's shell. Claude Code (2.1.172+) sets
@@ -289,32 +272,6 @@
    the user typing."
   []
   (not (str/blank? (System/getenv "CLAUDE_CODE_CHILD_SESSION"))))
-
-(defn caller
-  "Who runs the command: --as or AGENT_MAIL_AS if set; otherwise the user in
-   the user's own shell, and in an agent's shell (see agent-session?) the repo's
-   name, or outside any repo the directory's name with a note on stderr (not
-   from the hook, which must stay silent). An agent never becomes the user by
-   accident, and the user never becomes a repo."
-  [opts]
-  (let [explicit (or (:as opts) (System/getenv "AGENT_MAIL_AS"))
-        me (or explicit
-               (if-not (agent-session?)
-                 "user"
-                 (or (repo-name)
-                     (let [dir (core/address-from-dir (fs/file-name (fs/normalize (fs/absolutize "."))))]
-                       (when-not (:quiet opts)
-                         (binding [*out* *err*]
-                           (println (str "agent-mail: not in a git repo; acting as " (pr-str dir)
-                                         " (AGENT_MAIL_AS=NAME or --as NAME to choose)"))))
-                       dir))))]
-    (when-not (core/valid-name? me) (fail "bad name for the caller:" (pr-str me)))
-    me))
-
-(defn recipient [opts]
-  (let [to (or (:to opts) (fail "send needs --to NAME (or `agent-mail @NAME text`)"))]
-    (when-not (core/valid-name? to) (fail "bad recipient name:" (pr-str to)))
-    to))
 
 (defn duty-files
   "[path record] for each duty record: the *.edn files directly in the duty
@@ -428,53 +385,343 @@
                :session-alive (session-alive? %) :on-duty (on-duty? %))
        (duty-records)))
 
-;; ---------------------------------------------------------------- on call
+;; ---------------------------------------------------------------- the agent directory
+;; One entry per agent, <store>/agents/<name>.md (see core), committed like
+;; the mail: the only source of agent names, each mapped to its folder.
+
+(def agents-dir (fs/path store "agents"))
+(defn agent-file [nm] (fs/path agents-dir (str nm ".md")))
 
 (def oncall-dir
-  "Registrations, one <repo>.edn each ({:repo :dir}, or :off after `oncall
-   remove`). Under duty/, which the store's git ignores."
+  "Where the on-call registrations lived before the directory, one
+   <repo>.edn each ({:repo :dir}, :off after `oncall remove`): the
+   directory takes them over once (migrate-directory!) and leaves them in
+   place, still readable."
   (fs/path duty-dir "oncall"))
+
+(defn note
+  "One line on stderr, after `agent-mail: `."
+  [& msg]
+  (binding [*out* *err*] (println (str "agent-mail: " (str/join msg)))))
+
+(defn file-id
+  "Folder `dir`'s device and inode, e.g. 16777234:44201492, which stay the
+   same when the folder is moved or renamed; nil when it does not exist."
+  [dir]
+  (try (let [p (fs/path dir) no-opts (make-array java.nio.file.LinkOption 0)]
+         (when (fs/directory? p)
+           (str (java.nio.file.Files/getAttribute p "unix:dev" no-opts) ":"
+                (java.nio.file.Files/getAttribute p "unix:ino" no-opts))))
+       (catch Exception _ nil)))
+
+(defn legacy-registrations
+  "The on-call registrations (see oncall-dir), removed ones included."
+  []
+  (when (fs/exists? oncall-dir)
+    (keep #(let [e (read-edn %)] (when (string? (:repo e)) e)) (fs/glob oncall-dir "*.edn"))))
+
+(defn migrated-entries
+  "The entries the on-call registrations become (core/entry-from-registration),
+   their folders resolved; names the directory doesn't take are left out."
+  []
+  (let [now (core/now-utc)]
+    (vec (for [r (sort-by :repo (legacy-registrations))
+               :when (core/agent-name? (:repo r))
+               :let [e (core/entry-from-registration r now)]]
+           (cond-> e (:dir e) (assoc :dir (real-dir (:dir e)) :file-id (file-id (:dir e))))))))
+
+(defn read-entry [f]
+  (try (core/parse-entry (str/replace (str (fs/file-name f)) #"\.md$" "") (slurp (str f)))
+       (catch Exception _ nil)))
+
+(defn directory
+  "Every agent, name -> entry (core/parse-entry), by name. Before the store
+   has its agents folder, the on-call registrations as migrate-directory!
+   will write them, so a read (status) never has to write."
+  []
+  (into (sorted-map) (map (juxt :name identity))
+        (if (fs/directory? agents-dir)
+          (keep read-entry (fs/glob agents-dir "*.md"))
+          (migrated-entries))))
+
+(defn migrate-directory!
+  "Gives the store its agents folder the first time: the on-call
+   registrations become entries, written aside and moved in at once, so no
+   reader sees half a directory, and committed."
+  []
+  (when-not (fs/directory? agents-dir)
+    (locked
+     (fn []
+       (when-not (fs/directory? agents-dir)
+         (let [es (migrated-entries)
+               tmp (fs/path store (str ".agents." (.pid (java.lang.ProcessHandle/current)) ".tmp"))]
+           (fs/delete-tree tmp)
+           (fs/create-dirs tmp)
+           (doseq [e es] (spit (str (fs/path tmp (str (:name e) ".md"))) (core/entry-doc e)))
+           (fs/move tmp agents-dir {:atomic-move true})
+           (when (seq es)
+             (commit! (str "📇 agents: the directory takes over " (count es) " on-call registration"
+                           (when (< 1 (count es)) "s"))))))))))
+
+(defn directory!
+  "Changes the directory under the store lock. `f` gets it as it stands
+   (name -> entry) and returns nil, or [commit-message changes], changes
+   mapping names to the entries to write, nil deleting one; a refusal it
+   throws changes nothing. Returns the changes."
+  [f]
+  (ensure-store!)
+  (locked
+   (fn []
+     (when-let [[msg changes] (f (directory))]
+       (doseq [[nm e] changes]
+         (if e (spit-atomic! (agent-file nm) (core/entry-doc e)) (fs/delete-if-exists (agent-file nm))))
+       (when (seq changes) (commit! msg))
+       changes))))
+
+(defn new-entry
+  "A new entry for agent `nm` in folder `dir`."
+  [nm dir oncall description]
+  {:name nm :dir (str dir) :file-id (file-id dir) :oncall oncall :kind "claude" :added (core/now-utc)
+   :description description})
+
+(defn entry-at
+  "The entry of `d` (name -> entry) whose folder is `folder`, other than
+   `but`; nil when none."
+  [d folder but]
+  (some #(when (and (not= but (:name %)) (core/same-path? (:dir %) folder)) %) (vals d)))
+
+(defn oncall-agents
+  "The agents serve delivers for: those on call in the directory, kind
+   claude, name -> {:dir}."
+  ([] (oncall-agents (directory)))
+  ([d] (into (sorted-map) (for [[nm e] d :when (and (:oncall e) (= "claude" (:kind e)))]
+                            [nm {:dir (:dir e)}]))))
+
+;; ---- what Claude Code says of a folder
+
+(defn claude-json-file
+  "Claude Code's settings file: .claude.json in CLAUDE_CONFIG_DIR, else in
+   the home folder."
+  []
+  (let [d (System/getenv "CLAUDE_CONFIG_DIR")]
+    (fs/path (if (str/blank? d) (fs/home) d) ".claude.json")))
+
+(defn trust-of
+  "A function telling whether Claude Code trusts a folder, which `claude
+   --bg` needs: its projects entry's hasTrustDialogAccepted in .claude.json
+   (claude-json-file). Trust is per folder, not inherited. nil when that
+   can't be read; never throws."
+  []
+  (let [projects (try (let [f (claude-json-file)]
+                        (when (fs/regular-file? f) (get (json/parse-string (slurp (str f))) "projects")))
+                      (catch Exception _ nil))]
+    (fn [dir]
+      (when (and (map? projects) dir)
+        (let [e (or (get projects (str dir)) (get projects (real-dir dir)))]
+          (true? (and (map? e) (get e "hasTrustDialogAccepted"))))))))
+
+(defn trust-line
+  "Why serve can't start sessions for on-call entry `e`, when Claude Code
+   hasn't trusted its folder (`trust`, see trust-of); nil when it has, or
+   when that is unknown."
+  [e trust]
+  (when (and (:oncall e) (:dir e) (fs/directory? (:dir e)) (false? (trust (:dir e))))
+    (str "Claude Code hasn't trusted " (:dir e) " yet, so serve can't start sessions there:"
+         " run `claude` in it once and accept the question")))
+
+(defn borrowed-summary
+  "[paragraph file] for a folder without a description: the first paragraph
+   of its CLAUDE.md, else of its README.md; nil when neither has one."
+  [dir]
+  (some (fn [f] (let [p (fs/path dir f)]
+                  (when-let [para (try (when (fs/regular-file? p) (core/borrowed-paragraph (slurp (str p))))
+                                       (catch Exception _ nil))]
+                    [para f])))
+        ["CLAUDE.md" "README.md"]))
+
+(defn agents-view
+  "Each agent as `agents` and `status` show it (core/agent-view), by name;
+   with `full?` its description, file id and when it was added too."
+  ([] (agents-view (directory) false))
+  ([d full?]
+   (let [trust (trust-of)]
+     (vec (for [[_ e] d
+                :let [exists (boolean (and (:dir e) (fs/directory? (:dir e))))
+                      v (core/agent-view e {:exists exists
+                                            :trusted (when exists (trust (:dir e)))
+                                            :borrowed (when (and exists (not (core/description-summary (:description e))))
+                                                        (borrowed-summary (:dir e)))})]]
+            (cond-> v full? (assoc :description (:description e) :file-id (:file-id e) :added (:added e))))))))
+
+;; ---------------------------------------------------------------- identity
+
+(defn git-roots
+  "For folder `dir`, inside git: {:top :main}, the real paths of its
+   worktree and of the main worktree (a linked worktree's main is the
+   parent of the common git dir; a submodule is its own); nil outside git."
+  [dir]
+  (let [r (try (p/shell {:dir (str dir) :out :string :err :string :continue true}
+                        "git" "rev-parse" "--path-format=absolute" "--show-toplevel" "--git-dir" "--git-common-dir")
+               (catch Exception _ nil))]
+    (when (and r (zero? (:exit r)))
+      (let [[top git-dir common] (map str/trim (str/split-lines (:out r)))]
+        (when (and (not (str/blank? top)) common)
+          {:top (real-dir top) :main (real-dir (if (= git-dir common) top (str (fs/parent common))))})))))
+
+(defn repo-root
+  "The real path of the main working tree of the repo the command runs in,
+   so a worktree still counts as its repo. nil outside any repo."
+  []
+  (:main (git-roots ".")))
+
+(defn here
+  "The folder the command runs in, as the on-call shorthands take it: the
+   repo's main worktree (see repo-root), or outside any repo the directory
+   itself with :plain true. :name is the address derived from the folder's
+   name, as an agent there writes as before the directory knows it; nil
+   when none can be."
+  []
+  (if-let [root (repo-root)]
+    {:name (core/address-from-dir (fs/file-name root)) :dir root}
+    (let [cwd (real-dir (fs/absolutize "."))]
+      {:name (core/address-from-dir (fs/file-name cwd)) :dir cwd :plain true})))
+
+(defn folder-place
+  "Where folder `dir` stands for the directory: {:folder :stop :git :main}.
+   :folder is its real path, moved from a linked worktree to the same place
+   in the main worktree; the search for its agent stops at :stop, the main
+   worktree's root inside git, else at `/` (nil)."
+  [dir]
+  (let [d (real-dir (fs/absolutize dir))]
+    (if-let [{:keys [top main]} (git-roots d)]
+      {:folder (core/worktree-path d top main) :stop main :git true :main main}
+      {:folder d :stop nil :git false})))
+
+(defn find-agent
+  "[entry folder how] for place `pl` (folder-place) among `entries`, see
+   core/find-entry; nil when none matches."
+  [entries pl]
+  (core/find-entry entries (core/folder-chain (:folder pl) (:stop pl)) file-id))
+
+(defn session-start-folder
+  "The folder the Claude Code session running this command started in: its
+   registry entry's cwd (see registry-entry); nil when unknown."
+  []
+  (when-let [pid (claude-pid)]
+    (let [c (get (registry-entry pid) "cwd")]
+      (when (and (string? c) (fs/directory? c)) (real-dir c)))))
+
+(defn keep-current!
+  "Brings entry `e`, found for folder `f` (`how` find-entry's), up to date:
+   a folder found by its file id was moved there, so the entry's folder
+   follows, said on stderr unless `quiet`; a folder found by its path gets
+   its file id when that is missing or stale (the folder was made anew).
+   Nothing when nothing changed; never fails."
+  [e f how quiet]
+  (try
+    (let [id (file-id f)]
+      (case how
+        :moved (when (and id (not= id (file-id (:dir e))))
+                 (when (directory! (fn [d] (when-let [cur (d (:name e))]
+                                             (when (= id (:file-id cur))
+                                               [(str "📇 agents: " (:name e) " moved to " f)
+                                                {(:name e) (assoc cur :dir f)}]))))
+                   (when-not quiet
+                     (note "the folder of " (:name e) " moved from " (:dir e) " to " f "; the agent directory now says so"))))
+        :path (when (and id (not= id (:file-id e)))
+                (directory! (fn [d] (when-let [cur (d (:name e))]
+                                      (when (core/same-path? (:dir cur) f)
+                                        [(str "📇 agents: " (:name e) "'s folder id") {(:name e) (assoc cur :file-id id)}])))))
+        nil))
+    (catch Exception _ nil)))
+
+(defn identify
+  "The agent of folder `dir` (an agent's shell runs there): {:name :how
+   :folder}. The directory decides (find-agent): :how :directory, the entry
+   kept current (keep-current!, not when `pure`). With no entry, outside
+   git, the folder the session started in is tried the same way: a shell
+   that wandered into a scratchpad is still its session's agent. Otherwise
+   :how :derived, the name derived from the folder as before the directory
+   (the repo's name, else the folder's own), with :folder what auto-add!
+   adds, and a note on stderr outside git unless `quiet`."
+  [dir {:keys [quiet pure]}]
+  (let [entries (vals (directory))
+        pl (folder-place dir)
+        start (when-not (:git pl) (session-start-folder))
+        spl (when (and start (not (core/same-path? start (:folder pl)))) (folder-place start))
+        [e f how] (or (find-agent entries pl) (when spl (find-agent entries spl)))]
+    (if e
+      (do (when-not pure (keep-current! e f how quiet))
+          {:name (:name e) :how :directory :folder f})
+      (let [{:keys [folder git main]} (or spl pl)
+            home (if git main folder)
+            nm (core/address-from-dir (fs/file-name home))]
+        (when-not quiet
+          (cond spl (note "this folder is in no repo; acting as " (pr-str nm) ", after " home
+                          ", where this session started (AGENT_MAIL_AS=NAME or --as NAME to choose)")
+                (not git) (note "not in a git repo; acting as " (pr-str nm) " (AGENT_MAIL_AS=NAME or --as NAME to choose)")))
+        {:name nm :how :derived :folder home}))))
+
+(defn whoami
+  "Who runs the command, {:name :how …}: --as or AGENT_MAIL_AS if set
+   (:explicit); otherwise the user in the user's own shell (:user), and in
+   an agent's shell (see agent-session?) its folder's agent (identify). An
+   agent never becomes the user by accident, and the user never becomes a
+   repo. Refuses a name that can't be one."
+  [opts]
+  (let [explicit (or (:as opts) (System/getenv "AGENT_MAIL_AS"))
+        w (cond explicit {:name explicit :how :explicit}
+                (not (agent-session?)) {:name "user" :how :user}
+                :else (identify "." opts))]
+    (when-not (core/valid-name? (:name w)) (fail "bad name for the caller:" (pr-str (:name w))))
+    w))
+
+(defn caller "Who runs the command, by name (see whoami)." [opts] (:name (whoami opts)))
+
+(defn auto-add!
+  "Puts the folder of `w` (whoami's), an agent the directory doesn't know
+   yet, into the directory, on call, so mail to it can be delivered: one
+   line on stderr says so unless `quiet`. A name the directory has for
+   another folder is left as it is, and stderr says so. Returns the entry
+   added, if any."
+  [{:keys [name how folder]} quiet]
+  (when (and (= :derived how) folder (core/agent-name? name) (fs/directory? folder))
+    (let [taken (atom nil)
+          added (get (directory! (fn [d]
+                                   (if-let [o (or (d name) (entry-at d folder nil))]
+                                     (do (reset! taken o) nil)
+                                     [(str "📇 agents: add " name ", on call, on its first mail")
+                                      {name (new-entry name folder true nil)}])))
+                     name)]
+      (when-not quiet
+        (if added
+          (note "added " name " to the agent directory, on call, for " folder
+                ", so replies reach it; `agent-mail agents describe` says what it owns")
+          (when-let [o @taken]
+            (note "the agent directory has " (:name o) " for " (:dir o) ", not " folder
+                  "; `agent-mail agents add --name NAME` gives this folder a name of its own"))))
+      added)))
+
+(defn recipient [opts]
+  (let [to (or (:to opts) (fail "send needs --to NAME (or `agent-mail @NAME text`)"))]
+    (when-not (core/valid-name? to) (fail "bad recipient name:" (pr-str to)))
+    to))
+
+(defn auto-register!
+  "A wait in a Claude Code session puts its folder on call the first time,
+   so serve delivers its threads (see auto-add!). An agent taken off with
+   `oncall remove` stays off."
+  [w]
+  (auto-add! w true))
+
+;; ---------------------------------------------------------------- on call
+
 (def serve-dir (fs/path duty-dir "serve"))
 (def serve-pid-file (fs/path serve-dir "pid"))
 (def serve-state-file
   "serve's heartbeat, interval and memory of the threads it delivered and
    the sessions it holds them in (see core)."
   (fs/path serve-dir "state.edn"))
-
-(defn oncall-file [repo] (fs/path oncall-dir (str repo ".edn")))
-
-(defn oncall-entries
-  "Every on-call entry, removed ones (:off) included: repo -> entry."
-  []
-  (when (fs/exists? oncall-dir)
-    (into {} (keep #(when-let [e (read-edn %)] (when (:repo e) [(:repo e) e])))
-          (fs/glob oncall-dir "*.edn"))))
-
-(defn oncall-registered
-  "The repos on call: repo -> {:repo :dir}."
-  []
-  (into {} (remove (comp :off val)) (oncall-entries)))
-
-(defn register-oncall! [repo dir]
-  (spit-atomic! (oncall-file repo) (pr-str {:repo repo :dir (str dir) :added (core/now-utc)})))
-
-(defn oncall-home
-  "Where serve should start sessions for `me`: the main worktree when `me` is
-   the repo the command runs in; outside any repo, the directory itself when
-   `me` is its name. nil otherwise (an --as name), since a session started
-   there would not write as `me`."
-  [me]
-  (let [{:keys [name dir]} (here)]
-    (when (= me name) (str dir))))
-
-(defn auto-register!
-  "A wait in a Claude Code session puts its repo on call the first time, so
-   serve delivers its threads. A repo taken off with `oncall remove` stays
-   off."
-  [me]
-  (when-not (contains? (oncall-entries) me)
-    (when-let [dir (oncall-home me)]
-      (register-oncall! me dir))))
 
 (defn serve-state [] (or (read-edn serve-state-file) {}))
 (defn serve-pid [] (try (some-> (slurp (str serve-pid-file)) str/trim parse-long) (catch Exception _ nil)))
@@ -497,7 +744,7 @@
   "The on-call repos with what serve is doing about each (core/oncall-view)."
   ([] (oncall-view (duty-view)))
   ([duty]
-   (core/oncall-view {:now (System/currentTimeMillis) :oncall (oncall-registered)
+   (core/oncall-view {:now (System/currentTimeMillis) :oncall (oncall-agents)
                       :memory (serve-memory) :duty duty})))
 
 (defn serve-line
@@ -605,12 +852,6 @@
       (try {:sessions (core/agents-items (json/parse-string (:out r) true))}
            (catch Exception _ {:error (str "`claude agents --json` printed no JSON: " (core/first-line (str (:out r))))}))
       {:error (core/claude-failure "`claude agents`" r)})))
-
-(defn real-dir
-  "Directory `d` with symbolic links resolved, as Claude Code records a
-   session's folder; `d` itself when it does not resolve."
-  [d]
-  (try (str (fs/real-path d)) (catch Exception _ (str d))))
 
 (defn job-needs
   "What background job `job-id` waits on the user for, as its state file
@@ -773,9 +1014,13 @@
 
 ;; ---------------------------------------------------------------- commands
 
-(defn cmd-send [opts args]
+(defn cmd-send
+  "A new thread to --to. A sender the directory doesn't know yet is added
+   to it (auto-add!)."
+  [opts args]
   (ensure-store!)
-  (let [from (caller opts)
+  (let [w (whoami opts)
+        from (:name w)
         to (recipient opts)
         _ (when (= from to) (fail "refusing to mail yourself (" from ")"))
         body (body-from args)
@@ -795,7 +1040,8 @@
            (write-msg! id {:from from :to to :date created :attachments atts :body body}))
          (commit! (str "📨 " from " → " to ": " subject))
          (println id)
-         (delivered! from to id subject))))))
+         (delivered! from to id subject))))
+    (auto-add! w false)))
 
 (declare cmd-compose)
 
@@ -813,7 +1059,8 @@
   (when (and (not close?) (empty? (rest args)) (or (:edit opts) (System/console)))
     (cmd-compose opts args)
     (System/exit 0))
-  (let [me (caller opts)
+  (let [w (whoami opts)
+        me (:name w)
         id (if (first args) (resolve-id (first args)) (pick-thread me))
         ;; close's note is optional, so with no text it takes what stands ready
         ;; on stdin and never waits: an agent's shell leaves stdin open and empty.
@@ -833,7 +1080,8 @@
          (commit! (str (if close? "✅ " "↩️ ") me " → " to ": " (:subject th)))
          (mark-seen! me (fold id))
          (println id)
-         (when-not close? (delivered! me to id (:subject th))))))))
+         (when-not close? (delivered! me to id (:subject th))))))
+    (when-not close? (auto-add! w false))))
 
 (defn cmd-forward
   "A new thread to --to carrying thread ID, or only its message --msg (a
@@ -844,7 +1092,8 @@
    with any --attach; thread.md records `forwarded-from`."
   [opts args]
   (ensure-store!)
-  (let [from (caller opts)
+  (let [w (whoami opts)
+        from (:name w)
         to (or (:to opts) (fail "forward needs --to NAME"))
         _ (when-not (core/valid-name? to) (fail "bad recipient name:" (pr-str to)))
         _ (when (= from to) (fail "refusing to mail yourself (" from ")"))
@@ -870,7 +1119,8 @@
            (write-msg! id {:from from :to to :date created :attachments (vec (distinct (concat copied own))) :body body}))
          (commit! (str "↪️ " from " → " to ": " subject))
          (println id)
-         (delivered! from to id subject))))))
+         (delivered! from to id subject))))
+    (auto-add! w false)))
 
 (defn files-dir [id] (str (fs/path (thread-dir id) "files")))
 (defn render-thread
@@ -999,11 +1249,11 @@
    9 Nov 2026: serve delivers there now, so a listener armed by the old
    listen skill learns to stop arming it, and whether `me` is on call."
   [me]
-  (let [e (get (oncall-entries) me)]
+  (let [e (get (directory) me)]
     (str "agent-mail: wait no longer runs in a Claude Code session. agent-mail serve now starts a background "
          "session for each thread and posts later messages into the session that wrote in the thread. "
          (cond (nil? e) (str me " is not on call: `agent-mail oncall add` in its repo puts it there. ")
-               (:off e) (str me " was taken off call: `agent-mail oncall add` puts it back. ")
+               (not (:oncall e)) (str me " was taken off call: `agent-mail oncall add` puts it back. ")
                :else (str me " is on call. "))
          (when-not (:alive (serve-info)) "agent-mail serve isn't running: tell the user (`just install-serve` in the agent-mail repo). ")
          "Don't arm wait again, and re-read /agent-mail-listen.")))
@@ -1020,13 +1270,14 @@
    exits 0 with nothing on stdout."
   [opts]
   (ensure-store!)
-  (let [me (caller opts)
+  (let [w (whoami opts)
+        me (:name w)
         given (:session opts)
         fallback (str "pid" (.pid (java.lang.ProcessHandle/current)))
         interval (or (:interval opts) 3)
         deadline (when-let [t (:timeout opts)] (+ (System/currentTimeMillis) (* 1000 t)))]
     (when (and (not (:once opts)) (session-socket))
-      (auto-register! me)
+      (auto-register! w)
       (doseq [[f rec] (duty-files)
               :when (and (= me (:repo rec)) (claude-pid) (= (claude-pid) (:session-pid rec)))]
         (fs/delete-if-exists f))
@@ -1095,18 +1346,20 @@
    threads with per-reader unread counts (and the caller's unread addressed
    to it, :unread-to-me), waiting time, listener and the
    session serve delivered each to, the duty records, the open threads nobody
-   is listening for, the repos on call and whether serve runs. A pure read: no
-   seen marker moves, nothing is written or committed (not even the thread
-   numbering that list and read catch up on), and Claude Code is not asked:
+   is listening for, the repos on call and whether serve runs, and the agent
+   directory. A pure read: no seen marker moves, nothing is written or
+   committed (not even the thread numbering that list and read catch up on,
+   nor a moved folder in the directory), and Claude Code is not asked:
    sessions are as serve last saw them."
   [opts]
-  (let [me (caller opts)
+  (let [me (caller (assoc opts :pure true))
         threads (all-threads)
         readers (into #{me} (mapcat core/participants) threads)
         duty (duty-view)
         st (core/status {:now (core/now-utc) :me me :threads threads
                          :seen (into {} (map (juxt identity seen-map)) readers)
-                         :duty duty :oncall (oncall-view duty) :serve (serve-info) :memory (serve-memory)})]
+                         :duty duty :oncall (oncall-view duty) :serve (serve-info) :memory (serve-memory)
+                         :agents (agents-view)})]
     (if (:json opts)
       (println (json/generate-string st {:pretty true}))
       (let [number-of (into {} (map (juxt :id :number)) (:threads st))
@@ -1127,43 +1380,98 @@
                                         (str/join ", " (map #(str "#" (number-of %) " " (owner-of %)) u))
                                         "none")))))))
 
+(defn folder-agent
+  "The directory entry of the folder the command runs in, or of a folder
+   above it up to its repo's root (see find-agent); nil when none."
+  []
+  (first (find-agent (vals (directory)) (folder-place "."))))
+
+(defn put-agent!
+  "Puts agent `nm` into the directory at folder `folder`, on call or not: a
+   new entry, or `nm`'s own moved there. Refuses a folder another agent
+   has. Returns the entry."
+  [nm folder oncall]
+  (get (directory! (fn [d]
+                     (when-let [o (entry-at d folder nm)]
+                       (fail (str folder " is already in the agent directory, as " (:name o))))
+                     (let [e (d nm)
+                           moved? (and e (not (core/same-path? (:dir e) folder)))]
+                       [(str "📇 agents: " (if e nm (str "add " nm)) (if oncall ", on call" ", off call")
+                             (when moved? (str ", at " folder)))
+                        {nm (if e
+                              (assoc e :dir (str folder) :file-id (file-id folder) :oncall oncall)
+                              (new-entry nm folder oncall nil))}])))
+       nm))
+
+(defn set-oncall!
+  "Sets whether agent `nm` is on call: [its entry before, after]. Refuses a
+   name the directory doesn't have."
+  [nm on?]
+  (let [before (atom nil)
+        changes (directory! (fn [d]
+                              (let [e (or (d nm) (fail (core/unknown-agent nm (keys d))))]
+                                (reset! before e)
+                                (when (not= on? (:oncall e))
+                                  [(str "📇 agents: " nm (if on? ", on call" ", off call")) {nm (assoc e :oncall on?)}]))))]
+    [@before (get changes nm @before)]))
+
 (defn here-oncall
-  "[name dir] that `oncall add` and `remove` take with no NAME: the folder
-   (see here), whoever the caller is, since the user registers repos too.
-   Outside any repo a note on stderr says so, as caller's does. `sub` and
-   `params` name the command that chooses instead."
+  "[name dir] that `oncall add` and `remove` take with no NAME for a folder
+   the directory doesn't have yet: the folder (see here), whoever the caller
+   is, since the user puts repos on call too. Outside any repo a note on
+   stderr says so, as caller's does. `sub` and `params` name the command
+   that chooses instead. Refuses a name the directory has for another
+   folder that still exists."
   [sub params]
   (let [{:keys [name dir plain]} (here)]
     (when-not name
       (fail (str "this folder's name makes no address (" dir "); give " params)))
+    (when-not (core/agent-name? name) (fail "bad name:" (pr-str name) (str "; give " params)))
+    (when-let [o (get (directory) name)]
+      (when (and (:dir o) (fs/directory? (:dir o)))
+        (fail (str "the agent directory has " name " for " (:dir o) "; `agent-mail oncall " sub " " params
+                   "` chooses, `agent-mail agents move " name " DIR` moves it"))))
     (when plain
-      (binding [*out* *err*]
-        (println (str "agent-mail: not in a git repo; taking this folder as " (pr-str name)
-                      " (`agent-mail oncall " sub " " params "` to choose)"))))
+      (note "not in a git repo; taking this folder as " (pr-str name) " (`agent-mail oncall " sub " " params "` to choose)"))
     [name dir]))
 
+(defn oncall-said
+  "What `oncall add` prints after the name and folder: why serve can't
+   start sessions there, and whether serve runs."
+  [e]
+  (when-let [l (trust-line e (trust-of))] (println l))
+  (when-not (:alive (serve-info)) (println (serve-line))))
+
 (defn cmd-oncall
-  "Lists the repos on call (--json: oncall-view's entries); `add [NAME DIR]`
-   registers one, by default the folder it runs in (see here-oncall); `remove
-   [NAME]` takes one off and keeps it off, since wait would otherwise put it
-   back."
+  "Lists the agents on call (--json: oncall-view's entries). `add` and
+   `remove` set the directory's oncall field: `add [NAME [DIR]]` puts NAME
+   on call, at DIR when given (adding it, or moving it there); no
+   arguments, the folder it runs in (its entry, else a new one, see
+   here-oncall). `remove [NAME]` takes one off and keeps it off, since wait
+   would otherwise put it back."
   [opts [sub & args]]
   (case sub
-    "add" (let [[nm dir] (cond (second args) [(first args) (fs/normalize (fs/absolutize (second args)))]
-                               (first args) (fail "oncall add takes NAME and DIR, or neither for this folder")
-                               :else (here-oncall "add" "NAME DIR"))]
-            (when-not (core/valid-name? nm) (fail "bad name:" (pr-str nm)))
-            (when-not (fs/directory? dir) (fail "no such directory:" (str dir)))
-            (register-oncall! nm dir)
-            (println (str nm " is on call (" dir ")"))
-            (when-not (:alive (serve-info)) (println (serve-line))))
-    "remove" (let [nm (or (first args) (first (here-oncall "remove" "NAME")))
-                   e (get (oncall-entries) nm)]
-               (when-not (core/valid-name? nm) (fail "bad name:" (pr-str nm)))
-               (spit-atomic! (oncall-file nm) (pr-str (assoc (or e {:repo nm}) :off true :removed (core/now-utc))))
-               (println (if (and e (not (:off e)))
-                          (str nm " is no longer on call; wait won't put it back (`oncall add` does)")
-                          (str nm " was not on call; wait won't put it on call either"))))
+    "add" (let [[nm dir] args
+                e (cond
+                    dir (let [d (fs/normalize (fs/absolutize dir))]
+                          (when-not (core/agent-name? nm) (fail "bad name:" (pr-str nm)))
+                          (when-not (fs/directory? d) (fail "no such directory:" (str d)))
+                          (put-agent! nm (:folder (folder-place d)) true))
+                    nm (second (set-oncall! nm true))
+                    :else (if-let [e (folder-agent)]
+                            (second (set-oncall! (:name e) true))
+                            (let [[nm dir] (here-oncall "add" "NAME DIR")] (put-agent! nm dir true))))]
+            (println (str (:name e) " is on call (" (:dir e) ")"))
+            (oncall-said e))
+    "remove" (let [nm (first args)
+                   [before after] (cond nm (set-oncall! nm false)
+                                        :else (if-let [e (folder-agent)]
+                                                (set-oncall! (:name e) false)
+                                                (let [[nm dir] (here-oncall "remove" "NAME")]
+                                                  [nil (put-agent! nm dir false)])))]
+               (println (if (:oncall before)
+                          (str (:name after) " is no longer on call; wait won't put it back (`oncall add` does)")
+                          (str (:name after) " was not on call; wait won't put it on call either"))))
     nil (let [v (oncall-view)]
           (if (:json opts)
             (println (json/generate-string v {:pretty true}))
@@ -1172,6 +1480,112 @@
                   (println "nothing on call"))
                 (println (serve-line)))))
     (fail "unknown oncall command" sub "(add or remove)")))
+
+(defn optional-text
+  "Text that may or may not be given: the words, then what stands ready on
+   stdin after a blank line (as for send), never waited for; nil when
+   there is none."
+  [words]
+  (let [text (str/join " " words)
+        more (stdin-content)]
+    (not-empty (str/trim (if (str/blank? more) text (str text "\n\n" (str/trim more)))))))
+
+(defn agents-list
+  "`agents`: every agent with its folder, whether it is on call and its
+   summary (a borrowed one says where from); a folder that is gone, or one
+   Claude Code hasn't trusted while on call, is marked."
+  [opts]
+  (let [v (agents-view (directory) (:json opts))]
+    (if (:json opts)
+      (println (json/generate-string v {:pretty true}))
+      (if (empty? v)
+        (println "the agent directory is empty; `agent-mail agents add [DIR]` adds a folder")
+        (doseq [a v]
+          (println (format "%-20s %-8s %s%s" (:name a) (if (:oncall a) "on call" "off call") (:dir a)
+                           (cond (not (:dir-exists a)) "  (folder gone)"
+                                 (and (:oncall a) (false? (:trusted a))) "  (not trusted by Claude Code: run `claude` there once)"
+                                 :else "")))
+          (println (str "  " (or (:summary a) "(no description)")
+                        (when-let [b (:borrowed a)] (str " (from " b ")")))))))))
+
+(defn agents-add
+  "`agents add [DIR] [--name NAME] [description…]`: DIR when the first
+   argument names a folder (an existing directory, or a path with a `/`),
+   else the caller's repo at its main worktree, else the current folder.
+   NAME defaults to the folder's (core/name-from-dir). On call."
+  [opts args]
+  (let [a (first args)
+        dir? (and a (or (str/includes? a "/") (#{"." ".."} a) (fs/directory? a)))
+        [dir words] (if dir? [a (rest args)] [nil args])
+        folder (if dir
+                 (let [d (fs/normalize (fs/absolutize dir))]
+                   (when-not (fs/directory? d) (fail "no such directory:" (str d)))
+                   (:folder (folder-place d)))
+                 (:dir (here)))
+        nm (or (:name opts) (core/name-from-dir (fs/file-name folder))
+               (fail (str "no name can be made from " folder "; give --name NAME")))
+        _ (when-not (core/agent-name? nm)
+            (fail "bad name:" (pr-str nm) "(letters, digits, `.`, `_` and `-`; not `user`)"))
+        desc (optional-text words)
+        e (get (directory! (fn [d]
+                             (when-let [o (entry-at d folder nil)]
+                               (fail (str folder " is already in the agent directory, as " (:name o))))
+                             (when-let [o (d nm)]
+                               (fail (str nm " is already in the agent directory, for " (:dir o)
+                                          "; `agent-mail agents move " nm " DIR` moves it")))
+                             [(str "📇 agents: add " nm) {nm (new-entry nm folder true desc)}]))
+               nm)]
+    (println (str nm " is in the agent directory, on call (" folder ")"))
+    (when-not desc
+      (println (str "Say what it owns and what to ask it for: `agent-mail agents describe " nm " < about.md`")))
+    (oncall-said e)))
+
+(defn agents-describe
+  "`agents describe [NAME] [text…] [< about.md]`: an agent describes only
+   itself; the user describes any agent, by name."
+  [opts [nm & words]]
+  (let [me (caller opts)
+        nm (or nm (if (= "user" me) (fail "agents describe takes the agent's NAME") me))
+        _ (when-not (or (= "user" me) (= nm me))
+            (fail (str "an agent describes only itself: you are " me ", not " nm " (the user may describe any agent)")))
+        desc (or (optional-text words)
+                 (when (System/console)
+                   (note "reading the description from stdin, end with Ctrl-D")
+                   (not-empty (str/trim (slurp *in*))))
+                 (fail (str "empty description: give it on stdin, `agent-mail agents describe " nm " < about.md`")))]
+    (directory! (fn [d]
+                  (let [e (or (d nm) (fail (core/unknown-agent nm (keys d))))]
+                    [(str "📇 agents: describe " nm) {nm (assoc e :description desc)}])))
+    (println (str nm ": " (core/description-summary desc)))))
+
+(defn cmd-agents
+  "The agent directory: list it (--json for UIs), add a folder, describe,
+   move or remove an agent. Past mail keeps a removed agent's name."
+  [opts [sub & args]]
+  (case sub
+    nil (agents-list opts)
+    "add" (agents-add opts args)
+    "describe" (agents-describe opts args)
+    "move" (let [[nm dir] args
+                 _ (when-not (and nm dir) (fail "agents move takes NAME and DIR"))
+                 d (fs/normalize (fs/absolutize dir))
+                 _ (when-not (fs/directory? d) (fail "no such directory:" (str d)))
+                 folder (:folder (folder-place d))
+                 e (get (directory! (fn [dm]
+                                      (let [e (or (dm nm) (fail (core/unknown-agent nm (keys dm))))]
+                                        (when-let [o (entry-at dm folder nm)]
+                                          (fail (str folder " is already in the agent directory, as " (:name o))))
+                                        [(str "📇 agents: move " nm " to " folder)
+                                         {nm (assoc e :dir folder :file-id (file-id folder))}])))
+                        nm)]
+             (println (str nm " is now at " folder))
+             (when-let [l (trust-line e (trust-of))] (println l)))
+    "remove" (let [nm (or (first args) (fail "agents remove takes NAME"))]
+               (directory! (fn [d]
+                             (when-not (d nm) (fail (core/unknown-agent nm (keys d))))
+                             [(str "📇 agents: remove " nm) {nm nil}]))
+               (println (str nm " is no longer in the agent directory; its past mail keeps the name")))
+    (fail "unknown agents command" sub "(add, describe, move or remove)")))
 
 ;; ---------------------------------------------------------------- serve
 
@@ -1263,11 +1677,13 @@
 
 (defn serve-round!
   "One round: gathers what core/serve-actions decides on, carries out its
-   actions and returns serve's memory after them. Reads no thread while
-   nothing is on call and nothing is remembered, and asks Claude Code for its
-   sessions only when core/serve-wants says so."
+   actions and returns serve's memory after them. The agents on call and
+   their folders come from the directory (migrated first, once). Reads no
+   thread while nothing is on call and nothing is remembered, and asks
+   Claude Code for its sessions only when core/serve-wants says so."
   [memory {:keys [grace-ms check-ms]}]
-  (let [oncall (oncall-registered)]
+  (when (fs/exists? (fs/path store ".git")) (migrate-directory!))
+  (let [oncall (oncall-agents)]
     (if (and (empty? oncall) (every? empty? (vals memory)))
       memory
       (let [now (System/currentTimeMillis)
@@ -1408,15 +1824,29 @@
                                               on you says what for and `claude attach ID`)
   agent-mail who --here                       the other Claude Code sessions working in this
                                               folder, by the names SendMessage takes
-  agent-mail oncall [--json]                  repos on call: serve hands each of their threads
+  agent-mail agents [--json]                  the agent directory: each agent's folder, whether
+                                              it is on call, and its summary (else the first
+                                              paragraph of the folder's CLAUDE.md or README.md)
+  agent-mail agents add [DIR] [--name NAME] [description…]
+                                              add a folder, on call: by default this repo at
+                                              its main worktree, else this folder; NAME
+                                              defaults to the folder's name (letters, digits,
+                                              `.`, `_` and `-`)
+  agent-mail agents describe [NAME] [< about.md]
+                                              what the agent owns and what to ask it for, the
+                                              first line its summary. An agent describes only
+                                              itself; the user describes anyone
+  agent-mail agents move NAME DIR             the agent's folder is now DIR
+  agent-mail agents remove NAME               out of the directory; past mail keeps the name
+  agent-mail oncall [--json]                  agents on call: serve hands each of their threads
                                               to a Claude Code session
-  agent-mail oncall add [NAME DIR]            put a repo on call; no arguments: this repo, at
-                                              its main worktree; outside any repo, this
-                                              folder, as its name with whitespace made `-`
-                                              (the name an agent there writes as).
-                                              /agent-mail-listen does this
-  agent-mail oncall remove [NAME]             take it off (no NAME: this folder, as add); wait
-                                              won't put it back
+  agent-mail oncall add [NAME [DIR]]          put an agent on call: NAME (at DIR: added, or
+                                              moved there); no arguments: this folder's agent,
+                                              else this repo at its main worktree, or outside
+                                              any repo this folder, as its name with whitespace
+                                              made `-`. /agent-mail-listen does this
+  agent-mail oncall remove [NAME]             take it off (no NAME: this folder's, as add);
+                                              wait won't put it back
   agent-mail serve [--interval S] [--once] [--standby]
                                               the on-call daemon (`just install-serve` runs it
                                               under launchd). Every S (5) seconds, each open
@@ -1450,8 +1880,14 @@ Viewer for open: AGENT_MAIL_VIEWER, else the macOS default app for .md.
 Editor for reply: AGENT_MAIL_EDITOR, else $VISUAL, else $EDITOR, else `open -W`
 (your Markdown app, until you quit it). E.g. AGENT_MAIL_EDITOR='zed --wait'.
 A notification click runs `agent-mail open ID` (needs terminal-notifier).
-Who am I: the repo I run in (main worktree name), `user` outside any repo;
---as NAME or AGENT_MAIL_AS overrides. Bodies are Markdown; attachments are
+Who am I: in your own shell, `user`. In an agent's shell, the agent whose
+folder in the directory (<store>/agents) is this folder or the nearest above
+it, up to the repo's root; a worktree counts as its repo, a moved folder is
+found by its file id (and the directory follows it), and outside git the
+folder the session started in is tried too. Else the repo's name (main
+worktree), or outside any repo the folder's; that folder joins the
+directory, on call, with its first mail. --as NAME or AGENT_MAIL_AS
+overrides. Bodies are Markdown; attachments are
 copied into the thread and `read` prints their absolute paths. --date backfills
 a timestamp when importing old threads; otherwise the tool stamps time.
 A message written in a Claude Code session records it (CLAUDE_CODE_SESSION_ID),
@@ -1477,6 +1913,7 @@ Store: $AGENT_MAIL_DIR, else ~/.local/share/agent-mail.")
         "wait" (cmd-wait opts)
         "who" (cmd-who opts)
         "oncall" (cmd-oncall opts args)
+        "agents" (cmd-agents opts args)
         "serve" (cmd-serve opts)
         "status" (cmd-status opts)
         "hook" (cmd-hook opts)

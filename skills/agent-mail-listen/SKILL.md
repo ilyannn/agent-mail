@@ -16,13 +16,20 @@ this session afterwards.
    "$HOME/.local/bin/agent-mail" oncall add
    ```
 
-   It registers the repo at its main worktree and says whether serve runs.
-   Outside a git repo it registers the folder itself, under the name the
-   session writes as (whitespace becomes `-`), and says so on stderr.
+   It puts this folder's agent in the agent directory on call; a repo the
+   directory doesn't have yet joins it at its main worktree. Outside a git
+   repo it adds the folder itself, under the name the session writes as
+   (whitespace becomes `-`), and says so on stderr. It says whether serve
+   runs, and whether Claude Code trusts the folder.
 2. **If serve isn't running** (the output says `serve: not running`), tell
    the user: nothing on call is delivered until it runs. `just install-serve`
-   in the agent-mail repo keeps it running under launchd.
-3. **Say in one line** that the repo is on call, and stop. Do not run
+   in the agent-mail repo keeps it running under launchd. If the output says
+   Claude Code hasn't trusted the folder, tell the user too.
+3. **Describe the repo** if `agent-mail agents` shows no description for it
+   (`(no description)`, or a paragraph marked `(from CLAUDE.md)`): write what
+   it owns and what to ask it for to a scratch file, first line the summary,
+   and run `agent-mail agents describe < that-file`.
+4. **Say in one line** that the repo is on call, and stop. Do not run
    `agent-mail wait`: in a Claude Code session it only prints a notice now.
 
 ## How serve delivers
@@ -49,13 +56,14 @@ this session afterwards.
   `agent-mail who` lists the ones serve handed threads to.
 - `claude --bg` only runs in a folder Claude Code trusts: run `claude` in the
   repo once and accept the question. Until then serve backs off, and
-  `agent-mail oncall` shows why. A plain folder inside a trusted one is
-  trusted too, but a git repo nested inside one is not: run `claude` in the
-  repo itself.
+  `agent-mail oncall` shows why; `agent-mail agents` marks the folder. A
+  plain folder inside a trusted one is trusted too, but a git repo nested
+  inside one is not: run `claude` in the repo itself.
 - Nobody sits at a background session. A permission prompt holds it until the
   user opens it with `claude attach <id>`. Once one of serve's sessions has
   waited 2 minutes, serve tells the user with a notification, and `agent-mail
   who` and `agent-mail oncall` show what it waits for while it waits.
+- Serve starts sessions in the folder the agent directory gives.
 - Serve stops the sessions it started once they are idle, hold no open thread
   and their prompt cache has expired. The conversation is kept, and a later
   message resumes it or goes to a new session. A session started or stopped
@@ -64,7 +72,7 @@ this session afterwards.
   says nothing of the threads serve delivers, so it doesn't take them on.
 
 `agent-mail oncall` shows the state; `agent-mail oncall remove` takes the repo
-off call, and `wait` won't put it back.
+off call (it stays in the directory), and `wait` won't put it back.
 
 Repo-specific steps for handling mail live in the repo's CLAUDE.md, not here.
 If a message asks for something this repo doesn't own, reply saying which repo
