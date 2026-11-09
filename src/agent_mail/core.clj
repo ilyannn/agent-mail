@@ -554,8 +554,10 @@
 ;; serve started for it since. A running holder gets the message posted into
 ;; its inbox; a stopped background one whose prompt cache is still warm is
 ;; resumed with it; otherwise serve starts a background session for the
-;; thread. It stops the sessions it started once they idle with nothing
-;; waiting and their cache has expired. Its memory, times in epoch
+;; thread. It stops the sessions it started once they have been idle for
+;; idle-stop-ms, held thread or not: the prompt cache lives on the server,
+;; so a stopped session resumes as cheaply as a running one takes a post,
+;; and only the process's memory is saved. Its memory, times in epoch
 ;; milliseconds as Claude Code's registry has them:
 ;;   {:threads  {id {:agent :number :delivered (newest message file handed on)
 ;;                   :holder (short id) :deaf #{short ids that held a post}
@@ -606,6 +608,22 @@
 (def default-ttl-ms
   "A prompt cache's lifetime when nothing says otherwise: one hour."
   3600000)
+
+(def idle-stop-ms
+  "How long a session serve started has to be idle (registry status
+   \"idle\" since its statusUpdatedAt) before serve stops it, whether or
+   not it holds a thread. The prompt cache lives on the server, not in
+   the process: a stopped session is resumed while the cache is warm, as
+   routing does anyway, and replaced by a new one once it is cold. Only
+   the process's memory is saved. \"shell\" (a background task runs),
+   \"waiting\" (a prompt) and \"busy\" never count as idle here."
+  300000)
+
+(defn- resting?
+  "Whether running session `e` is idle as idle-stop-ms means it: registry
+   status \"idle\", or no status and `claude agents` calling it done."
+  [e]
+  (or (= "idle" (:status e)) (and (nil? (:status e)) (= "done" (:run-state e)))))
 
 (defn back-off-ms
   "How long serve leaves an agent alone after its `n`th failure in a row: two
@@ -1017,10 +1035,12 @@
    [:start A T text info]   `claude --bg --name …` in A's folder, for the
                             `max-starts` lowest thread numbers this round;
                             the others go out in later rounds
-   [:stop S info]           `claude stop`: a session serve started, idle,
-                            holding no open thread and its cache expired
-                            (the registry's statusUpdatedAt + 1 h without a
-                            transcript)
+   [:stop S info]           `claude stop`: a session serve started, idle
+                            for idle-stop-ms by the registry's
+                            statusUpdatedAt (:idle-since), held thread or
+                            not; never while it runs a background task
+                            (shell), waits on the user or is busy, nor with
+                            a post into it checked or made this round
    [:needs-input S info]    tell the user: background session S has waited
                             on them (a permission prompt) `needs-input-ms`
                             (see needs-input); serve's own are looked at
@@ -1084,21 +1104,15 @@
                                                 :else [acc n]))
                                         [[] 0])
                                 first))
-        held (set (for [th (vals open)
-                        :let [h (holder th (:owner th) memory (get-in memory [:threads (:id th) :deaf]))]
-                        :when h]
-                    (short-id (:sid h))))
         checking (set (for [[t m] (:threads memory) :when (and (:check m) (open t))] (short-id (get-in m [:check :session]))))
         targeted (set (keep (fn [[kind _ s]] (when (#{:post :resume} kind) (short-id s))) deliveries))
         stops (when live
                 (for [[k s] sessions
-                      :let [e (find-session live k)]
-                      :when (and (:ours s) e (or (contains? idle-statuses (:status e)) (= "done" (:run-state e)))
-                                 (not (held k)) (not (checking k)) (not (targeted k)))
-                      :let [until (or (expiry (or (:session-id e) (:session-id s)))
-                                      (some-> (:status-updated-at e) (+ default-ttl-ms)))]
-                      :when (and until (<= until now))]
-                  [:stop k {:id (:id e) :name (or (:name e) (:name s)) :agent (:agent s) :expired until}]))
+                      :let [e (find-session live k)
+                            since (:status-updated-at e)]
+                      :when (and (:ours s) e (resting? e) (number? since) (>= (- now since) idle-stop-ms)
+                                 (not (checking k)) (not (targeted k)))]
+                  [:stop k {:id (:id e) :name (or (:name e) (:name s)) :agent (:agent s) :idle-since since}]))
         alerts (when live
                  (keep (fn [[k s]] (when-let [e (find-session live k)] (needs-input k s e now))) sessions))]
     (vec (concat forget observe drops checks deliveries stops alerts))))

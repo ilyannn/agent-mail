@@ -117,7 +117,10 @@ same thing (a report and the user's note on one bug), agree with it by
 SendMessage which of you handles both. The one taking over writes in the
 other thread, which makes serve post that thread's later messages to it.
 Nobody sits at such a session, so a call that needs the user's approval holds
-it until they open it; serve tells them after 2 minutes. Put questions for the
+it until they open it; serve tells them after 2 minutes. Serve stops such a
+session once it has been idle for 5 minutes and resumes it with the thread's
+next message while its prompt cache is warm, so ending a turn to wait for an
+answer costs nothing. Put questions for the
 user in the thread (`agent-mail reply N --to user`), not at the end of a turn.
 When the directory has no description of your agent yet, the first prompt
 asks for one: write it with `agent-mail agents describe < about.md`, saying

@@ -497,7 +497,7 @@
               [[kind t sid text]] (sent all)]
           (is (= [:post "t2" "aaaa1111"] [kind t sid]) "t2's later messages go to aaaa1111")
           (is (str/includes? text "because this session wrote in this thread"))
-          (is (= ["bbbb2222"] (map second (only [:stop] all))) "bbbb2222 holds nothing now: stopped once its cache expired"))))
+          (is (= ["bbbb2222"] (map second (only [:stop] all))) "bbbb2222, idle for 2 h, is stopped"))))
     (testing "a session on its way: no second one; past the grace period, back off and deliver again later"
       (let [m (mem :sessions {"bbbb2222" (ours :state "starting" :since (- now 119999))})]
         (is (= [] (acts {:threads [talk] :memory m})))
@@ -508,7 +508,7 @@
                    :threads {"t1" {:delivered "000.md"}})]
         (is (= [[:observe "bbbb2222" {:state "live" :status "idle" :kind "background" :name "📫 infra #1" :session-id "bbbb2222-full"}]
                 [:reset "infra"]]
-               (acts {:memory m :live [(live-s "bbbb2222" :status "idle" :name "📫 infra #1")]}))
+               (acts {:memory m :live [(live-s "bbbb2222" :status "idle" :name "📫 infra #1" :status-updated-at (- now 1000))]}))
             "it showed up: the back-off is over")))
     (testing "a post into an idle session that stays idle 30 s was held: another session takes the thread"
       (let [check {:session "aaaa1111" :file "002.md" :at (- now 30000) :status-updated-at 5}
@@ -525,27 +525,35 @@
             "too early to tell"))
       (is (= [:start] (kinds (acts {:threads [talk] :memory (mem :threads {"t1" {:deaf #{"aaaa1111"}}}) :live [(live-s "aaaa1111")]})))
           "a session that held a post is passed over for that thread"))
-    (testing "serve stops a session it started once idle, holding no open thread, its cache expired"
+    (testing "serve stops a session it started once idle 5 min, holding a thread or not"
       (let [m (mem :sessions {"cccc3333" (ours :thread "t9" :session-id "cccc3333-full")})
-            idle (live-s "cccc3333" :status "idle" :status-updated-at (- now (* 2 hour)))
-            stop [:stop "cccc3333" {:id "cccc3333" :name "s-cccc3333" :agent "infra" :expired (- now hour)}]
-            stops #(only [:stop] (acts %))]
-        (is (= [stop] (stops {:threads [] :memory m :live [idle]})) "no transcript: statusUpdatedAt + 1 h")
-        (is (= [(assoc-in stop [2 :expired] (dec now))] (stops {:threads [] :memory m :live [idle] :expiry {"cccc3333-full" (dec now)}})))
-        (is (= [] (stops {:threads [] :memory m :live [idle] :expiry {"cccc3333-full" (inc now)}})) "the transcript says warm")
-        (is (= [] (stops {:threads [] :memory m :live [(assoc idle :status "busy")]})))
+            since (- now core/idle-stop-ms)
+            idle (live-s "cccc3333" :status "idle" :status-updated-at since)
+            stop [:stop "cccc3333" {:id "cccc3333" :name "s-cccc3333" :agent "infra" :idle-since since}]
+            stops #(only [:stop] (acts %))
+            t9 (th "t9" 9 [(msg 0 "web" "infra")])]
+        (is (= 300000 core/idle-stop-ms))
+        (is (= [stop] (stops {:threads [] :memory m :live [idle]})) "idle since statusUpdatedAt, 5 min ago")
+        (is (= [] (stops {:threads [] :memory m :live [(assoc idle :status-updated-at (inc since))]})) "not 5 min yet")
+        (is (= [] (stops {:threads [] :memory m :live [(dissoc idle :status-updated-at)]})) "since when is unknown")
+        (is (= [] (stops {:threads [] :memory m :live [(assoc idle :status "busy")]})) "busy")
+        (is (= [] (stops {:threads [] :memory m :live [(assoc idle :status "shell")]})) "a background task runs")
         (is (= [] (stops {:threads [] :memory m :live [(assoc idle :status "waiting")]})) "waiting on the user")
-        (is (= [stop] (stops {:threads [] :memory m :live [(assoc idle :status "shell")]})))
-        (is (= [stop] (stops {:threads [] :memory m :live [(assoc idle :status nil :run-state "done")]})))
+        (is (= [(assoc-in stop [2 :idle-since] (- now hour))]
+               (stops {:threads [] :memory m :live [(assoc idle :status nil :run-state "done" :status-updated-at (- now hour))]}))
+            "no status, and done")
         (is (= [] (stops {:threads [] :memory (assoc-in m [:sessions "cccc3333" :ours] false) :live [idle]})) "never one serve didn't start")
-        (is (= [] (stops {:threads [(th "t9" 9 [(msg 0 "web" "infra")])] :memory (assoc-in m [:threads "t9"] {:delivered "000.md"})
-                          :live [idle]}))
-            "an open thread waits on it")
-        (is (= [] (stops {:threads [(th "t9" 9 [(msg 0 "web" "infra")])]
-                          :memory (assoc-in m [:threads "t9"] {:delivered "000.md" :check {:session "cccc3333" :at now}}) :live [idle]}))
-            "a post into it is being checked")
+        (is (= [stop] (stops {:threads [t9] :memory (assoc-in m [:threads "t9"] {:delivered "000.md"}) :live [idle]}))
+            "an open thread waits on it: stopped all the same, and resumed with the next message")
         (is (= [stop] (stops {:threads [(th "t9" 9 [(msg 0 "web" "infra") (msg 1 "infra" "user")])] :memory m :live [idle]}))
-            "its thread waits on the user, not on it")))
+            "its thread waits on the user")
+        (is (= [] (stops {:threads [t9] :memory (assoc-in m [:threads "t9"] {:delivered "000.md" :check {:session "cccc3333" :at now}})
+                          :live [idle]}))
+            "a post into it is being checked")
+        (is (= [:post] (kinds (only [:post :stop] (acts {:threads [t9] :memory m :live [idle]}))))
+            "a post into it this round: not stopped under it")
+        (is (= [stop] (stops {:threads [] :memory m :live [idle] :expiry {"cccc3333-full" (+ now hour)}}))
+            "a warm cache keeps nothing running: it is resumed from the server's cache")))
     (testing "a background session waiting on the user for 2 min: the user is told, once a wait"
       (let [since (- now 120000)
             waiting (live-s "bbbb2222" :status "waiting" :waiting-for "permission prompt" :needs "approve Read: /etc/hosts")
@@ -1982,22 +1990,25 @@
                 (is (str/starts-with? (nth bg 3) "agent-mail serve started this session for thread #1"))
                 (is (str/ends-with? (nth bg 3) (str "\nAlso working in this folder: \"infra-ab12\" (interactive, idle). " core/coordinate-sentence))))
               (is (= [true "starting" id] ((juxt :ours :state :thread) (get-in (memory) [:sessions "cafebabe"])))))
-            (testing "serve stops a session it started once idle, holding no open thread, its cache expired"
+            (testing "serve stops a session it started once idle 5 min, though its thread waits on it"
               (json! "agents.json" [{:id "cafebabe" :sessionId "cafebabe-0000-4000-8000-000000000000" :pid other-pid :cwd infra-real
                                      :name "📫 infra #1" :kind "background" :status "idle" :state "running"}])
-              (registry! cfg other-pid {:pid other-pid :status "idle" :statusUpdatedAt (- (System/currentTimeMillis) (* 2 hour)) :kind "bg"})
+              (registry! cfg other-pid {:pid other-pid :status "idle" :statusUpdatedAt (- (System/currentTimeMillis) minute) :kind "bg"})
               (serve)
-              (is (empty? (filter #(= "stop" (first %)) (calls))) "its thread still waits on it")
-              (out {:who "website"} "close" id "Never mind the backup key.")
+              (is (empty? (filter #(= "stop" (first %)) (calls))) "idle a minute: kept")
+              (registry! cfg other-pid {:pid other-pid :status "idle" :statusUpdatedAt (- (System/currentTimeMillis) (* 6 minute)) :kind "bg"})
               (clear!)
               (let [r (serve)]
-                (is (str/includes? (:err r) "stop \"📫 infra #1\" (cafebabe): idle, holding no open thread, its cache expired at ")))
+                (is (re-find #"stop \"📫 infra #1\" \(cafebabe\): idle since \d\d:\d\d" (:err r))))
               (is (= [["stop" "cafebabe"]] (map #(take 2 %) (filter #(= "stop" (first %)) (calls)))))
               (is (= "stopped" (get-in (memory) [:sessions "cafebabe" :state])))
               (json! "agents.json" [])
               (clear!)
               (serve)
               (is (= [] (calls)) "nothing of its own runs: Claude Code is not asked")
+              (is (= "stopped" (get-in (memory) [:sessions "cafebabe" :state])) "kept in mind while its thread is open")
+              (out {:who "website"} "close" id "Never mind the backup key.")
+              (serve)
               (is (= {} (:sessions (memory))) "their thread closed: forgotten")
               (is (= [id] (keys (:threads (memory)))) "the thread is kept while its close is news for infra")
               (out as-session "read" id)

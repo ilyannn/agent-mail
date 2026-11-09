@@ -1728,10 +1728,10 @@
                                             (if (zero? (:exit r))
                                               (str "`claude --bg` printed no session id: " (core/first-line (str (:out r))))
                                               (core/claude-failure "`claude --bg`" r))))))
-      :stop (let [[sid {:keys [id name expired]}] args
+      :stop (let [[sid {:keys [id name idle-since]}] args
                   r (run-claude! {} "stop" (or id sid))]
               (if (zero? (:exit r))
-                (do (log! (str "stop " (named name sid) ": idle, holding no open thread, its cache expired at " (core/clock expired)))
+                (do (log! (str "stop " (named name sid) ": idle since " (core/clock idle-since)))
                     (remember [:stopped sid]))
                 (do (log! (str "stop " (named name sid) ": " (core/claude-failure "`claude stop`" r)))
                     memory)))
@@ -1954,8 +1954,10 @@
                                               thread closed with news for the repo is posted
                                               only into a running holder, and says it is
                                               closed. Sessions it started are
-                                              stopped once idle, holding no open thread, with
-                                              their cache expired. A background session of its
+                                              stopped once idle for 5 min, holding a thread or
+                                              not (never while busy, running a background task
+                                              or waiting on you): a later message resumes them
+                                              while their cache is warm. A background session of its
                                               that waits on you (a permission prompt) for 2 min
                                               is reported once: a notification, serve's log,
                                               and `who`/`oncall` while it waits. `claude agents`

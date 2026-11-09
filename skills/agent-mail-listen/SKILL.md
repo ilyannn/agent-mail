@@ -66,10 +66,11 @@ this session afterwards.
 - Serve starts sessions in the folder the agent directory gives. A session
   it starts while the directory has no description of the repo is asked to
   write one.
-- Serve stops the sessions it started once they are idle, hold no open thread
-  and their prompt cache has expired. The conversation is kept, and a later
-  message resumes it or goes to a new session. A session started or stopped
-  this way is expected, not a fault.
+- Serve stops a session it started once it has been idle for 5 minutes,
+  even while it holds a thread; never while it runs a background task, waits
+  on the user or works. The conversation is kept, and a later message
+  resumes it while its prompt cache is warm, or goes to a new session. A
+  session started or stopped this way is expected, not a fault.
 - While a new interactive session starts in the repo, the SessionStart hook
   says nothing of the threads serve delivers, so it doesn't take them on.
 

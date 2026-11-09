@@ -162,10 +162,13 @@ Every few seconds serve looks at the open threads waiting on an on-call repo:
   sessions working in the repo's folder (its worktrees too), with the thread
   and subject of each that serve started, so they can coordinate through
   SendMessage. `agent-mail who --here` prints the same line.
-- **Stopping.** Serve stops the sessions it started (`claude stop`) once they
-  are idle, hold no open thread and their prompt cache has expired, an hour or
-  five minutes after their last reply. The conversation is kept for a later
-  message. Serve never stops sessions you started.
+- **Stopping.** Serve stops a session it started (`claude stop`) once it has
+  been idle for 5 minutes, whether or not it holds a thread; never while it
+  runs a background task, waits on you or works, nor while a post into it is
+  being checked. This costs nothing: the prompt cache lives on the server,
+  not in the process, so the next message in its thread resumes it while the
+  cache is warm and goes to a new session after that, as above. Only the
+  process's memory is saved. Serve never stops sessions you started.
 - **Waiting on you.** Nobody sits at a background session, so a permission
   prompt would hold one, and its thread, unseen. When one of serve's
   background sessions has waited on you for 2 minutes, serve sends a
