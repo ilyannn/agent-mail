@@ -917,7 +917,7 @@
     (is (= {:args ["send" "hi"] :opts {:attach [] :to "infra" :as "me"}} (expand ["--as" "me" "@infra" "hi"])) "options before @NAME")
     (is (= ["list"] (:args (expand ["list"]))))
     (is (= [] (:args (expand [])))))
-  (is (= "2026-10-iPhone" (core/address-from-dir "2026-10 iPhone")))
+  (is (= "2026-10-Bike" (core/address-from-dir "2026-10 Bike")))
   (is (= "a-b" (core/address-from-dir " a / b ")))
   (is (nil? (core/address-from-dir "  ")))
   (is (= "infra" (:name (:opts (core/parse-argv ["agents" "add" "--name" "infra"])))) "--name takes a value"))
@@ -927,7 +927,7 @@
 (deftest agent-directory-helpers
   (testing "name derivation: the folder's name, whitespace made -, keeping letters, digits, . _ and -"
     (is (= "agent-mail" (core/name-from-dir "agent-mail")))
-    (is (= "2026-10-iPhone" (core/name-from-dir "2026-10 iPhone")) "as an agent there writes as")
+    (is (= "2026-10-Bike" (core/name-from-dir "2026-10 Bike")) "as an agent there writes as")
     (is (= "my_app.v2" (core/name-from-dir "my_app.v2")))
     (is (= "ab" (core/name-from-dir "a+b")))
     (is (= "café" (core/name-from-dir "café")) "letters beyond ASCII are letters")
@@ -1366,10 +1366,10 @@
 (deftest caller-from-a-directory-with-a-space
   (with-store
     (with-dir [d]
-      (let [dir (str (fs/create-dirs (fs/path d "2026-10 iPhone")))
+      (let [dir (str (fs/create-dirs (fs/path d "2026-10 Bike")))
             r (am {:dir dir} "whoami")]
-        (is (= "2026-10-iPhone" (str/trim (:out r))) "the folder's name, made an address")
-        (is (str/includes? (:err r) "acting as \"2026-10-iPhone\"")))
+        (is (= "2026-10-Bike" (str/trim (:out r))) "the folder's name, made an address")
+        (is (str/includes? (:err r) "acting as \"2026-10-Bike\"")))
       (testing "--as before @NAME"
         (let [id (out {:dir d} "--as" "guide" "@b" "hello")]
           (is (= "guide" (:from (first (:msgs (thread-json id)))))))))))
@@ -2137,18 +2137,18 @@
           (out {:dir repo} "oncall" "add")
           (is (= ["docs" "repo-x"] (map :repo (listed)))))
         (testing "outside any repo, no arguments: the folder itself, by the name an agent there writes as"
-          (let [plain (str (fs/path d "2026-10 iPhone"))]
+          (let [plain (str (fs/path d "2026-10 Bike"))]
             (fs/create-dirs plain)
             (let [r (am {:dir plain :env user-shell} "oncall" "add")]
               (is (zero? (:exit r)) (:err r))
-              (is (str/starts-with? (:out r) "2026-10-iPhone is on call ("))
-              (is (= (str "agent-mail: not in a git repo; taking this folder as \"2026-10-iPhone\""
+              (is (str/starts-with? (:out r) "2026-10-Bike is on call ("))
+              (is (= (str "agent-mail: not in a git repo; taking this folder as \"2026-10-Bike\""
                           " (`agent-mail oncall add NAME DIR` to choose)")
                      (str/trim (:err r)))))
-            (is (= (real plain) (real (:dir (first (filter #(= "2026-10-iPhone" (:repo %)) (listed)))))))
-            (is (= "2026-10-iPhone" (out {:dir plain} "whoami")))
+            (is (= (real plain) (real (:dir (first (filter #(= "2026-10-Bike" (:repo %)) (listed)))))))
+            (is (= "2026-10-Bike" (out {:dir plain} "whoami")))
             (let [r (am {:dir plain} "oncall" "remove")]
-              (is (= "2026-10-iPhone is no longer on call; wait won't put it back (`oncall add` does)" (str/trim (:out r))))
+              (is (= "2026-10-Bike is no longer on call; wait won't put it back (`oncall add` does)" (str/trim (:out r))))
               (is (str/blank? (:err r)) "the folder is in the directory now: nothing to choose"))
             (is (= ["docs" "repo-x"] (map :repo (listed)))))
           (let [other (str (fs/create-dirs (fs/path d "elsewhere")))
@@ -2406,8 +2406,8 @@
               (is (= ["zone" ""] (who repo2)) "a repo without an entry of its own is the agent whose folder encloses it"))
             (is (= ["zone" ""] (who (mk "zone" "plain" "deep"))) "outside git too")))
         (testing "a repo nested in a plain folder's agent, and a worktree of it elsewhere, are that agent"
-          (let [plain (mk "2026-10 iPhone")
-                guide (mk "2026-10 iPhone" "iPhone guide")
+          (let [plain (mk "2026-10 Bike")
+                guide (mk "2026-10 Bike" "Bike guide")
                 guide-wt (str (fs/path d "guide-wt"))]
             (add! plain)
             (spit (str (fs/path guide "notes.md")) "x")
@@ -2415,11 +2415,11 @@
             (git-in guide "add" "-A")
             (git-in guide "commit" "-q" "-m" "i")
             (git-in guide "worktree" "add" "-q" guide-wt "-b" "wt")
-            (is (= ["2026-10-iPhone" ""] (who guide)) "not iPhone-guide")
-            (is (= ["2026-10-iPhone" ""] (who guide-wt)))
+            (is (= ["2026-10-Bike" ""] (who guide)) "not Bike-guide")
+            (is (= ["2026-10-Bike" ""] (who guide-wt)))
             (let [r (am {:dir guide-wt} "@user" "From the guide")]
               (is (zero? (:exit r)) (:err r))
-              (is (= "2026-10-iPhone" (:from (first (:msgs (thread-json (str/trim (:out r))))))) "so the user's reply reaches it")
+              (is (= "2026-10-Bike" (:from (first (:msgs (thread-json (str/trim (:out r))))))) "so the user's reply reaches it")
               (is (not (str/includes? (:err r) "added")) "nothing new joins the directory"))))
         (testing "a folder moved: found by its file id, and the directory follows it"
           (fs/move tools moved)

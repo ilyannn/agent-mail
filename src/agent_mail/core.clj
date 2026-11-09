@@ -1315,7 +1315,7 @@
 
 (defn address-from-dir
   "An address derived from a directory's name: runs of whitespace and path
-   separators become one `-`, so `2026-10 iPhone` is `2026-10-iPhone`; nil
+   separators become one `-`, so `2026-10 Bike` is `2026-10-Bike`; nil
    when nothing is left."
   [dir]
   (let [x (-> (str dir) str/trim (str/replace #"[\s/\\]+" "-"))]
