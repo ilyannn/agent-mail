@@ -18,6 +18,16 @@ import Testing
         #expect(kind("seen/user.edn", modified) == .relevant)
     }
 
+    @Test func theAgentDirectoryCounts() {
+        // `agents add`, `oncall add`/`remove` and a description change the
+        // sidebar.
+        #expect(kind("agents/infra.md", created) == .relevant)
+        #expect(kind("agents/infra.md", modified) == .relevant)
+        #expect(kind("agents", created) == .relevant, "the folder moved in on the first write")
+        #expect(kind("agents/.infra.md.tmp", created) == .ignored)
+        #expect(kind(".agents.4242.tmp/infra.md", created) == .ignored)
+    }
+
     @Test func gitLocksDraftsAndTempFilesDont() {
         #expect(kind(".git/index", modified) == .ignored)
         #expect(kind(".git/objects/ab/cdef", created) == .ignored)

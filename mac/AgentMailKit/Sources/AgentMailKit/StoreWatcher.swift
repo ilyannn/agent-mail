@@ -1,7 +1,8 @@
 // FSEvents on the store root, as an AsyncStream that yields once per batch
-// of relevant events. File-level events with ~0.3 s latency; git's own
-// writes (every CLI write commits), the lock directory, drafts and rendered
-// views are ignored. Duty records need care: an on-duty agent rewrites its
+// of relevant events: messages, seen markers, the agent directory and duty
+// records. File-level events with ~0.3 s latency; git's own writes (every
+// CLI write commits), the lock directory, drafts and rendered views are
+// ignored. Duty records need care: an on-duty agent rewrites its
 // record every few seconds, and FSEvents flags every rewrite as Created, so
 // the watcher compares the set of record names and only a record appearing
 // or going away counts. Liveness changes without any file event (a stale
@@ -32,9 +33,10 @@ public enum StoreEventFilter {
         let parts = rel.split(separator: "/")
         guard let top = parts.first else { return .ignored }
         switch top {
-        case "threads":
+        case "threads", "agents":
             // Temporary message files (`.name.tmp`) become real by a rename,
-            // which is reported under the final name.
+            // which is reported under the final name. The same goes for the
+            // agent directory's entries (`agents/<name>.md`).
             return (parts.last?.hasPrefix(".") ?? false) ? .ignored : .relevant
         case "seen":
             return .relevant
