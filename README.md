@@ -18,7 +18,8 @@ it. There is no server and no network.
 - **Turns.** A thread is open until someone closes it. It waits on whoever the
   last message went to: that participant's turn.
 - **The agent directory** maps each agent's name to its folder and says what
-  it owns (see below). Mail goes only to `user` and to names in it.
+  it owns (see below). Mail goes only to `user`, to names in it, and to
+  `postmaster`, serve's own role (see below).
 - **Identity follows the shell.** In an agent's shell (Claude Code sets
   `CLAUDE_CODE_CHILD_SESSION`) the caller is the agent whose folder holds the
   current one. In your own shell it is `user`. `--as NAME` or `AGENT_MAIL_AS`
@@ -63,7 +64,7 @@ agent-mail read 3                  # a thread, by number, id or unique fragment
 agent-mail reply 3 "Done."         # answer; --to NAME hands the turn to someone else
 agent-mail close 3                 # finished
 agent-mail forward 3 --to docs     # a new thread carrying thread 3 (--msg N: one message)
-agent-mail who                     # who is on duty, who is on call, serve's sessions
+agent-mail who                     # who is on duty, who is on call, serve's sessions, the postmaster's notices
 agent-mail who --here              # the other Claude Code sessions in this folder
 agent-mail agents                  # the agent directory: who owns what, and where
 agent-mail help                    # everything else
@@ -108,7 +109,8 @@ and every folder below it without an entry of its own is the new agent.
   your home folder or a folder enclosing other agents' folders.
 - **Unknown names are refused.** Mail to a name not in the directory is
   refused, with the closest names and how to add a folder. Mail already in
-  the store keeps its names.
+  the store keeps its names; while serve runs, the postmaster sends a
+  thread waiting on a name the directory doesn't have back to its sender.
 - **A summary even without a description.** For an agent without one,
   `agents` shows the first paragraph of the folder's CLAUDE.md or README.md,
   marked as such. A CLAUDE.md whose first paragraph is only Claude Code
@@ -215,6 +217,43 @@ Every few seconds serve looks at the open threads waiting on an on-call repo:
 `agent-mail who` lists those serve handed threads to. A new interactive session
 in an on-call repo hears nothing of the threads serve delivers, so it doesn't
 take them on.
+
+**The postmaster.** Serve has a role of its own, `postmaster`: a script,
+not a Claude Code session. Each round it looks at the open threads that
+wait on an agent, not on you, and that nothing delivers:
+
+- **A name not in the directory**, as in mail from before it or to an
+  entry removed since. After one round of grace the postmaster writes the
+  thread back to its last sender who isn't that name, or to you when no
+  such sender is in the directory either. It names the closest agents and
+  how to pass the thread on (`agent-mail forward N --to NAME`, or
+  `agent-mail reply N --to NAME`). It is that sender's turn then, so
+  serve delivers it there. A thread goes back at most once per name.
+- **An agent off call**, with a thread that has waited on it for more
+  than an hour. You get a notice saying that nothing delivers it until a
+  session starts in the agent's folder, and that `agent-mail oncall add
+  NAME` lets serve deliver it.
+- **An agent on call that serve backs off from** for more than 15
+  minutes, or after 3 failures in a row. The notice gives serve's reason
+  and the fix where one is known: run `claude` once in a folder Claude
+  Code hasn't trusted; `agent-mail agents move NAME DIR` for a folder
+  that is gone; otherwise serve's log.
+
+A notice is mail from `postmaster` to you, with the usual notification:
+one thread per agent and kind, e.g. `postmaster: 2 threads wait on infra,
+which isn't on call`. When its threads or the reason change, the
+postmaster replies in it. Once they are delivered or closed, or the
+problem is gone, it closes the thread with a short "Delivered now". It
+keeps what it said in serve's state, so a restart repeats nothing. It
+writes only in a notice that waits on you: once you close one or answer
+it, the thread is yours, and a later change starts a new notice.
+`agent-mail who` and `oncall` list the open notices, and `status --json`
+has them as `postmaster`.
+
+Mail to `postmaster`, such as your answer to a notice, goes to the agent
+`agent-mail`, the one that owns the tool: serve delivers it there while
+that agent is on call. Anyone may send to `postmaster`; nobody writes as
+it but serve, so `--as postmaster` is refused.
 
 Requirements: `claude` on PATH or on your login shell's PATH
 (`AGENT_MAIL_CLAUDE` names another), and every on-call repo trusted by Claude

@@ -239,12 +239,27 @@
 ;; the body says what the agent owns and what to ask it for, its first line
 ;; being the summary.
 
+(def postmaster
+  "The postmaster's name: a role of serve's (see postmaster-actions), not
+   an agent. Mail may go to it, like to `user`; only serve writes as it."
+  "postmaster")
+
+(def postmaster-agent
+  "The agent serve hands postmaster's mail to: the one that owns the tool."
+  "agent-mail")
+
+(defn delivery-owner
+  "Whose sessions get the mail waiting on `owner`: postmaster-agent's for
+   postmaster's, else `owner`'s own."
+  [owner]
+  (if (= postmaster owner) postmaster-agent owner))
+
 (defn agent-name?
   "A name the directory takes: a participant name (valid-name?) other than
-   `user`, starting with neither `.` nor `-`, so its entry file is not
-   hidden and the name never reads as an option."
+   `user` and `postmaster`, starting with neither `.` nor `-`, so its entry
+   file is not hidden and the name never reads as an option."
   [s]
-  (boolean (and (valid-name? s) (not= "user" s) (re-matches #"[^.\-].*" s))))
+  (boolean (and (valid-name? s) (not (contains? #{"user" postmaster} s)) (re-matches #"[^.\-].*" s))))
 
 (defn name-from-dir
   "The name `agents add` gives a folder by default: the folder's name with
@@ -535,15 +550,17 @@
   "Who picks up an open thread: \"user\" when it waits on the user, \"on-duty\"
    when `on-duty?` (e.g. the set of repos with an on-duty record) holds for its
    owner, \"on-call\" when `on-call?` does (serve hands it to a Claude Code
-   session, see serve-actions), else \"none\". nil for a closed thread, or one
+   session, see serve-actions), else \"none\"; postmaster's mail counts as
+   postmaster-agent's (delivery-owner). nil for a closed thread, or one
    without messages yet."
   ([th on-duty?] (listener th on-duty? #{}))
   ([th on-duty? on-call?]
    (when (and (= "open" (:status th)) (:owner th))
-     (cond (= "user" (:owner th)) "user"
-           (on-duty? (:owner th)) "on-duty"
-           (on-call? (:owner th)) "on-call"
-           :else "none"))))
+     (let [o (delivery-owner (:owner th))]
+       (cond (= "user" (:owner th)) "user"
+             (on-duty? o) "on-duty"
+             (on-call? o) "on-call"
+             :else "none")))))
 
 (defn undelivered
   "Ids of the threads nobody is listening for (listener \"none\": not on
@@ -559,7 +576,7 @@
 ;; is compatible. UIs refuse a schema they don't know.
 (def status-schema 1)
 
-(declare thread-session)
+(declare thread-session postmaster-view)
 
 (defn status
   "Everything at once, for a UI that must not re-derive anything: every thread
@@ -569,8 +586,9 @@
    a thread that now waits on the caller), unread counts per participant,
    how long it has waited and who will pick it up; the duty records as
    given; and the undelivered thread ids; the on-call repos and whether
-   serve runs; the agent directory; and, for a thread serve delivered, the
-   session holding it (thread-session).
+   serve runs; the agent directory; for a thread serve delivered, the
+   session holding it (thread-session); and the postmaster's open notices
+   (postmaster-view).
    `seen` maps each reader (the caller and every participant) to their seen
    markers; `duty` is the duty records with :on-duty already decided;
    `oncall` is oncall-view's list, `serve` is {:alive :pid}, `memory`
@@ -594,7 +612,8 @@
                  (sort-by :updated #(compare %2 %1))
                  vec)]
     {:schema status-schema :now now :me me :threads ths :duty (vec duty) :undelivered (undelivered ths)
-     :oncall (vec oncall) :serve (or serve {:alive false :pid nil}) :agents (vec agents)}))
+     :oncall (vec oncall) :serve (or serve {:alive false :pid nil}) :agents (vec agents)
+     :postmaster (postmaster-view memory (into {} (map (juxt :id identity)) threads))}))
 
 ;; ---------------------------------------------------------------- serve: a session per thread
 ;; `agent-mail serve` hands the mail of on-call agents to Claude Code
@@ -619,9 +638,11 @@
 ;;                         (while it waits on the user, see needs-input-ms)
 ;;                         :unlanded {:branch :commits :at} (finished,
 ;;                         but kept: see rm-plan)}}
-;;    :agents   {agent {:failures :until :reason}}
+;;    :agents   {agent {:failures :until :reason :since (the first failure
+;;                                                       in this row)}}
 ;;    :land     {agent {:blocked (why its main checkout can't be brought
-;;                                up to date, see land-plan)}}}
+;;                                up to date, see land-plan)}}
+;;    :postmaster {:pending :notices} (see postmaster-actions)}
 ;; :state is "starting" (started or resumed, not listed by `claude agents`
 ;; yet), "live", "stopped" or "gone" (not even `claude agents --all` lists
 ;; it). The functions here decide; serve gathers and carries out.
@@ -882,9 +903,19 @@
   (str agent " has no description in the agent directory yet: write one with `agent-mail agents describe " agent
        " < about.md`, saying what this folder owns and what to ask it for."))
 
+(defn addressed-sentence
+  "What a session hears of thread `th` when it waits on postmaster (its
+   :addressed, see as-delivered): serve hands postmaster's mail to
+   `agent`, which answers as itself. nil otherwise."
+  [th agent]
+  (when (= postmaster (:addressed th))
+    (str "It waits on postmaster, agent-mail serve's own role, whose mail goes to " agent
+         ": answer as " agent ". ")))
+
 (defn first-prompt
   "The first prompt of the session serve starts for thread `th`, now
-   `agent`'s turn: what started it and for which thread, what to do, that
+   `agent`'s turn: what started it and for which thread (and that it is
+   postmaster's mail, see addressed-sentence), what to do, that
    later messages come into it and how it relates to the sessions of other
    threads (related-sentence); with `describe?`, a request to describe the
    agent (describe-sentence); then the also-line `also`."
@@ -893,6 +924,7 @@
    (let [n (or (:number th) (:id th))]
      (str "agent-mail serve started this session for thread #" n " for " agent " from " (from-who (:last-from th))
           ", \"" (:subject th) "\" (" (:id th) ", message " (count (:msgs th)) "). "
+          (addressed-sentence th agent)
           "Read it with `agent-mail read " n "` and act on it under this folder's own rules (CLAUDE.md). "
           "Answer with `agent-mail reply " n "`; close it with `agent-mail close " n "` when the work is done. "
           "Later messages in this thread are posted into this session. "
@@ -908,15 +940,16 @@
    the also-line `also`. A closed thread (news for the session, see
    closed-news?) says so, and that no answer is expected. It names the
    message's position, so a later post never repeats an earlier one word for
-   word (Claude Code drops identical posts arriving close together)."
-  [_agent th wrote? also]
+   word (Claude Code drops identical posts arriving close together).
+   Postmaster's mail says so (addressed-sentence)."
+  [agent th wrote? also]
   (let [n (or (:number th) (:id th))
         closed? (= "done" (:status th))]
     (str "agent-mail: " (if closed? "closed, with news: #" "new message in #") n " \"" (:subject th) "\" "
          (if closed? "closed by " "from ") (from-who (:last-from th))
          " (" (:id th) ", message " (count (:msgs th)) "), posted by agent-mail serve because "
          (if wrote? "this session wrote in this thread" "it started this session for this thread")
-         " (not another agent). Read it with `agent-mail read " n "`"
+         " (not another agent). " (addressed-sentence th agent) "Read it with `agent-mail read " n "`"
          (if closed?
            "; no answer is expected. To take it further, start a new thread or `agent-mail forward` it.\n"
            " and answer once the current step is done.\n")
@@ -1052,9 +1085,16 @@
    missing or not a map, so an older serve's state (tabs, under :repos)
    reads as nothing remembered."
   [st]
-  (into {} (for [k [:threads :sessions :agents :land]] [k (let [v (get st k)] (if (map? v) v {}))])))
+  (into {} (for [k [:threads :sessions :agents :land :postmaster]] [k (let [v (get st k)] (if (map? v) v {}))])))
 
 (defn- newest-file [th] (:file (peek (vec (:msgs th)))))
+
+(defn as-delivered
+  "Thread `th` as serve delivers it: one waiting on postmaster is
+   postmaster-agent's turn (delivery-owner), with :addressed postmaster,
+   so its sessions are told whose mail it is (addressed-sentence)."
+  [th]
+  (if (= postmaster (:owner th)) (assoc th :owner postmaster-agent :addressed postmaster) th))
 
 (defn holder
   "Who holds thread `th` for `agent`, {:sid :wrote?}: the session of the
@@ -1079,9 +1119,11 @@
 
 (defn- news?
   "Whether closed thread `th` has news for `agent` (see closed-news?), by
-   the seen markers in `seen` (reader -> thread id -> last file read)."
+   the seen markers in `seen` (reader -> thread id -> last file read); for
+   postmaster's mail (as-delivered), news addressed to postmaster, by
+   `agent`'s markers."
   [th agent seen]
-  (and (= "done" (:status th)) (closed-news? th agent (get-in seen [agent (:id th)]))))
+  (and (= "done" (:status th)) (closed-news? th (or (:addressed th) agent) (get-in seen [agent (:id th)]))))
 
 (defn- deliverable
   "The threads with something for serve to deliver: open, or closed with
@@ -1149,7 +1191,8 @@
    one finished to look at for removal; :known (stopped sessions too) only
    to choose between resuming and starting. Takes serve-actions' input."
   [{:keys [now memory check-ms] :as in}]
-  (let [todo (boolean (or (seq (deliverable in #{})) (seq (due-checks memory now (or check-ms post-check-ms)))))]
+  (let [in (update in :threads #(mapv as-delivered %))
+        todo (boolean (or (seq (deliverable in #{})) (seq (due-checks memory now (or check-ms post-check-ms)))))]
     {:live (boolean (or todo (some #(or (= "starting" (:state %)) (and (:ours %) (= "live" (:state %))))
                                    (vals (:sessions memory)))
                         (seq (retirable in #{}))))
@@ -1280,13 +1323,15 @@
                             on them (a permission prompt) `needs-input-ms`
                             (see needs-input); serve's own are looked at
                             every round, others when a round lists anyway
-   Sessions serve did not start are never stopped."
+   Sessions serve did not start are never stopped. A thread waiting on
+   postmaster is postmaster-agent's to deliver (as-delivered)."
   [{:keys [now oncall threads memory live known expiry agents-error grace-ms check-ms max-starts seen] :as in}]
   (let [grace-ms (or grace-ms start-grace-ms)
         check-ms (or check-ms post-check-ms)
         max-starts (or max-starts starts-per-round)
         expiry (or expiry (constantly nil))
-        in (assoc in :expiry expiry :subjects (into {} (map (juxt :id :subject)) threads))
+        threads (mapv as-delivered threads)
+        in (assoc in :threads threads :expiry expiry :subjects (into {} (map (juxt :id :subject)) threads))
         open (into {} (comp (filter #(= "open" (:status %))) (map (juxt :id identity))) threads)
         news (set (keep #(when (and (contains? oncall (:owner %)) (news? % (:owner %) seen)) (:id %)) threads))
         sessions (sort-by key (:sessions memory))
@@ -1395,7 +1440,12 @@
    [:removed S] (`claude rm` ran: forgotten), [:unlanded S {:branch
    :commits}] (kept, see rm-plan). [:post], [:resume], [:start], [:stop],
    [:land] and [:retire] themselves change nothing: they end as one of
-   those or a :back-off."
+   those or a :back-off. The postmaster's (see postmaster-actions):
+   [:pm-wait T owner], [:pm-unwait T], [:notice-forget K] as they come;
+   [:bounced T] once its bounce is written, [:noticed K info] once its
+   notice thread is (info with its :thread and :number),
+   [:notice-updated K info] and [:notice-closed K] once those are, or
+   could not be, written."
   [memory [kind & args] now]
   (let [known-thread (fn [m t f & xs] (if (get-in m [:threads t]) (apply update-in m [:threads t] f xs) m))
         known-session (fn [m k f & xs] (if (get-in m [:sessions k]) (apply update-in m [:sessions k] f xs) m))
@@ -1409,7 +1459,8 @@
       :unlanded (let [[k info] args] (known-session memory k assoc :unlanded (assoc info :at now)))
       :reset (update memory :agents dissoc (first args))
       :back-off (let [[a until reason] args]
-                  (update-in memory [:agents a] #(assoc % :until until :reason reason :failures (inc (or (:failures %) 0)))))
+                  (update-in memory [:agents a] #(assoc % :until until :reason reason :failures (inc (or (:failures %) 0))
+                                                        :since (or (:since %) now))))
       :observe (let [[k changes] args
                      ;; only a background session: nobody may be at it, and
                      ;; `claude attach` opens it
@@ -1454,6 +1505,15 @@
       :stopped (known-session memory (first args) assoc :state "stopped" :since now)
       :land-checked (let [[a blocked] args]
                       (if blocked (assoc-in memory [:land a] {:blocked blocked}) (update memory :land dissoc a)))
+      :pm-wait (let [[t owner] args] (assoc-in memory [:postmaster :pending t] owner))
+      (:pm-unwait :bounced) (update-in memory [:postmaster :pending] #(dissoc (or % {}) (first args)))
+      :noticed (let [[k info] args]
+                 (assoc-in memory [:postmaster :notices k] (select-keys info [:agent :kind :thread :number :threads :reason])))
+      :notice-updated (let [[k info] args]
+                        (if (get-in memory [:postmaster :notices k])
+                          (update-in memory [:postmaster :notices k] merge (select-keys info [:threads :reason]))
+                          memory))
+      (:notice-closed :notice-forget) (update-in memory [:postmaster :notices] #(dissoc (or % {}) (first args)))
       memory)))
 
 ;; ---- views
@@ -1522,6 +1582,298 @@
                                                      (into {} (remove (comp nil? val))
                                                            {:id (:id s) :name (:name s) :branch (get-in s [:unlanded :branch])
                                                             :commits (get-in s [:unlanded :commits])}))))))))
+
+;; ---------------------------------------------------------------- the postmaster
+;; A role inside serve: a script, not a session, and indifferent to what
+;; kind of agent receives the mail. Each round, after serve's own actions,
+;; it looks at the open threads that are not the user's turn and that
+;; nothing delivers (nor a listener on duty):
+;;   - Owner not in the directory (legacy mail, or an entry removed since):
+;;     after a round of grace, the postmaster writes the thread back to its
+;;     last sender who isn't the owner (bounce-target), saying so, once per
+;;     owner name: the bounce records the name as `bounced: NAME`.
+;;   - Owner off call, the thread waiting offcall-notice-ms: kind off-call.
+;;   - Owner on call, but serve keeps backing off from it, for
+;;     backoff-notice-ms or backoff-notice-failures failures in a row:
+;;     kind backing-off.
+;; The user hears of the last two by a notice: one thread per agent and
+;; kind, from postmaster, which it updates in place and closes itself. It
+;; writes in a notice thread only while that waits on the user: one the
+;; user closed (dismissed), or answered (the answer goes to postmaster, so
+;; to postmaster-agent), is the user's, and a later change starts a new
+;; one. Its memory, serve's :postmaster:
+;;   {:pending {thread-id owner}  owner not in the directory last round
+;;    :notices {[agent kind] {:agent :kind :thread :number
+;;                            :threads (ids, by number) :reason}}}
+;; :notices is what each notice said last, and where, so a restart says
+;; nothing it said before.
+
+(def offcall-notice-ms
+  "How long a thread waits on an agent that is off call before the
+   postmaster tells the user: an hour."
+  3600000)
+
+(def backoff-notice-ms
+  "How long serve backs off from an on-call agent, from the first failure
+   in the row, before the postmaster tells the user: 15 minutes, unless
+   backoff-notice-failures come first."
+  900000)
+
+(def backoff-notice-failures
+  "After how many failures in a row the postmaster tells the user that
+   serve backs off from an agent, unless backoff-notice-ms came first."
+  3)
+
+(def serve-log
+  "Where serve logs under launchd (`just install-serve`), on macOS."
+  "~/Library/Logs/agent-mail-serve.log")
+
+(defn bounced-for?
+  "Whether the postmaster bounced thread `th` for owner `owner` before: its
+   bounce records the name (`bounced: NAME`)."
+  [th owner]
+  (boolean (some #(= owner (:bounced %)) (:msgs th))))
+
+(defn bounce-target
+  "Whom the postmaster writes thread `th` back to, its owner not being in
+   the directory: the last sender that is neither the owner nor the
+   postmaster, when that is the user or one of `names`; else the user."
+  [th names]
+  (let [skip (hash-set (:owner th) postmaster)
+        s (some #(when-not (skip (:from %)) (:from %)) (rseq (vec (:msgs th))))]
+    (if (and s (or (= "user" s) (contains? (set names) s))) s "user")))
+
+(defn bounce-text
+  "What the postmaster writes, sending thread number `number` back: its
+   owner `owner` (whose mail goes to `agent`, delivery-owner's) is not in
+   the directory; up to three close names `close` (closest-names); how to
+   pass it on."
+  [{:keys [owner agent number close]}]
+  (str "There is no agent " agent " in the agent directory"
+       (when (not= owner agent) (str " (" owner "'s mail goes to " agent ")"))
+       ", so nothing delivers this thread to it: the postmaster sends it back to you. "
+       (if (seq close) (str "The closest names are " (or-list close) ". ") "")
+       "To pass it on, `agent-mail forward " number " --to NAME` starts a new thread carrying this one, "
+       "or `agent-mail reply " number " --to NAME` hands this one over; `agent-mail agents` lists who owns what. "
+       "If nobody needs it any more, `agent-mail close " number "`."))
+
+(defn- numbers-phrase [numbers] (word-list (map #(str "#" %) numbers) "and"))
+
+(defn- wait-word [n] (if (= 1 n) " waits on " " wait on "))
+
+(defn notice-summary
+  "What a notice is about, by the count of its `threads`, e.g. `2 threads
+   wait on infra, which isn't on call`."
+  [{:keys [agent kind threads]}]
+  (let [n (count threads)]
+    (str n (if (= 1 n) " thread" " threads") (wait-word n) agent
+         (if (= "off-call" kind) ", which isn't on call" ", where serve can't start sessions"))))
+
+(defn notice-subject "A notice thread's subject." [n] (str "postmaster: " (notice-summary n)))
+
+(defn notice-phrase
+  "An open notice (postmaster-view's) as `who` and `oncall` show it, e.g.
+   postmaster's notice #12: 2 threads wait on infra, which isn't on call."
+  [n]
+  (str "postmaster's notice #" (:number n) ": " (notice-summary n)))
+
+(defn backoff-fix
+  "What would end serve's back-off from an agent: :gone (its folder is),
+   :trust (Claude Code hasn't trusted it) or :log (serve's log is all
+   there is to go on). From `facts` about its folder, {:exists :trusted},
+   each nil when unknown; else from the back-off's `reason`."
+  [reason {:keys [exists trusted]}]
+  (cond (false? exists) :gone
+        (false? trusted) :trust
+        (re-find #"(?i)\bnot trusted\b|\buntrusted\b" (str reason)) :trust
+        (str/includes? (str reason) "directory is gone") :gone
+        :else :log))
+
+(defn fix-text
+  "The fix backoff-fix names, for `agent` and its folder `dir`."
+  [agent dir fix]
+  (let [dir (or dir (str agent "'s folder"))]
+    (case fix
+      :trust (str "Claude Code hasn't trusted " dir " yet: run `claude` there once and accept the question.")
+      :gone (str dir " is gone: if " agent "'s folder moved, `agent-mail agents move " agent " DIR` says where.")
+      (str "serve's log says why: " serve-log " on macOS."))))
+
+(def notice-trailer
+  "How a notice ends: who writes it, and where a reply goes."
+  (str "The postmaster, agent-mail serve's own role, writes here when this changes, and closes this thread once "
+       "it no longer holds. A reply goes to " postmaster-agent ", the agent that owns the tool."))
+
+(defn- item-line [now th]
+  (str "- #" (:number th) " \"" (:subject th) "\" from " (:last-from th) ", waiting "
+       (duration (quot (max 0 (- now (or (ms-of (:updated th)) now))) 1000))))
+
+(defn notice-text
+  "A notice's body at `now` (epoch ms): what keeps `items` (the threads it
+   lists) from `agent`, the threads, and what to do, ending with
+   notice-trailer. For kind backing-off: how often serve failed since when
+   (`failures`, `since`), the back-off's `reason` and the fix (`fix`, see
+   backoff-fix)."
+  [{:keys [agent kind items dir reason failures since fix]} now]
+  (let [n (count items)
+        these (if (= 1 n) "this thread" (str "these " n " threads"))]
+    (str (if (= "off-call" kind)
+           (str agent " isn't on call, so nothing delivers " these " until a session starts in its folder, "
+                (or dir "which the directory doesn't give") ":")
+           (str "serve can't start sessions for " agent ", which is on call, so " these (if (= 1 n) " waits:" " wait:")))
+         "\n\n" (str/join "\n" (map #(item-line now %) items)) "\n\n"
+         (if (= "off-call" kind)
+           (str "`agent-mail oncall add " agent "` lets serve deliver " (if (= 1 n) "it" "them") ".")
+           (str "serve has failed " failures (if (= 1 failures) " time" " times") " in a row"
+                (when since (str " since " (clock since))) ": " reason "\n\n"
+                "To fix it: " (fix-text agent dir fix)))
+         "\n\n" notice-trailer)))
+
+(defn notice-update-text
+  "A notice's update: what changed since it last said `before` (its
+   :threads and :reason), `number-of` giving a thread's number by id, then
+   the notice as it stands (notice-text of `info`)."
+  [info before number-of now]
+  (let [old (set (:threads before))
+        new (set (map :id (:items info)))
+        added (remove old (map :id (:items info)))
+        gone (remove new (:threads before))
+        nums #(numbers-phrase (map number-of %))]
+    (str "Changed: "
+         (str/join "; " (remove nil? [(when (seq added) (str (nums added) (wait-word (count added)) (:agent info) " too"))
+                                      (when (seq gone) (str (nums gone) " no longer" (wait-word (count gone)) (:agent info)))
+                                      (when (not= (:reason info) (:reason before)) "serve gives another reason")]))
+         ".\n\n" (notice-text info now))))
+
+(defn notice-close-text
+  "What the postmaster writes closing the notice about `agent`, its
+   threads `numbers` no longer kept from it for the notice's reason: those
+   of them that still wait on it undelivered (`remaining`) are on their
+   way when it is on call (`oncall?`) now, else they wait for another
+   reason."
+  [agent numbers remaining oncall?]
+  (cond (empty? remaining) (str "Delivered now: " (numbers-phrase numbers) " no longer" (wait-word (count numbers)) agent ".")
+        oncall? (str "Delivered now: " agent " is on call, and serve hands " (numbers-phrase remaining) " to its sessions.")
+        :else (str (numbers-phrase remaining) " still" (wait-word (count remaining)) agent ", but no longer for the reason above.")))
+
+(defn- troubled?
+  "Whether serve's memory of an agent, `m`, calls for a notice at `now`: a
+   row of failures that began backoff-notice-ms ago, or is
+   backoff-notice-failures long."
+  [m now]
+  (let [n (or (:failures m) 0)]
+    (and (pos? n)
+         (or (>= n backoff-notice-failures) (boolean (and (:since m) (> (- now (:since m)) backoff-notice-ms)))))))
+
+(defn postmaster-actions
+  "What the postmaster does this round, as data. `threads` are every thread
+   as stored (postmaster's own owner, not as-delivered); `names` the agent
+   directory's names and `dirs` their folders; `oncall` the agents serve
+   delivers for, `on-duty` those a listener covers (as for serve-actions);
+   `memory` serve's after its own actions this round; `facts` maps an agent
+   serve backs off from to what is known of its folder, {:exists :trusted}
+   (see backoff-fix). Threads that wait on the user, or on an agent on
+   duty, are left alone. In this order:
+   [:pm-unwait T]           T's owner was not in the directory last round,
+                            and that no longer holds
+   [:pm-wait T owner]       it is not, seen for the first time: a round of
+                            grace
+   [:bounce T info]         still not: postmaster writes T back to info's
+                            :to (bounce-target) with :text, recording
+                            :owner as `bounced`, while T's newest message
+                            is still :file. Once per owner name
+   [:notice K info]         a new notice thread to the user for K, [agent
+                            kind]: info has :subject and :text, and
+                            :agent :kind :threads :reason to remember
+   [:notice-update K info]  a reply in K's notice thread (:thread, its
+                            :number), which waits on the user: its threads
+                            or reason changed
+   [:notice-close K info]   K no longer holds: its notice thread (:thread
+                            :number), which waits on the user, is closed
+                            with :text
+   [:notice-forget K]       K no longer holds, and its notice thread is the
+                            user's: forgotten without a word"
+  [{:keys [now threads names dirs oncall on-duty memory facts]}]
+  (let [names (set names)
+        on-duty (set on-duty)
+        pending (or (get-in memory [:postmaster :pending]) {})
+        notices (or (get-in memory [:postmaster :notices]) {})
+        by-id (into {} (map (juxt :id identity)) threads)
+        number-of #(or (:number (by-id %)) %)
+        waiting (->> threads
+                     (keep (fn [th]
+                             (let [o (:owner th) a (delivery-owner o)]
+                               (when (and (= "open" (:status th)) o (not= "user" o) (seq (:msgs th)) (not (on-duty a)))
+                                 [a th]))))
+                     (sort-by (comp :number second)))
+        ;; owners not in the directory
+        unknown (for [[a th] waiting :when (and (not (names a)) (not (bounced-for? th (:owner th))))] [a th])
+        unknown-ids (into {} (for [[_ th] unknown] [(:id th) (:owner th)]))
+        unwaits (for [t (sort (keys pending)) :when (not (contains? unknown-ids t))] [:pm-unwait t])
+        waits (for [[_ th] unknown :when (not= (:owner th) (pending (:id th)))] [:pm-wait (:id th) (:owner th)])
+        bounces (for [[a th] unknown :when (= (:owner th) (pending (:id th)))]
+                  [:bounce (:id th) {:owner (:owner th) :agent a :to (bounce-target th names) :number (:number th)
+                                     :file (newest-file th)
+                                     :text (bounce-text {:owner (:owner th) :agent a :number (:number th)
+                                                         :close (closest-names a (sort names))})}])
+        ;; agents in the directory: off call, or backed off from
+        undelivered? (fn [th]
+                       (and (not= (newest-file th) (get-in memory [:threads (:id th) :delivered]))
+                            ;; a session serve started or resumed for it is coming up
+                            (not= "starting" (get-in memory [:sessions (get-in memory [:threads (:id th) :holder]) :state]))))
+        kind-of (fn [a th]
+                  (cond (not (names a)) nil
+                        (not (contains? oncall a))
+                        (when (> (- now (or (ms-of (:updated th)) now)) offcall-notice-ms) "off-call")
+                        (and (troubled? (get-in memory [:agents a]) now) (undelivered? th)) "backing-off"))
+        stuck (reduce (fn [acc [a th]] (if-let [k (kind-of a th)] (update acc [a k] (fnil conj []) th) acc)) {} waiting)
+        described (fn [[a kind] ths]
+                    (let [m (get-in memory [:agents a])
+                          reason (when (= "backing-off" kind) (:reason m))]
+                      {:agent a :kind kind :threads (mapv :id ths) :reason reason
+                       :items ths :dir (get dirs a) :failures (:failures m) :since (:since m)
+                       :fix (when reason (backoff-fix reason (get facts a)))}))
+        remembered #(select-keys % [:agent :kind :threads :reason])
+        notice (fn [d] (assoc (remembered d) :subject (notice-subject d) :text (notice-text d now)))
+        notes (for [k (sort (distinct (concat (keys stuck) (keys notices))))
+                    :let [ths (get stuck k)
+                          m (get notices k)
+                          nt (by-id (:thread m))
+                          writable? (boolean (and nt (= "open" (:status nt)) (= "user" (:owner nt))))
+                          d (when ths (described k ths))
+                          where {:thread (:thread m) :number (:number m)}
+                          act (cond
+                                (and d (not m)) [:notice k (notice d)]
+                                (and d (= (:threads d) (vec (:threads m))) (= (:reason d) (:reason m))) nil
+                                (and d writable?) [:notice-update k (merge (remembered d) where
+                                                                           {:text (notice-update-text d m number-of now)})]
+                                d [:notice k (notice d)]
+                                writable? (let [a (first k)
+                                                remaining (filter #(let [th (by-id %)]
+                                                                     (and th (= "open" (:status th)) (= a (delivery-owner (:owner th)))
+                                                                          (undelivered? th)))
+                                                                  (:threads m))]
+                                            [:notice-close k (assoc where :text (notice-close-text a (map number-of (:threads m))
+                                                                                                   (map number-of remaining)
+                                                                                                   (contains? oncall a)))])
+                                :else [:notice-forget k])]
+                    :when act]
+                act)]
+    (vec (concat unwaits waits bounces notes))))
+
+(defn postmaster-view
+  "The postmaster's open notices, for status, `who` and `oncall`: [{:agent
+   :kind :threads :notice :number :reason}] by agent and kind; :notice is
+   the notice thread's id, :threads the ids of the threads it lists, as it
+   last said; :reason, a back-off's. A notice whose thread is closed or
+   gone is left out. `thread-of` gives a thread by id (a map does)."
+  [memory thread-of]
+  (vec (for [[_ n] (sort-by key (get-in memory [:postmaster :notices]))
+             :let [th (thread-of (:thread n))]
+             :when (and th (= "open" (:status th)))]
+         (into {} (remove (comp nil? val))
+               {:agent (:agent n) :kind (:kind n) :threads (vec (:threads n)) :notice (:thread n) :number (:number n)
+                :reason (:reason n)}))))
+
 ;; ---------------------------------------------------------------- drafts
 
 (def reply-marker "<!-- agent-mail: the thread above is quoted with `>`; answer inline under any line, or write below this marker. Quoted text is kept only next to what you write. Sent when you close the editor; nothing is sent if you write nothing. -->")

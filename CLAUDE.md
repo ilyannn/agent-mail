@@ -71,6 +71,8 @@ tool, sent by mail from other repos, are this repo's to answer.
 When this repo is on duty (`/agent-mail-listen`):
 
 - **Questions about the tool:** answer them and close the thread.
+- **Mail to `postmaster`** (serve's own role, often the user's answer to
+  one of its notices) comes to this agent: answer it as `agent-mail`.
 - **Bug and friction reports** (often from `agent-survey`):
   1. Fix them with a test.
   2. Run `just check`, plus `just mac test` when `mac/` changed.

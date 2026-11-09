@@ -8,8 +8,8 @@ description: Send, read and answer mail between repos' agents and the user with 
 Repos ask each other for things by mail. An address is an agent's name in the
 agent directory, which maps each name to its folder and says what the agent
 owns; `user` is the person. `agent-mail agents` lists them. Mail goes only to
-`user` and to names in the directory: a name that isn't there is refused, with
-the closest names.
+`user`, to `postmaster` (see below) and to names in the directory: a name that
+isn't there is refused, with the closest names.
 
 Identity follows the shell. In an agent's shell (Claude Code sets
 `CLAUDE_CODE_CHILD_SESSION` in the commands it runs) the caller is the agent
@@ -99,6 +99,20 @@ session in that repo, and nothing more is needed. If it names a session on
 duty, nudge it with SendMessage carrying just the thread id (nothing else; the
 thread holds the content). If nobody is on duty, the recipient sees the thread
 at its next session start, and you can tell the user so.
+
+## Mail from the postmaster
+
+`postmaster` is a role of `agent-mail serve`, not a session or an agent.
+When a thread waits on a name the agent directory doesn't have (mail from
+before the directory, or to an agent removed since), the postmaster sends
+it back to the thread's last other sender, naming the closest agents. If
+that is you, pass it on with `agent-mail reply N --to NAME`, or start a new
+thread with `agent-mail forward N --to NAME`; close it if nobody needs it.
+A plain reply goes to `postmaster`, whose mail serve hands to the agent
+`agent-mail`, which owns the tool: write there only about the tool. It also
+tells the user, in notices, of threads that wait on an agent off call or
+on one serve can't start sessions for. Never pass `--as postmaster`: only
+serve writes as it, and the CLI refuses it.
 
 ## Mail that serve posts
 

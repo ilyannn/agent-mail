@@ -247,16 +247,18 @@
   "The Claude Code session writing a message from `from`: its
    CLAUDE_CODE_SESSION_ID, which Claude Code exports to the commands it
    runs, so the thread's later messages can be posted into it. nil for the
-   user and outside Claude Code."
+   user, for the postmaster (serve, which may run in a Claude Code shell,
+   is no session of an agent's) and outside Claude Code."
   [from]
   (let [s (System/getenv "CLAUDE_CODE_SESSION_ID")]
-    (when (and (not= "user" from) (not (str/blank? s))) (str/trim s))))
+    (when (and (not (contains? #{"user" core/postmaster} from)) (not (str/blank? s))) (str/trim s))))
 
 (defn write-msg!
   "Writes one message file into thread `id`, in one move, and returns its
    name. A message written from a Claude Code session records it as
-   `session` (see writer-session)."
-  [id {:keys [from to date in-reply-to status attachments body]}]
+   `session` (see writer-session); the postmaster's bounce records the
+   owner it bounced for as `bounced` (see core/bounced-for?)."
+  [id {:keys [from to date in-reply-to status attachments bounced body]}]
   (let [dir (fs/path (thread-dir id) "msgs")
         last-date (some-> (seq (msg-files id)) last read-msg :date)
         date (core/after (or date (core/now-utc)) last-date)
@@ -269,6 +271,7 @@
                               in-reply-to (assoc :in-reply-to in-reply-to)
                               status (assoc :status status)
                               (seq attachments) (assoc :attachments attachments)
+                              bounced (assoc :bounced bounced)
                               session (assoc :session session)))
                "\n" (str/trim body) "\n"))
     (fs/move tmp (fs/path dir nm))
@@ -706,13 +709,18 @@
    (:explicit); otherwise the user in the user's own shell (:user), and in
    an agent's shell (see agent-session?) its folder's agent (identify). An
    agent never becomes the user by accident, and the user never becomes a
-   repo. Refuses a name that can't be one."
+   repo. Refuses a name that can't be one, and postmaster: only serve
+   writes as it (core/postmaster-actions), never through the command line."
   [opts]
   (let [explicit (or (:as opts) (System/getenv "AGENT_MAIL_AS"))
         w (cond explicit {:name explicit :how :explicit}
                 (not (agent-session?)) {:name "user" :how :user}
                 :else (identify "." opts))]
     (when-not (core/valid-name? (:name w)) (fail "bad name for the caller:" (pr-str (:name w))))
+    (when (= core/postmaster (:name w))
+      (fail (str "refusing to act as postmaster: only agent-mail serve writes as it"
+                 (when-not (= :explicit (:how w))
+                   "; this folder is named postmaster, so give --as NAME, or `agent-mail agents add --name NAME`"))))
     w))
 
 (defn caller "Who runs the command, by name (see whoami)." [opts] (:name (whoami opts)))
@@ -751,10 +759,11 @@
       added)))
 
 (defn known!
-  "Refuses `to` as a recipient unless it is `user` or in the directory."
+  "Refuses `to` as a recipient unless it is `user`, `postmaster` (whose
+   mail serve hands to core/postmaster-agent) or in the directory."
   [to]
   (let [d (directory)]
-    (when-not (or (= "user" to) (contains? d to))
+    (when-not (or (contains? #{"user" core/postmaster} to) (contains? d to))
       (fail (core/unknown-agent to (cons "user" (keys d)))))))
 
 (defn recipient [opts]
@@ -801,6 +810,21 @@
   ([duty]
    (core/oncall-view {:now (System/currentTimeMillis) :oncall (oncall-agents)
                       :memory (serve-memory) :duty duty})))
+
+(defn open-notices
+  "The postmaster's open notices (core/postmaster-view) in serve's memory,
+   each notice thread read as it stands."
+  []
+  (core/postmaster-view (serve-memory)
+                        #(try (when (and % (fs/exists? (fs/path (thread-dir %) "thread.md"))) (fold %))
+                              (catch Exception _ nil))))
+
+(defn notice-lines
+  "One line per open notice of the postmaster's, for `who` and `oncall`:
+   `fmt` (as for format) of its agent, \"(postmaster)\" and what it says."
+  [fmt]
+  (for [n (open-notices)]
+    (format fmt (:agent n) "(postmaster)" (core/notice-phrase n))))
 
 (defn serve-line
   "One line on whether serve runs, for `oncall` and `who`."
@@ -1023,14 +1047,23 @@
       :else (str "→ " to ": on call; agent-mail serve hands it to a Claude Code session shortly"
                  " (the one that wrote in the thread for " to ", or a new one); nothing more to do"))))
 
-(defn delivered! [from to id subject]
+(defn delivered!
+  "The delivery note on stderr for mail from `from` to `to` in thread `id`:
+   for the user a notification, for an agent who picks it up and how.
+   Mail to postmaster goes to core/postmaster-agent, so its note follows."
+  [from to id subject]
   (binding [*out* *err*]
-    (if (= to "user")
+    (cond
+      (= to "user")
       (println (case (notify-user! from id subject)
                  :clickable "→ user: notified (click the banner to open and reply); shown at every session start too"
                  :banner-not-allowed "→ user: notified with a plain banner: terminal-notifier isn't allowed to notify yet (System Settings > Notifications); shown at every session start too"
                  :banner "→ user: notified; shown at every session start too"
                  "→ user: shown at every session start"))
+      (= to core/postmaster)
+      (do (println (str "→ postmaster: agent-mail serve's own role; serve hands its mail to " core/postmaster-agent))
+          (delivered! from core/postmaster-agent id subject))
+      :else
       (if-let [d (seq (on-duty to))]
         (println (str "→ " to ": on duty (session "
                       (str/join ", " (map #(str (live-session %) (case (:state %)
@@ -1379,9 +1412,10 @@
 
 (defn cmd-who
   "The duty records, the repos on call with what serve is doing about each,
-   then the sessions serve delivered threads to, as it last saw them (--json:
-   the duty records alone, as status gives them). --here: the other Claude
-   Code sessions in this folder (see who-here)."
+   then the sessions serve delivered threads to, as it last saw them, and
+   the postmaster's open notices (--json: the duty records alone, as status
+   gives them). --here: the other Claude Code sessions in this folder (see
+   who-here)."
   [opts]
   (if (:here opts)
     (who-here)
@@ -1399,6 +1433,7 @@
             (println (format "%-20s %-28s %s" (:repo o) "(on call)" (:text o))))
           (doseq [s (core/serve-sessions (serve-memory))]
             (println (format "%-20s %-28s %s" (:agent s) "(serve)" (core/session-line s))))
+          (run! println (notice-lines "%-20s %-28s %s"))
           (when (and (seq oncall) (not (:alive (serve-info))))
             (println (serve-line))))))))
 (defn cmd-status
@@ -1406,8 +1441,9 @@
    threads with per-reader unread counts (and the caller's unread addressed
    to it, :unread-to-me), waiting time, listener and the
    session serve delivered each to, the duty records, the open threads nobody
-   is listening for, the repos on call and whether serve runs, and the agent
-   directory. A pure read: no seen marker moves, nothing is written or
+   is listening for, the repos on call and whether serve runs, the agent
+   directory, and the postmaster's open notices (:postmaster, see
+   core/postmaster-view). A pure read: no seen marker moves, nothing is written or
    committed (not even the thread numbering that list and read catch up on,
    nor a moved folder in the directory), and Claude Code is not asked:
    sessions are as serve last saw them."
@@ -1513,7 +1549,8 @@
   (when-not (:alive (serve-info)) (println (serve-line))))
 
 (defn cmd-oncall
-  "Lists the agents on call (--json: oncall-view's entries). `add` and
+  "Lists the agents on call, then the postmaster's open notices (--json:
+   oncall-view's entries alone). `add` and
    `remove` set the directory's oncall field: `add [NAME [DIR]]` puts NAME
    on call, at DIR when given (adding it, or moving it there, which only
    NAME itself or the user may do, see put-agent!); no arguments, the
@@ -1549,6 +1586,7 @@
             (do (if (seq v)
                   (doseq [o v] (println (format "%-20s %-40s %s" (:repo o) (:dir o) (:text o))))
                   (println "nothing on call"))
+                (run! println (notice-lines "%-20s %-40s %s"))
                 (println (serve-line)))))
     (fail "unknown oncall command" sub "(add or remove)")))
 
@@ -1598,7 +1636,7 @@
         nm (or (:name opts) (core/name-from-dir (fs/file-name folder))
                (fail (str "no name can be made from " folder "; give --name NAME")))
         _ (when-not (core/agent-name? nm)
-            (fail "bad name:" (pr-str nm) "(letters, digits, `.`, `_` and `-`; not `user`)"))
+            (fail "bad name:" (pr-str nm) "(letters, digits, `.`, `_` and `-`; not `user` or `postmaster`)"))
         _ (refuse-broad! folder)
         desc (optional-text words)
         said (atom nil)
@@ -1802,13 +1840,54 @@
                    :in-upstream? (boolean (and (git-out dir "rev-parse" "--abbrev-ref" "--symbolic-full-name" "@{u}")
                                                (in? "@{u}")))}))))
 
+;; ---- the postmaster's writes (see core/postmaster-actions)
+
+(defn postmaster-write!
+  "Writes postmaster's message `msg` ({:to :body}, and :status or
+   :bounced) into thread `id` as its next one, under the store lock and
+   only while `ok?` holds of the thread as it stands then; commits it, and
+   notifies the user of mail to them, as for any mail. Returns the thread
+   as it was before, nil when ok? said no."
+  [id msg ok?]
+  (let [th (locked (fn []
+                     (let [th (fold id)]
+                       (when (ok? th)
+                         (write-msg! id (assoc msg :from core/postmaster :in-reply-to (:file (last (:msgs th)))))
+                         (commit! (str (if (:status msg) "✅" "📮") " postmaster → " (:to msg) ": " (:subject th)))
+                         th))))]
+    (when (and th (= "user" (:to msg))) (notify-user! core/postmaster id (:subject th)))
+    th))
+
+(defn postmaster-thread!
+  "A new thread from postmaster to the user with `subject` and `body`,
+   committed, the user notified as for any mail: [id number]."
+  [subject body]
+  (let [created (core/now-utc)
+        [id :as made] (locked (fn []
+                                (let [id (core/new-id subject created (thread-ids))
+                                      number (next-number)]
+                                  (fs/create-dirs (thread-dir id))
+                                  (spit (str (fs/path (thread-dir id) "thread.md"))
+                                        (str (core/fm-str {:subject subject :from core/postmaster :created created :number number}) "\n"))
+                                  (write-msg! id {:from core/postmaster :to "user" :date created :body body})
+                                  (commit! (str "📮 postmaster → user: " subject))
+                                  [id number])))]
+    (notify-user! core/postmaster id subject)
+    made))
+
+(defn- waits-on-user? [th] (and (= "open" (:status th)) (= "user" (:owner th))))
+
 (defn carry-out!
   "Carries out one of core/serve-actions, logs it, and returns serve's
    memory after it. A start or resume that fails backs its agent off with
    what claude said (an untrusted folder, a missing claude); a post that
    fails leaves the thread to go out again next round, past that session;
    a stop that fails is tried again next round. A landing that can't be
-   done is logged when its reason changes, and remembered for `oncall`."
+   done is logged when its reason changes, and remembered for `oncall`.
+   The postmaster's actions (core/postmaster-actions) too: a bounce or a
+   notice's update is written only while the thread is as decided (else
+   a later round decides again), a close only while the notice still
+   waits on the user (else it is forgotten)."
   [memory [kind & args :as action] now]
   (let [remember #(core/remember memory % now)
         agent-m #(get-in memory [:agents %])
@@ -1888,35 +1967,95 @@
               (remember action))
       :reset (do (log! (str "on track again: " (first args))) (remember action))
       (:forget :drop :checked :lost) (remember action)
+      :pm-wait (let [[t owner] args]
+                 (log! (str "postmaster: " t " waits on " owner ", who isn't in the agent directory;"
+                            " it goes back to its sender next round unless that changes"))
+                 (remember action))
+      :pm-unwait (remember action)
+      :bounce (let [[t {:keys [owner to number file text]}] args]
+                (if (postmaster-write! t {:to to :body text :bounced owner}
+                                       #(and (= "open" (:status %)) (= file (:file (last (:msgs %))))))
+                  (do (log! (str "postmaster: #" number " back to " to ": no agent " owner " in the directory"))
+                      (remember [:bounced t]))
+                  (do (log! (str "postmaster: #" number " changed before it went back; looking again next round"))
+                      memory)))
+      :notice (let [[k {:keys [subject text] :as info}] args
+                    [id number] (postmaster-thread! subject text)]
+                (log! (str "postmaster: notice #" number " to user: " (core/notice-summary info)))
+                (remember [:noticed k (assoc info :thread id :number number)]))
+      :notice-update (let [[k {:keys [thread number] :as info}] args]
+                       (if (postmaster-write! thread {:to "user" :body (:text info)} waits-on-user?)
+                         (do (log! (str "postmaster: notice #" number " updated: " (core/notice-summary info)))
+                             (remember [:notice-updated k info]))
+                         memory))
+      :notice-close (let [[k {:keys [thread number text]}] args]
+                      (log! (str "postmaster: notice #" number
+                                 (if (postmaster-write! thread {:to "user" :body text :status "done"} waits-on-user?)
+                                   (str " closed: " text)
+                                   " no longer holds, and the user has its thread")))
+                      (remember [:notice-closed k]))
+      :notice-forget (let [[[agent nkind]] args]
+                       (log! (str "postmaster: the " nkind " notice on " agent " no longer holds, and the user has its thread"))
+                       (remember action))
       (do (log! "unknown action" (pr-str kind)) memory))))
+
+(defn postmaster-round!
+  "The postmaster's part of a round (core/postmaster-actions), after
+   serve's own: carried out on `memory`, serve's, which it returns. What
+   is known of the folders of the on-call agents serve backs off from
+   (whether each exists and Claude Code trusts it) tells a notice the fix.
+   An action that fails is logged and left to a later round; never
+   throws, so serve's own actions this round are never forgotten."
+  [memory {:keys [now threads d oncall on-duty]}]
+  (try
+    (let [backed (filter #(pos? (or (get-in memory [:agents % :failures]) 0)) (keys oncall))
+          trust (when (seq backed) (trust-of))
+          facts (into {} (for [a backed
+                               :let [dir (get-in d [a :dir])]
+                               :when dir
+                               :let [exists (fs/directory? dir)]]
+                           [a {:exists exists :trusted (when exists (trust dir))}]))
+          actions (core/postmaster-actions {:now now :threads threads :names (keys d) :dirs (update-vals d :dir)
+                                            :oncall oncall :on-duty on-duty :memory memory :facts facts})]
+      (reduce (fn [m a]
+                (try (carry-out! m a now)
+                     (catch Exception e (log! (str "postmaster: " (name (first a)) " failed: " (ex-message e))) m)))
+              memory actions))
+    (catch Exception e (log! (str "postmaster: round failed: " (ex-message e))) memory)))
 
 (defn serve-round!
   "One round: gathers what core/serve-actions decides on, carries out its
-   actions and returns serve's memory after them. The agents on call and
-   their folders come from the directory (migrated first, once). Reads no
-   thread while nothing is on call and nothing is remembered, and asks
-   Claude Code for its sessions only when core/serve-wants says so."
+   actions, then the postmaster's (postmaster-round!), and returns serve's
+   memory after them. The agents on call and their folders come from the
+   directory (migrated first, once). Reads every thread, for the
+   postmaster; delivers only while something is on call or remembered,
+   and asks Claude Code for its sessions only when core/serve-wants says
+   so."
   [memory {:keys [grace-ms check-ms]}]
   (when (fs/exists? (fs/path store ".git")) (migrate-directory!))
-  (let [oncall (oncall-agents)]
-    (if (and (empty? oncall) (every? empty? (vals (dissoc memory :land))))
-      memory
-      (let [now (System/currentTimeMillis)
-            in {:now now :memory memory :grace-ms grace-ms :check-ms check-ms :max-starts core/starts-per-round
-                :oncall (update-vals oncall #(update % :dir real-dir))
-                :threads (all-threads)
-                :seen (into {} (for [a (keys oncall)] [a (try (seen-map a) (catch Exception _ {}))]))
-                :on-duty (set (map :repo (filter :on-duty (duty-view))))}
-            wants (core/serve-wants in)
-            live (when (:live wants) (claude-agents false))
-            known (when (and (:known wants) (:sessions live)) (claude-agents true))
-            actions (core/serve-actions
-                     (assoc in
-                            :live (some-> (:sessions live) live-sessions)
-                            :known (:sessions known)
-                            :agents-error (or (:error live) (:error known))
-                            :expiry (memoize transcript-expiry)))]
-        (reduce #(carry-out! %1 %2 now) memory actions)))))
+  (let [d (directory)
+        oncall (oncall-agents d)
+        now (System/currentTimeMillis)
+        threads (vec (all-threads))
+        on-duty (set (map :repo (filter :on-duty (duty-view))))
+        memory (if (and (empty? oncall) (every? empty? (vals (dissoc memory :land :postmaster))))
+                 memory
+                 (let [in {:now now :memory memory :grace-ms grace-ms :check-ms check-ms :max-starts core/starts-per-round
+                           :oncall (update-vals oncall #(update % :dir real-dir))
+                           :threads threads
+                           :seen (into {} (for [a (keys oncall)] [a (try (seen-map a) (catch Exception _ {}))]))
+                           :on-duty on-duty}
+                       wants (core/serve-wants in)
+                       live (when (:live wants) (claude-agents false))
+                       known (when (and (:known wants) (:sessions live)) (claude-agents true))
+                       actions (core/serve-actions
+                                (assoc in
+                                       :live (some-> (:sessions live) live-sessions)
+                                       :known (:sessions known)
+                                       :agents-error (or (:error live) (:error known))
+                                       :expiry (memoize transcript-expiry)))]
+                   (reduce #(carry-out! %1 %2 now) memory actions)))]
+    (postmaster-round! memory {:now now :threads threads :d d :oncall oncall :on-duty on-duty})))
 
 (defn write-serve-state! [memory interval]
   (spit-atomic! serve-state-file
@@ -2037,7 +2176,8 @@
   agent-mail who [--json]                     who is on duty, the repos on call, and the
                                               sessions serve handed threads to (one waiting
                                               on you says what for and `claude attach ID`;
-                                              one kept says what of it is unlanded)
+                                              one kept says what of it is unlanded), then
+                                              the postmaster's open notices
   agent-mail who --here                       the other Claude Code sessions working in this
                                               folder, by the names SendMessage takes
   agent-mail agents [--json]                  the agent directory: each agent's folder, whether
@@ -2064,7 +2204,8 @@
                                               one)
   agent-mail oncall [--json]                  agents on call: serve hands each of their threads
                                               to a Claude Code session; also why serve can't
-                                              land what one pushed in the main checkout
+                                              land what one pushed in the main checkout, and
+                                              the postmaster's open notices
   agent-mail oncall add [NAME [DIR]]          put an agent on call: NAME (at DIR: added, or
                                               moved there); no arguments: this folder's agent,
                                               else this repo at its main worktree, or outside
@@ -2107,11 +2248,24 @@
                                               and `who`/`oncall` while it waits. `claude agents`
                                               lists them, `claude attach ID` opens one. One serve
                                               at a time; --standby (launchd's) waits for a
-                                              running one to end
+                                              running one to end.
+                                              Its postmaster, a role and not a session, looks
+                                              at the open threads nothing delivers each round.
+                                              One waiting on a name not in the directory goes
+                                              back, after a round, to its last sender (you
+                                              when that isn't in the directory either), once
+                                              per name, with the closest names. You get a
+                                              notice from postmaster, one thread per agent and
+                                              kind, when one waits over 1 h on an agent off
+                                              call, or on one serve backs off from for 15 min
+                                              or 3 failures (with the fix: trust the folder,
+                                              `agents move`, or serve's log); it is updated
+                                              when that changes, and closed once delivered
   agent-mail status [--json]                  everything at once, for UIs. --json gives each
                                               thread's unread (new to me) and unread-to-me
                                               (those of them addressed to me: what an inbox
-                                              counts), unread-by, flow, waiting-s, listener
+                                              counts), unread-by, flow, waiting-s, listener;
+                                              and postmaster, the open notices
   agent-mail hook                             SessionStart hook output
   agent-mail whoami                           who the caller is
 
@@ -2127,7 +2281,9 @@ its file id (and the directory follows it), and outside git the folder the
 session started in is tried too. Else the repo's name (main worktree), or
 outside any repo the folder's; that folder joins the directory, on call,
 with its first mail. --as NAME or AGENT_MAIL_AS
-overrides. Mail goes only to `user` and to names in the directory.
+overrides, except as postmaster: only serve writes as it. Mail goes only to
+`user`, `postmaster` (serve hands its mail to the agent agent-mail) and names
+in the directory.
 Bodies are Markdown; attachments are
 copied into the thread and `read` prints their absolute paths. --date backfills
 a timestamp when importing old threads; otherwise the tool stamps time.

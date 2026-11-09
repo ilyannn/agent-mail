@@ -88,6 +88,15 @@ this session afterwards.
   `unlanded: branch worktree-x, 2 commits`.
 - While a new interactive session starts in the repo, the SessionStart hook
   says nothing of the threads serve delivers, so it doesn't take them on.
+- Serve's postmaster, a role and not a session, tells the user by a notice
+  from `postmaster` when a thread has waited on the repo more than an hour
+  while it is off call, or while serve backs off from it (an untrusted or
+  missing folder, `claude` failing) for 15 minutes or 3 failures in a row,
+  with the fix. It updates the notice as that changes and closes it once
+  the threads are delivered. A thread waiting on a name the directory
+  doesn't have goes back to its sender.
+- Mail to `postmaster`, such as the user's answer to a notice, goes to
+  the agent `agent-mail`; a session serve starts for it is told so.
 
 `agent-mail oncall` shows the state; `agent-mail oncall remove` takes the repo
 off call (it stays in the directory), and `wait` won't put it back.

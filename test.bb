@@ -339,7 +339,7 @@
             st (core/status {:now now :me "user" :threads [closed-th to-user open-th]
                              :seen {"b" {"t1" "002.md"} "user" {"t3" "000.md"}} :duty duty})
             [t1 t2 t3] (:threads st)]
-        (is (= #{:schema :now :me :threads :duty :undelivered :oncall :serve :agents} (set (keys st))))
+        (is (= #{:schema :now :me :threads :duty :undelivered :oncall :serve :agents :postmaster} (set (keys st))))
         (is (= [now "user" duty] [(:now st) (:me st) (:duty st)]))
         (is (= [[] {:alive false :pid nil} []] [(:oncall st) (:serve st) (:agents st)])
             "nothing on call, no serve, no directory: as from a caller that predates them")
@@ -642,7 +642,7 @@
         (is (= {:threads {"t1" {:agent "infra" :number 1 :delivered "002.md" :holder "aaaa1111"}}
                 :sessions {"aaaa1111" {:agent "infra" :thread "t1" :number 1 :ours false :session-id "aaaa1111-full"
                                        :name "s-aaaa1111" :kind "interactive" :state "live"}}
-                :agents {} :land {}}
+                :agents {} :land {} :postmaster {}}
                (r (mem) [:posted "t1" "aaaa1111" info])))
         (is (= {:session "aaaa1111" :file "002.md" :at now :status-updated-at 5}
                (get-in (r (mem) [:posted "t1" "aaaa1111" (assoc info :idle true :status-updated-at 5)]) [:threads "t1" :check]))
@@ -663,7 +663,10 @@
         (is (= {:state "live" :status "idle" :since now} (get-in (r (mem :sessions {"k" {:state "starting" :since 1}}) [:observe "k" {:state "live" :status "idle"}]) [:sessions "k"])))
         (is (= {:state "live" :status "busy" :since 1} (get-in (r (mem :sessions {"k" {:state "live" :since 1}}) [:observe "k" {:state "live" :status "busy"}]) [:sessions "k"]))
             ":since is when the state last changed")
-        (is (= {"infra" {:failures 2 :until 7 :reason "why"}} (:agents (r (mem :agents {"infra" {:failures 1}}) [:back-off "infra" 7 "why"]))))
+        (is (= {"infra" {:failures 1 :until 7 :reason "why" :since now}} (:agents (r (mem) [:back-off "infra" 7 "why"])))
+            "the first failure in a row: since now")
+        (is (= {"infra" {:failures 2 :until 7 :reason "why" :since 3}} (:agents (r (mem :agents {"infra" {:failures 1 :since 3}}) [:back-off "infra" 7 "why"])))
+            "the row goes on: since its first failure")
         (is (= {} (:agents (r (mem :agents {"infra" {:failures 1}}) [:reset "infra"]))))
         (let [m (mem :threads {"t1" {:delivered "002.md" :check {:session "aaaa1111"}}} :sessions {"bbbb2222" (ours :state "starting")})]
           (is (= {"t1" {:deaf #{"aaaa1111"}}} (:threads (r m [:deaf "t1" "aaaa1111-full"])))
@@ -695,8 +698,8 @@
               "an interactive session has someone at it, and `claude attach` does not open it")
           (is (= now (get-in (r w [:needs-input "k" {}]) [:sessions "k" :alerted])) "the user was told"))))
     (testing "serve-memory: an older serve's state (its tabs under :repos) is nothing remembered"
-      (is (= {:threads {} :sessions {} :agents {} :land {}} (core/serve-memory {:pid 1 :repos {"infra" {:pane 42}}})))
-      (is (= {:threads {} :sessions {} :agents {} :land {}} (core/serve-memory {:threads [1] :sessions "x"}))))
+      (is (= {:threads {} :sessions {} :agents {} :land {} :postmaster {}} (core/serve-memory {:pid 1 :repos {"infra" {:pane 42}}})))
+      (is (= {:threads {} :sessions {} :agents {} :land {} :postmaster {}} (core/serve-memory {:threads [1] :sessions "x"}))))
     (testing "oncall-view and thread-session: each agent's state and serve's sessions, in words"
       (let [v (fn [m & {:as more}] (first (core/oncall-view (merge {:now now :oncall {"infra" {:dir "/x/infra"}} :memory m :duty []} more))))
             later (+ now 60000)
@@ -1008,6 +1011,252 @@
         (is (= want (core/agents-items {:agents [item]})) "an object holding the list")
         (is (= "52f6bcf5" (:id (first (core/agents-items [(dissoc item :id)])))) "the short id from the sessionId")
         (is (= [] (core/agents-items "nonsense")))))))
+
+;; ================================================================ unit: the postmaster
+
+(deftest postmaster-decisions
+  (let [hour 3600000
+        now (+ t0 1000)                     ; msg 0 has waited an hour and a second
+        names ["web" "website" "infra" "docs" "agent-mail"]
+        base {:now now :threads [] :names names :dirs {"infra" "/x/infra"} :oncall {} :on-duty #{}
+              :memory (core/serve-memory {}) :facts {}}
+        acts #(core/postmaster-actions (merge base %))
+        mem (fn [& {:as m}] (merge (core/serve-memory {}) m))
+        pending #(mem :postmaster {:pending %})
+        kinds #(mapv first %)
+        heads #(mapv (partial take 2) %)
+        legacy (th "t1" 1 [(msg 0 "web" "gone")])]
+    (testing "an owner not in the directory: a round of grace, then back to its sender"
+      (is (= [[:pm-wait "t1" "gone"]] (acts {:threads [legacy]})) "seen for the first time: a round of grace")
+      (let [[[kind t info] :as all] (acts {:threads [legacy] :memory (pending {"t1" "gone"})})]
+        (is (= 1 (count all)))
+        (is (= [:bounce "t1"] [kind t]))
+        (is (= {:owner "gone" :agent "gone" :to "web" :number 1 :file "000.md"} (dissoc info :text)))
+        (is (= (core/bounce-text {:owner "gone" :agent "gone" :number 1 :close []}) (:text info))))
+      (is (str/includes? (get-in (acts {:threads [(th "t1" 1 [(msg 0 "web" "infr")])] :memory (pending {"t1" "infr"})}) [0 2 :text])
+                         "The closest names are infra. ")
+          "the closest names in the directory")
+      (is (= [[:pm-wait "t1" "gone"]] (acts {:threads [legacy] :memory (pending {"t1" "old"})}))
+          "its owner changed to another unknown name: grace again")
+      (is (= [[:pm-unwait "t1"]] (acts {:threads [(th "t1" 1 [(msg 0 "web" "gone") (msg 1 "gone" "infra")])]
+                                        :memory (pending {"t1" "gone"})}))
+          "passed on to an agent in the directory")
+      (is (= [[:pm-unwait "t1"]] (acts {:threads [(th "t1" 1 [(msg 0 "web" "gone") (msg 1 "web" "gone" :status "done")])]
+                                        :memory (pending {"t1" "gone"})}))
+          "closed")
+      (is (= [[:pm-unwait "t1"]] (acts {:memory (pending {"t1" "gone"})})) "gone")
+      (is (= [] (acts {:threads [legacy] :on-duty #{"gone"}})) "a listener on duty for the name")
+      (is (= [] (acts {:threads [(th "t1" 1 [(msg 0 "gone" "user")])]})) "the user's turn")
+      (is (= [] (acts {:threads [(th "t1" 1 [(msg 0 "web" "infra")])] :now t0})) "an agent in the directory"))
+    (testing "no double bounce: once per owner name"
+      (let [again (th "t1" 1 [(msg 0 "web" "gone") (msg 1 "postmaster" "web" :bounced "gone") (msg 2 "web" "gone")])]
+        (is (= [] (acts {:threads [again]})))
+        (is (= [[:pm-unwait "t1"]] (acts {:threads [again] :memory (pending {"t1" "gone"})})))
+        (is (= [:bounce] (kinds (acts {:threads [(assoc-in again [:msgs 1 :bounced] "old")] :memory (pending {"t1" "gone"})})))
+            "bounced for another name before")))
+    (testing "the bounce target: the last sender that is neither the owner nor the postmaster, else the user"
+      (let [target (fn [msgs] (core/bounce-target (th "t" 1 msgs) ["web" "docs"]))]
+        (is (= "docs" (target [(msg 0 "web" "docs") (msg 1 "docs" "infra")])) "the last other sender")
+        (is (= "web" (target [(msg 0 "web" "infra") (msg 1 "infra" "gone") (msg 2 "postmaster" "infra" :bounced "gone")]))
+            "bounced to infra, which has gone too: past the postmaster and the owner")
+        (is (= "user" (target [(msg 0 "infra" "gone") (msg 1 "postmaster" "infra" :bounced "gone")])) "nobody else wrote")
+        (is (= "user" (target [(msg 0 "oldbot" "infra")])) "a sender not in the directory either")
+        (is (= "user" (target [(msg 0 "user" "infra")])) "the user")))
+    (testing "mail to postmaster whose agent isn't in the directory goes back too"
+      (let [to-pm (th "n1" 9 [(msg 0 "postmaster" "user") (msg 1 "user" "postmaster")])
+            [[kind t info]] (acts {:threads [to-pm] :names ["infra"] :memory (pending {"n1" "postmaster"})})]
+        (is (= [:bounce "n1" "user" "postmaster" "agent-mail"] [kind t (:to info) (:owner info) (:agent info)]))
+        (is (str/starts-with? (:text info) "There is no agent agent-mail in the agent directory (postmaster's mail goes to agent-mail)"))))
+    (testing "an agent off call: a notice once a thread has waited more than an hour"
+      (let [old (th "t2" 2 [(msg 0 "web" "infra")])
+            young (th "t3" 3 [(msg 0 "web" "infra" :date "2026-10-31T10:30:00.000Z")])]
+        (is (= [] (acts {:threads [old] :now t0})) "an hour exactly: not yet")
+        (let [[[kind k info] :as all] (acts {:threads [old young]})]
+          (is (= 1 (count all)))
+          (is (= [:notice ["infra" "off-call"]] [kind k]))
+          (is (= {:agent "infra" :kind "off-call" :threads ["t2"] :reason nil
+                  :subject "postmaster: 1 thread waits on infra, which isn't on call"}
+                 (dissoc info :text))
+              "the young one not yet")
+          (is (str/starts-with? (:text info) (str "infra isn't on call, so nothing delivers this thread until a session starts in its folder, /x/infra:\n\n"
+                                                  "- #2 \"About t2\" from web, waiting 1h\n\n"
+                                                  "`agent-mail oncall add infra` lets serve deliver it."))))
+        (is (= ["t2" "t3"] (get-in (acts {:threads [young old] :now (+ t0 (* 30 60000) 1)}) [0 2 :threads])) "half an hour on: both, by number")
+        (is (= [] (acts {:threads [old] :on-duty #{"infra"}})) "a listener on duty")
+        (is (= [] (acts {:threads [old] :oncall {"infra" {:dir "/x/infra"}}})) "on call: serve delivers it")))
+    (testing "an agent on call that serve backs off from: a notice after 3 failures in a row, or 15 min"
+      (let [t2 (th "t2" 2 [(msg 0 "web" "infra")])
+            oc {"infra" {:dir "/x/infra"}}
+            reason "`claude --bg` failed (exit 1): Workspace not trusted. Run `claude` in /x/infra once…"
+            failing (fn [n since & {:as more}]
+                      (mem :agents {"infra" (merge {:failures n :since since :until (+ now 60000) :reason reason} more)}))
+            noticed? #(= [[:notice ["infra" "backing-off"]]] (heads (acts (merge {:threads [t2] :oncall oc} %))))]
+        (is (not (noticed? {:memory (failing 2 (- now 900000))})) "two failures over 15 min: not yet")
+        (is (noticed? {:memory (failing 2 (- now 900001))}) "more than 15 min")
+        (is (noticed? {:memory (failing 1 (- now hour))}) "one failure an hour ago, the row unbroken")
+        (is (noticed? {:memory (failing 3 now)}) "three failures in a row, whichever comes first")
+        (is (noticed? {:memory (failing 3 nil)}) "an older serve's memory, without since")
+        (is (noticed? {:memory (failing 3 now :until 0)}) "its back-off over, but nothing went out since: the row goes on")
+        (is (not (noticed? {:memory (mem)})) "no failures")
+        (is (not (noticed? {:memory (assoc (failing 3 now) :threads {"t2" {:delivered "000.md"}})})) "delivered")
+        (is (not (noticed? {:memory (assoc (failing 3 now) :threads {"t2" {:delivered "x.md" :holder "bbbb2222"}}
+                                           :sessions {"bbbb2222" {:state "starting"}})}))
+            "a session for it is coming up")
+        (is (not (noticed? {:memory (failing 3 now) :on-duty #{"infra"}})) "a listener on duty")
+        (let [since (- now 360000)
+              [[_ _ info]] (acts {:threads [t2] :oncall oc :memory (failing 3 since) :facts {"infra" {:exists true :trusted false}}})]
+          (is (= {:agent "infra" :kind "backing-off" :threads ["t2"] :reason reason
+                  :subject "postmaster: 1 thread waits on infra, where serve can't start sessions"}
+                 (dissoc info :text)))
+          (is (str/includes? (:text info) (str "serve has failed 3 times in a row since " (core/clock since) ": " reason "\n\n")))
+          (is (str/includes? (:text info) "To fix it: Claude Code hasn't trusted /x/infra yet: run `claude` there once and accept the question.")))
+        (let [fix #(get-in (acts {:threads [t2] :oncall oc :memory (failing 3 now :reason %1) :facts {"infra" %2}}) [0 2 :text])]
+          (is (str/includes? (fix "x" {:exists false}) "To fix it: /x/infra is gone: if infra's folder moved, `agent-mail agents move infra DIR` says where."))
+          (is (str/includes? (fix "x" {:exists true :trusted true}) "To fix it: serve's log says why: ~/Library/Logs/agent-mail-serve.log on macOS."))
+          (is (str/includes? (fix reason {}) "To fix it: Claude Code hasn't trusted") "nothing known of the folder: the reason tells"))))
+    (testing "a notice: said once, across restarts; updated while its thread waits on the user; closed when it no longer holds"
+      (let [t2 (th "t2" 2 [(msg 0 "web" "infra")])
+            t2-closed (th "t2" 2 [(msg 0 "web" "infra") (msg 1 "web" "infra" :status "done")])
+            t3 (th "t3" 3 [(msg 0 "website" "infra")])
+            k ["infra" "off-call"]
+            notice (th "n1" 9 [(msg 0 "postmaster" "user")])
+            said (core/remember (mem) [:noticed k {:agent "infra" :kind "off-call" :threads ["t2"] :reason nil
+                                                   :subject "s" :text "x" :thread "n1" :number 9}] now)
+            restarted (core/serve-memory (edn/read-string (pr-str said)))]
+        (is (= {k {:agent "infra" :kind "off-call" :threads ["t2"] :reason nil :thread "n1" :number 9}}
+               (get-in said [:postmaster :notices]))
+            "what it said and where, not the text")
+        (is (= [] (acts {:threads [t2 notice] :memory said})) "said already")
+        (is (= said restarted) "the state file keeps it")
+        (is (= [] (acts {:threads [t2 notice] :memory restarted})) "a restart says nothing new")
+        (let [[[kind key info] :as all] (acts {:threads [t2 t3 notice] :memory restarted})]
+          (is (= [:notice-update k] [kind key]) (pr-str all))
+          (is (= {:agent "infra" :kind "off-call" :threads ["t2" "t3"] :reason nil :thread "n1" :number 9} (dissoc info :text)))
+          (is (str/starts-with? (:text info) "Changed: #3 waits on infra too.\n\ninfra isn't on call, so nothing delivers these 2 threads"))
+          (is (= {:agent "infra" :kind "off-call" :threads ["t2" "t3"] :reason nil :thread "n1" :number 9}
+                 (get-in (core/remember said [:notice-updated k info] now) [:postmaster :notices k]))))
+        (is (str/starts-with? (get-in (acts {:threads [t2-closed t3 notice] :memory said}) [0 2 :text])
+                              "Changed: #3 waits on infra too; #2 no longer waits on infra.\n\n")
+            "the set changed both ways")
+        (testing "closed when it no longer holds"
+          (let [oc {"infra" {:dir "/x/infra"}}]
+            (is (= [[:notice-close k {:thread "n1" :number 9 :text "Delivered now: #2 no longer waits on infra."}]]
+                   (acts {:threads [t2 notice] :memory (assoc said :threads {"t2" {:delivered "000.md"}}) :oncall oc}))
+                "on call now, and serve delivered it")
+            (is (= [[:notice-close k {:thread "n1" :number 9 :text "Delivered now: infra is on call, and serve hands #2 to its sessions."}]]
+                   (acts {:threads [t2 notice] :memory said :oncall oc}))
+                "on call, not delivered yet")
+            (is (= [[:notice-close k {:thread "n1" :number 9 :text "Delivered now: #2 no longer waits on infra."}]]
+                   (acts {:threads [t2-closed notice] :memory said}))
+                "closed by its asker")
+            (is (= [[:notice-close ["infra" "backing-off"] {:thread "n1" :number 9 :text "#2 still waits on infra, but no longer for the reason above."}]]
+                   (acts {:threads [(th "t2" 2 [(msg 0 "web" "infra" :date "2026-10-31T10:59:00.000Z")]) notice]
+                          :memory (mem :postmaster {:notices {["infra" "backing-off"] {:agent "infra" :kind "backing-off" :threads ["t2"]
+                                                                                         :reason "x" :thread "n1" :number 9}}})}))
+                "taken off call: not delivered, and not for this reason")
+            (is (= {} (get-in (core/remember said [:notice-closed k] now) [:postmaster :notices])))))
+        (testing "once the user closed or answered it, its thread is theirs: a change starts a new one"
+          (let [answered (th "n1" 9 [(msg 0 "postmaster" "user") (msg 1 "user" "postmaster" :date "2026-10-31T10:59:00.000Z")])
+                dismissed (th "n1" 9 [(msg 0 "postmaster" "user") (msg 1 "user" "postmaster" :status "done")])]
+            (doseq [n [answered dismissed]]
+              (is (= [] (acts {:threads [t2 n] :memory said})) "nothing changed: nothing said")
+              (is (= [[:notice k]] (heads (acts {:threads [t2 t3 n] :memory said}))) "a change: a new notice thread")
+              (is (= [[:notice-forget k]] (acts {:threads [n] :memory said})) "resolved: forgotten without a word"))
+            (is (= [[:notice-forget k]] (acts {:memory said})) "its thread is gone")
+            (is (= {} (get-in (core/remember said [:notice-forget k] now) [:postmaster :notices])))))
+        (testing "the open notices, for status, who and oncall"
+          (let [view (core/postmaster-view said {"n1" notice})]
+            (is (= [{:agent "infra" :kind "off-call" :threads ["t2"] :notice "n1" :number 9}] view))
+            (is (= "postmaster's notice #9: 1 thread waits on infra, which isn't on call" (core/notice-phrase (first view))))
+            (is (= view (:postmaster (core/status {:now "2026-10-31T11:00:00.000Z" :me "user" :threads [notice t2] :seen {} :duty []
+                                                   :memory said}))))
+            (is (= [] (core/postmaster-view said {"n1" (th "n1" 9 [(msg 0 "postmaster" "user" :status "done")])})) "closed")
+            (is (= [] (core/postmaster-view said {})) "gone")
+            (is (= [] (core/postmaster-view nil {})))))))
+    (testing "remember: the postmaster's grace"
+      (let [r #(core/remember %1 %2 now)]
+        (is (= {:pending {"t1" "gone"}} (:postmaster (r (mem) [:pm-wait "t1" "gone"]))))
+        (is (= {:pending {}} (:postmaster (r (pending {"t1" "gone"}) [:bounced "t1"]))))
+        (is (= {:pending {}} (:postmaster (r (pending {"t1" "gone"}) [:pm-unwait "t1"]))))
+        (is (= (mem) (r (mem) [:notice-updated ["infra" "off-call"] {:threads ["t2"]}])) "a notice it no longer has")))
+    (testing "mail to postmaster goes to agent-mail, whose session answers as itself"
+      (let [n1 (th "n1" 9 [(msg 0 "postmaster" "user") (msg 1 "user" "postmaster")])
+            in {:now now :oncall {"agent-mail" {:dir "/x/agent-mail"}} :threads [n1] :memory (mem) :on-duty #{}
+                :live [] :known [] :expiry {} :grace-ms 120000 :check-ms 30000}
+            serve #(core/serve-actions (merge in %))
+            addressed "It waits on postmaster, agent-mail serve's own role, whose mail goes to agent-mail: answer as agent-mail. "
+            [[kind agent t text info] :as all] (serve {})]
+        (is (= 1 (count all)))
+        (is (= [:start "agent-mail" "n1"] [kind agent t]))
+        (is (= {:agent "agent-mail" :number 9 :file "001.md" :dir "/x/agent-mail" :name "📫 agent-mail #9"} info))
+        (is (str/starts-with? text (str "agent-mail serve started this session for thread #9 for agent-mail from user (the user themself, "
+                                        "writing by mail; not another agent or session), \"About n1\" (n1, message 2). " addressed
+                                        "Read it with `agent-mail read 9`")))
+        (is (= {:live true :known true} (core/serve-wants in)))
+        (is (= [] (serve {:oncall {}})) "agent-mail off call: nothing")
+        (is (= "on-call" (core/listener n1 #{} #{"agent-mail"})) "status says who listens")
+        (let [held (th "n1" 9 [(msg 0 "postmaster" "user") (msg 1 "user" "postmaster") (msg 2 "agent-mail" "user" :session "aaaa1111-full")
+                               (msg 3 "user" "postmaster")])
+              [[kind _ sid text]] (serve {:threads [held] :live [(live-s "aaaa1111" :cwd "/x/agent-mail")]})]
+          (is (= [:post "aaaa1111"] [kind sid]) "the session that answered as agent-mail holds it")
+          (is (str/includes? text (str "(not another agent). " addressed "Read it with"))))
+        (is (not (str/includes? (core/posted-text "infra" (th "t1" 1 [(msg 0 "web" "infra")]) true "") "postmaster"))
+            "other mail says nothing of it")))))
+
+(deftest postmaster-texts
+  (testing "a bounce: no such agent, the closest names, how to pass it on"
+    (is (= (str "There is no agent infr in the agent directory, so nothing delivers this thread to it: the postmaster sends it back to you. "
+                "The closest names are infra or infra-old. "
+                "To pass it on, `agent-mail forward 4 --to NAME` starts a new thread carrying this one, "
+                "or `agent-mail reply 4 --to NAME` hands this one over; `agent-mail agents` lists who owns what. "
+                "If nobody needs it any more, `agent-mail close 4`.")
+           (core/bounce-text {:owner "infr" :agent "infr" :number 4 :close ["infra" "infra-old"]})))
+    (is (str/starts-with? (core/bounce-text {:owner "infr" :agent "infr" :number 4 :close []})
+                          "There is no agent infr in the agent directory, so nothing delivers this thread to it: the postmaster sends it back to you. To pass it on")
+        "no close names: none said"))
+  (testing "a notice: subject, body, update, close"
+    (let [now (+ t0 1000)
+          items [(th "t2" 2 [(msg 0 "web" "infra")]) (th "t3" 3 [(msg 0 "user" "infra")])]
+          off {:agent "infra" :kind "off-call" :items items :dir "/x/infra" :threads ["t2" "t3"]}
+          number-of #(get {"t1" 1 "t2" 2 "t3" 3} % %)]
+      (is (= "postmaster: 2 threads wait on infra, which isn't on call" (core/notice-subject off)))
+      (is (= "postmaster: 1 thread waits on infra, where serve can't start sessions"
+             (core/notice-subject {:agent "infra" :kind "backing-off" :threads ["t2"]})))
+      (is (= (str "infra isn't on call, so nothing delivers these 2 threads until a session starts in its folder, /x/infra:\n\n"
+                  "- #2 \"About t2\" from web, waiting 1h\n"
+                  "- #3 \"About t3\" from user, waiting 1h\n\n"
+                  "`agent-mail oncall add infra` lets serve deliver them.\n\n"
+                  "The postmaster, agent-mail serve's own role, writes here when this changes, and closes this thread once "
+                  "it no longer holds. A reply goes to agent-mail, the agent that owns the tool.")
+             (core/notice-text off now)))
+      (let [since (- now 600000)]
+        (is (= (str "serve can't start sessions for infra, which is on call, so this thread waits:\n\n"
+                    "- #2 \"About t2\" from web, waiting 1h\n\n"
+                    "serve has failed 3 times in a row since " (core/clock since) ": `claude --bg` failed (exit 1): boom\n\n"
+                    "To fix it: serve's log says why: ~/Library/Logs/agent-mail-serve.log on macOS.\n\n"
+                    core/notice-trailer)
+               (core/notice-text {:agent "infra" :kind "backing-off" :items (take 1 items) :dir "/x/infra" :failures 3 :since since
+                                  :reason "`claude --bg` failed (exit 1): boom" :fix :log}
+                                 now))))
+      (is (str/starts-with? (core/notice-update-text off {:threads ["t1" "t2"]} number-of now)
+                            "Changed: #3 waits on infra too; #1 no longer waits on infra.\n\ninfra isn't on call"))
+      (is (str/starts-with? (core/notice-update-text (assoc off :reason "new") {:threads ["t2" "t3"] :reason "old"} number-of now)
+                            "Changed: serve gives another reason.\n\n"))
+      (is (= "Delivered now: #2 and #3 no longer wait on infra." (core/notice-close-text "infra" [2 3] [] false)))
+      (is (= "Delivered now: #2 no longer waits on infra." (core/notice-close-text "infra" [2] [] true)))
+      (is (= "Delivered now: infra is on call, and serve hands #3 to its sessions." (core/notice-close-text "infra" [2 3] [3] true)))
+      (is (= "#2 and #3 still wait on infra, but no longer for the reason above." (core/notice-close-text "infra" [2 3] [2 3] false)))
+      (is (= "postmaster's notice #9: 2 threads wait on infra, which isn't on call"
+             (core/notice-phrase {:number 9 :agent "infra" :kind "off-call" :threads ["t2" "t3"]})))))
+  (testing "the fix for a back-off: from what is known of the folder, else from the reason"
+    (is (= :gone (core/backoff-fix "x" {:exists false :trusted true})))
+    (is (= :trust (core/backoff-fix "x" {:exists true :trusted false})))
+    (is (= :trust (core/backoff-fix "`claude --bg` failed (exit 1): Workspace not trusted. Run `claude` in /x once…" {})))
+    (is (= :gone (core/backoff-fix "`claude --bg` failed (exit 1): its directory is gone (/x)" {})))
+    (is (= :log (core/backoff-fix "session \"📫 infra #1\" did not show up in `claude agents`" {:exists true :trusted true})))
+    (is (= "Claude Code hasn't trusted /x/infra yet: run `claude` there once and accept the question." (core/fix-text "infra" "/x/infra" :trust)))
+    (is (= "/x/infra is gone: if infra's folder moved, `agent-mail agents move infra DIR` says where." (core/fix-text "infra" "/x/infra" :gone)))))
+
 ;; ================================================================ unit: drafts
 
 (deftest draft-extraction
@@ -1116,11 +1365,12 @@
     (is (= "café" (core/name-from-dir "café")) "letters beyond ASCII are letters")
     (is (= "config" (core/name-from-dir ".config")) "no hidden entry file")
     (is (nil? (core/name-from-dir "user")) "the user's name is taken")
+    (is (nil? (core/name-from-dir "postmaster")) "and serve's own")
     (is (nil? (core/name-from-dir "+++")))
     (is (nil? (core/name-from-dir ""))))
   (testing "names the directory takes"
     (is (core/agent-name? "infra"))
-    (is (every? (complement core/agent-name?) ["user" ".x" "-x" "a b" "a/b" "" nil])))
+    (is (every? (complement core/agent-name?) ["user" "postmaster" ".x" "-x" "a b" "a/b" "" nil])))
   (testing "paths compare segment by segment"
     (is (core/same-path? "/x/app" "/x/app/"))
     (is (core/same-path? "/x//app" "/x/app"))
@@ -1910,7 +2160,7 @@
           who-json (json/parse-string (out {} "who" "--json") true)
           th (into {} (map (juxt :id identity)) (:threads st))]
       (testing "one object: the time, the caller, every thread, the duty records, the undelivered ids, on call, serve and the agents"
-        (is (= #{:schema :now :me :threads :duty :undelivered :oncall :serve :agents} (set (keys st))))
+        (is (= #{:schema :now :me :threads :duty :undelivered :oncall :serve :agents :postmaster} (set (keys st))))
         (is (every? #(= #{:name :dir :oncall :kind :summary :borrowed :trusted :dir-exists} (set (keys %))) (:agents st)))
         (is (= "user" (:me st)))
         (is (re-matches #"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z" (:now st))))
@@ -2059,7 +2309,7 @@
             (serve)
             (is (= [] (calls)))
             (is (not (contains? (serve-state) :repos)))
-            (is (= {:threads {} :sessions {} :agents {} :land {}} (memory)))
+            (is (= {:threads {} :sessions {} :agents {} :land {} :postmaster {}} (memory)))
             (is (= "on call" (oncall-text)) "not backing off"))
           (let [id (out {:who "website"} "@infra" "Rotate the key")]
             (testing "a new thread: a background session of its own, in the repo, named for the thread"
@@ -2225,7 +2475,7 @@
               (is (= [id] (keys (:threads (memory)))) "the thread is kept while its close is news for infra")
               (out as-session "read" id)
               (serve)
-              (is (= {:threads {} :sessions {} :agents {} :land {}} (memory)) "read: forgotten")))
+              (is (= {:threads {} :sessions {} :agents {} :land {} :postmaster {}} (memory)) "read: forgotten")))
           (testing "`claude --bg` fails (an untrusted folder): back off, and say why"
             (spit (str (fs/path d "bg.fail")) (str "Starting background service…\nWorkspace not trusted. Run `claude` in " infra-real " once…\n"))
             (let [id (out {:who "website"} "@infra" "Anyone?")
@@ -2472,6 +2722,199 @@
             (is (str/includes? (serve) "rm \"📫 #1\" (deadbeef): stopped, holding no open thread, branch worktree-w landed"))
             (is (= [["rm" "deadbeef"]] (rms)))
             (is (= {} (:sessions (core/serve-memory (serve-state)))))))))))
+
+;; ================================================================ end to end: the postmaster
+
+(defn postmaster-rig
+  "What the postmaster's end-to-end tests share, in temporary folder `d`: a
+   fake claude (fake-claude!) that lists no sessions, :env for serve,
+   :serve (one round, its log returned) and :notices, the threads the
+   postmaster started, oldest first."
+  [d]
+  (let [claude (fake-claude! d)
+        env {"AGENT_MAIL_CLAUDE" claude "CLAUDE_CONFIG_DIR" (str (fs/create-dirs (fs/path d "claude-config")))}]
+    (spit (str (fs/path d "agents.json")) "[]")
+    (spit (str (fs/path d "all.json")) "[]")
+    {:env env
+     :serve (fn [] (let [r (am {:env env} "serve" "--once")] (is (zero? (:exit r)) (:err r)) (:err r)))
+     :notices #(sort-by :number (filter (fn [t] (= "postmaster" (:from t))) (list-json "--all")))}))
+
+(deftest postmaster-sends-legacy-mail-back
+  (with-store
+    (with-dir [d]
+      (let [{:keys [serve]} (postmaster-rig d)
+            last-msg #(last (:msgs (thread-json %)))
+            docs (str (fs/path (fs/parent *store*) "folders" "docs"))
+            asked (out {:who "website"} "@docs" "Update the API page")
+            ;; oldbot was never in the directory: an explicit --as is not added
+            stray (out {:who "oldbot"} "@docs" "Old news")]
+        (out {:env user-shell} "agents" "remove" "docs")
+        (out {:env user-shell} "agents" "add" (str (fs/create-dirs (fs/path d "doc"))) "--name" "doc")
+        (testing "a round of grace: nothing written"
+          (let [before (commits)
+                log (serve)]
+            (is (str/includes? log (str "postmaster: " asked " waits on docs, who isn't in the agent directory;"
+                                        " it goes back to its sender next round unless that changes")))
+            (is (= before (commits)))
+            (is (= {asked "docs" stray "docs"} (get-in (serve-state) [:postmaster :pending])))))
+        (testing "then back to its last sender, or to the user when that isn't in the directory either"
+          (let [before (commits)
+                log (serve)
+                m (last-msg asked)]
+            (is (str/includes? log "postmaster: #1 back to website: no agent docs in the directory"))
+            (is (str/includes? log "postmaster: #2 back to user: no agent docs in the directory"))
+            (is (= (+ 2 before) (commits)))
+            (is (= "📮 postmaster → user: Old news" (store-git "log" "-1" "--format=%s")))
+            (is (= ["postmaster" "website" "docs" nil] ((juxt :from :to :bounced :session) m)))
+            (is (= (core/bounce-text {:owner "docs" :agent "docs" :number 1 :close ["doc"]}) (:body m)))
+            (is (str/includes? (:body m) "The closest names are doc. "))
+            (is (= "website" (:owner (thread-json asked))) "website's turn now")
+            (is (= ["postmaster" "user"] ((juxt :from :to) (last-msg stray))))
+            (is (= {} (get-in (serve-state) [:postmaster :pending])))))
+        (testing "once per owner name"
+          (out {:env user-shell} "agents" "add" docs "--name" "docs")
+          (out {:who "website"} "reply" asked "--to" "docs" "Still needed.")
+          (out {:env user-shell} "agents" "remove" "docs")
+          (let [before (commits)]
+            (serve)
+            (serve)
+            (is (= before (commits)) "docs again: not sent back twice")
+            (is (= "docs" (:owner (thread-json asked))))))
+        (is (str/blank? (store-git "status" "--porcelain")) "every write committed")))))
+
+(deftest postmaster-tells-the-user-of-an-off-call-agent
+  (with-store
+    (with-dir [d]
+      (let [{:keys [env serve notices]} (postmaster-rig d)
+            infra (str (fs/path (fs/parent *store*) "folders" "infra"))
+            old (out {:who "website"} "send" "--to" "infra" "--subject" "Rotate the key" "--date" "2026-10-01" "The staging one.")
+            _young (out {:who "website"} "@infra" "And the DNS?")
+            body-of #(:body (last (:msgs (thread-json %))))]
+        (testing "a thread that waited more than an hour on an agent off call: a notice to the user"
+          (let [log (serve)
+                [n :as ns] (notices)]
+            (is (= 1 (count ns)))
+            (is (= ["postmaster: 1 thread waits on infra, which isn't on call" "user" "open"] ((juxt :subject :owner :status) n)))
+            (is (str/includes? log "postmaster: notice #3 to user: 1 thread waits on infra, which isn't on call"))
+            (is (= "📮 postmaster → user: postmaster: 1 thread waits on infra, which isn't on call" (store-git "log" "-1" "--format=%s")))
+            (is (str/starts-with? (body-of (:id n)) (str "infra isn't on call, so nothing delivers this thread until a session starts in its folder, "
+                                                        (fs/real-path infra) ":\n\n- #1 \"Rotate the key\" from website, waiting ")))
+            (is (str/includes? (body-of (:id n)) "\n\n`agent-mail oncall add infra` lets serve deliver it.\n\n"))
+            (is (not (str/includes? (body-of (:id n)) "And the DNS?")) "the young thread is not listed")
+            (is (= [{:agent "infra" :kind "off-call" :threads [old] :notice (:id n) :number 3}] (:postmaster (status-json {:env env}))))
+            (is (re-find #"(?m)^infra\s+\(postmaster\)\s+postmaster's notice #3: 1 thread waits on infra, which isn't on call$"
+                         (out {:env env} "who")))
+            (is (re-find #"(?m)^infra\s+\(postmaster\)\s+postmaster's notice #3: 1 thread waits on infra, which isn't on call\nserve: not running"
+                         (out {:env env} "oncall")))))
+        (testing "restarted, serve says nothing it said before"
+          (let [before (commits)]
+            (serve)
+            (serve)
+            (is (= before (commits)))
+            (is (= 1 (count (notices))))))
+        (testing "another thread: an update in the same notice thread"
+          (let [other (out {:who "user" :env user-shell} "send" "--to" "infra" "--subject" "Disk full" "--date" "2026-10-02" "On the backup host.")
+                log (serve)
+                [n :as ns] (notices)
+                m (last (:msgs (thread-json (:id n))))]
+            (is (= 1 (count ns)))
+            (is (str/includes? log "postmaster: notice #3 updated: 2 threads wait on infra, which isn't on call"))
+            (is (= ["postmaster" "user" nil] ((juxt :from :to :status) m)))
+            (is (str/starts-with? (:body m) "Changed: #4 waits on infra too.\n\ninfra isn't on call, so nothing delivers these 2 threads"))
+            (is (= [old other] (get-in (status-json {:env env}) [:postmaster 0 :threads])))))
+        (testing "on call, and delivered: the postmaster closes its notice"
+          (out {:env user-shell} "oncall" "add" "infra" infra)
+          (let [log (serve)
+                [n] (notices)
+                m (last (:msgs (thread-json (:id n))))]
+            (is (str/includes? log "start \"📫 infra #1\" (deadbeef) for #1"))
+            (is (str/includes? log "postmaster: notice #3 closed: Delivered now: #1 and #4 no longer wait on infra."))
+            (is (= "done" (:status n)))
+            (is (= ["postmaster" "user" "done" "Delivered now: #1 and #4 no longer wait on infra."] ((juxt :from :to :status :body) m)))
+            (is (= "✅ postmaster → user: postmaster: 1 thread waits on infra, which isn't on call" (store-git "log" "-1" "--format=%s")))
+            (is (= [] (:postmaster (status-json {:env env}))))
+            (is (not (str/includes? (out {:env env} "who") "(postmaster)")))
+            (is (= {} (get-in (serve-state) [:postmaster :notices])))))
+        (is (str/blank? (store-git "status" "--porcelain")) "every write committed")))))
+
+(deftest postmaster-names-the-fix-for-an-untrusted-folder
+  (with-store
+    (with-dir [d]
+      (let [{:keys [env serve notices]} (postmaster-rig d)
+            cfg (get env "CLAUDE_CONFIG_DIR")
+            infra (str (fs/create-dirs (fs/path d "infra")))
+            real (str (fs/real-path infra))
+            trust! (fn [yes] (spit (str (fs/path cfg ".claude.json")) (json/generate-string {:projects {real {:hasTrustDialogAccepted yes}}})))
+            again! #(spit (str (serve-file "state.edn")) (pr-str (assoc-in (serve-state) [:agents "infra" :until] 0)))
+            reason (str "`claude --bg` failed (exit 1): Workspace not trusted. Run `claude` in " real " once…")]
+        (spit (str (fs/path d "bg.fail")) (str "Starting background service…\nWorkspace not trusted. Run `claude` in " real " once…\n"))
+        (trust! false)
+        (out {:env user-shell} "oncall" "add" "infra" infra)
+        (let [id (out {:who "website"} "@infra" "Rotate the key")]
+          (testing "two failures in a row: nothing said yet"
+            (serve)
+            (again!)
+            (serve)
+            (is (= 2 (get-in (serve-state) [:agents "infra" :failures])))
+            (is (empty? (notices))))
+          (testing "the third: a notice with the reason and the fix"
+            (again!)
+            (let [log (serve)
+                  [n :as ns] (notices)
+                  body (:body (first (:msgs (thread-json (:id n)))))
+                  since (get-in (serve-state) [:agents "infra" :since])]
+              (is (= 1 (count ns)))
+              (is (= "postmaster: 1 thread waits on infra, where serve can't start sessions" (:subject n)))
+              (is (str/includes? log "postmaster: notice #2 to user: 1 thread waits on infra, where serve can't start sessions"))
+              (is (str/starts-with? body "serve can't start sessions for infra, which is on call, so this thread waits:\n\n- #1 \"Rotate the key\" from website"))
+              (is (str/includes? body (str "serve has failed 3 times in a row since " (core/clock since) ": " reason "\n\n")))
+              (is (str/includes? body (str "To fix it: Claude Code hasn't trusted " real " yet: run `claude` there once and accept the question.")))
+              (is (= [{:agent "infra" :kind "backing-off" :threads [id] :notice (:id n) :number 2 :reason reason}]
+                     (:postmaster (status-json {:env env}))))
+              (is (re-find #"(?m)^infra\s+\(postmaster\)\s+postmaster's notice #2: 1 thread waits on infra, where serve can't start sessions$"
+                           (out {:env env} "oncall")))))
+          (testing "trusted: delivered, and the notice closed"
+            (trust! true)
+            (fs/delete (fs/path d "bg.fail"))
+            (again!)
+            (let [log (serve)
+                  [n] (notices)]
+              (is (str/includes? log "start \"📫 infra #1\" (deadbeef) for #1"))
+              (is (= "done" (:status n)))
+              (is (= "Delivered now: #1 no longer waits on infra." (:body (last (:msgs (thread-json (:id n))))))))))))))
+
+(deftest mail-to-the-postmaster
+  (with-store
+    (with-dir [d]
+      (let [{:keys [serve]} (postmaster-rig d)
+            am-dir (str (fs/create-dirs (fs/path d "agent-mail")))
+            refusal "agent-mail: refusing to act as postmaster: only agent-mail serve writes as it"
+            refused (fn [o & args] (let [r (apply am o args)] (is (= 1 (:exit r)) (pr-str args)) (str/trim (:err r))))]
+        (testing "nobody writes as postmaster"
+          (is (= refusal (refused {:who "postmaster"} "@infra" "Hello")))
+          (is (= refusal (refused {} "@infra" "Hello" "--as" "postmaster")))
+          (is (= refusal (refused {:who "postmaster"} "reply" "1" "x")) "before anything else")
+          (is (str/ends-with? (refused {:dir (str (fs/create-dirs (fs/path d "postmaster")))} "whoami")
+                              (str refusal "; this folder is named postmaster, so give --as NAME, or `agent-mail agents add --name NAME`")))
+          (is (str/starts-with? (refused {:env user-shell} "agents" "add" am-dir "--name" "postmaster") "agent-mail: bad name: \"postmaster\""))
+          (is (= 1 (commits)) "nothing written"))
+        (testing "mail to postmaster is allowed, and serve hands it to agent-mail"
+          (out {:env user-shell} "agents" "add" am-dir)
+          (let [r (am {:env user-shell} "@postmaster" "Why did my thread come back?")
+                id (str/trim (:out r))]
+            (is (zero? (:exit r)) (:err r))
+            (is (str/starts-with? (:err r) "→ postmaster: agent-mail serve's own role; serve hands its mail to agent-mail\n→ agent-mail: "))
+            (is (= "postmaster" (:owner (thread-json id))))
+            (let [log (serve)
+                  [bg :as starts] (filter #(= "--bg" (first %)) (claude-calls d))]
+              (is (str/includes? log "start \"📫 agent-mail #1\" (deadbeef) for #1"))
+              (is (= 1 (count starts)))
+              (is (= ["--bg" "--name" "📫 agent-mail #1"] (take 3 bg)))
+              (is (str/includes? (nth bg 3) "It waits on postmaster, agent-mail serve's own role, whose mail goes to agent-mail: answer as agent-mail."))
+              (is (= (str "cwd=" (fs/real-path am-dir)) (nth bg 4)) "in agent-mail's folder"))
+            (let [r (am {:who "infra"} "@postmaster" "From an agent too.")]
+              (is (zero? (:exit r)) (:err r))
+              (is (= "postmaster" (:owner (thread-json (str/trim (:out r))))) "an agent may mail it too"))))))))
 
 (deftest oncall-registration
   (with-store
@@ -3071,7 +3514,7 @@
 (deftest the-store-is-a-git-repo
   (with-store
     (out {:who "a"} "list")
-    (is (= {:schema 1 :me "a" :threads [] :duty [] :undelivered [] :oncall [] :serve {:alive false :pid nil}}
+    (is (= {:schema 1 :me "a" :threads [] :duty [] :undelivered [] :oncall [] :serve {:alive false :pid nil} :postmaster []}
            (dissoc (status-json {:who "a"}) :now :agents)) "status of an empty store")
     (is (= (sort regulars) (map :name (:agents (status-json {:who "a"})))) "and the directory's agents, by name")
     (is (not (fs/exists? (fs/path *store* ".git"))) "read-only commands do not create the store")
