@@ -1,9 +1,13 @@
 // The sidebar: a source list with Mailboxes (Inbox, Undelivered, All Mail)
-// and Participants (the user first, then every repo on duty or in a thread
-// with an on-duty dot; each counts the open threads waiting on it). Driven by
-// a diffable data source keyed by row identity; counts are refreshed in
-// place, never with reloadData(). A participant's context menu starts a new
-// message to it.
+// and Participants (the user first, then every agent in the directory and
+// every other name in a thread; each counts the open threads waiting on it).
+// A participant's dot says who picks its mail up: green on duty, grey on
+// call, hollow otherwise; a warning symbol after its name says something
+// needs the user (a folder serve can't use), its tooltip what. Driven by a
+// diffable data source keyed by row identity; counts are refreshed in place,
+// never with reloadData(). A participant's context menu starts a new message
+// to it and puts a directory agent on or off call; every row's offers Add
+// Folder….
 import AgentMailKit
 import AppKit
 import Observation
@@ -22,6 +26,8 @@ final class SidebarViewController: NSViewController, NSTableViewDelegate, NSMenu
     /// New Message from a participant's menu: to that repo, or to nobody
     /// yet from the user's own row.
     var onNewMessage: (String?) -> Void = { _ in }
+    /// Add Folder… from the menu: the window asks for the folder.
+    var onAddFolder: () -> Void = {}
 
     init(store: MailStore) {
         self.store = store
@@ -117,17 +123,25 @@ final class SidebarViewController: NSViewController, NSTableViewDelegate, NSMenu
                 // A row from the previous snapshot may outlive its participant
                 // until the next apply().
                 let who = index.participant(name) ?? AgentInfo(name: name, isMe: name == index.me)
-                let image = if who.isMe {
-                    NSImage(systemSymbolName: "person.fill", accessibilityDescription: "You")?
-                        .withSymbolConfiguration(.init(paletteColors: [.tertiaryLabelColor]))
-                } else {
-                    NSImage.dot(who.onDuty ? .systemGreen : .tertiaryLabelColor, filled: who.onDuty,
-                                label: who.onDuty ? "On duty" : "Not on duty")
-                }
-                cell.show(title: name, image: image, count: count, tip: who.tooltip,
-                          accessibility: who.accessibilityLabel)
+                let notices = who.notices
+                cell.show(title: name, image: Self.icon(for: who), count: count, tip: who.tooltip,
+                          accessibility: who.accessibilityLabel,
+                          warning: notices.isEmpty ? nil : notices.map(\.text).joined(separator: "\n"))
             }
         }
+    }
+
+    /// A participant's dot: the user's own figure; green and filled on duty;
+    /// filled grey on call (serve starts a session when mail comes); hollow
+    /// when nothing picks its mail up.
+    static func icon(for who: AgentInfo) -> NSImage? {
+        if who.isMe {
+            return NSImage(systemSymbolName: "person.fill", accessibilityDescription: "You")?
+                .withSymbolConfiguration(.init(paletteColors: [.tertiaryLabelColor]))
+        }
+        if who.onDuty { return NSImage.dot(.systemGreen, label: "On duty") }
+        if who.onCall { return NSImage.dot(.secondaryLabelColor, label: "On call") }
+        return NSImage.dot(.tertiaryLabelColor, filled: false, label: who.inDirectory ? "Off call" : "Not on duty")
     }
 
     private func symbol(_ name: String, _ label: String) -> NSImage? {
@@ -145,8 +159,24 @@ final class SidebarViewController: NSViewController, NSTableViewDelegate, NSMenu
             let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false)
             let selected = tableView.selectedRow == row ? "*" : " "
             let tip = cell?.toolTip?.replacingOccurrences(of: "\n", with: " / ") ?? ""
-            return "sidebar\(selected) \(cell?.accessibilityLabel() ?? "?") | tip: \(tip)"
+            let extra = (cell as? SidebarCell)?.debugIcons ?? ""
+            return "sidebar\(selected) \(cell?.accessibilityLabel() ?? "?") | tip: \(tip)\(extra)"
         }
+    }
+
+    /// The context menu a right click on `mailbox`'s row gets (nil: the
+    /// empty space below the rows), as titles: `✓` on, `(off)` disabled.
+    func debugMenu(for mailbox: Mailbox?) -> [String] {
+        menuItems(for: mailbox).map { i in
+            i.isSeparatorItem ? "---" : i.title + (i.state == .on ? "✓" : "") + (i.action == nil ? "(off)" : "")
+        }
+    }
+
+    /// Picks the item titled `title` from that menu, as a click would.
+    func debugPickMenuItem(_ title: String, for mailbox: Mailbox?) -> Bool {
+        guard let item = menuItems(for: mailbox).first(where: { $0.title == title }), let action = item.action
+        else { return false }
+        return NSApp.sendAction(action, to: item.target, from: item)
     }
     #endif
 
@@ -168,16 +198,29 @@ final class SidebarViewController: NSViewController, NSTableViewDelegate, NSMenu
 
     // MARK: Context menu
 
-    /// Participants have a menu; mailboxes and headers don't.
+    /// Participants have their own items; every row, and the space below
+    /// them, offers Add Folder….
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         let row = tableView.clickedRow
-        guard row >= 0, case let .mailbox(.agent(name))? = dataSource.itemIdentifier(forRow: row) else { return }
-        for item in menuItems(forParticipant: name) { menu.addItem(item) }
+        var mailbox: Mailbox?
+        if row >= 0, case let .mailbox(m)? = dataSource.itemIdentifier(forRow: row) { mailbox = m }
+        for item in menuItems(for: mailbox) { menu.addItem(item) }
+    }
+
+    /// A row's menu: a participant's items, then Add Folder….
+    func menuItems(for mailbox: Mailbox?) -> [NSMenuItem] {
+        var items = [NSMenuItem]()
+        if case let .agent(name)? = mailbox { items = menuItems(forParticipant: name) + [.separator()] }
+        let add = NSMenuItem(title: "Add Folder…", action: #selector(contextAddFolder(_:)), keyEquivalent: "")
+        add.target = self
+        add.toolTip = "Add a folder to the agent directory, on call, so mail can go to its agent"
+        return items + [add]
     }
 
     /// New Message to the participant (plain New Message on the user's own
-    /// row: not to myself), then Copy Name, for `agent-mail @NAME`.
+    /// row: not to myself); On Call, checked while it is, for an agent in the
+    /// directory; then Copy Name, for `agent-mail @NAME`.
     func menuItems(forParticipant name: String) -> [NSMenuItem] {
         func item(_ title: String, _ action: Selector) -> NSMenuItem {
             let i = NSMenuItem(title: title, action: action, keyEquivalent: "")
@@ -186,9 +229,35 @@ final class SidebarViewController: NSViewController, NSTableViewDelegate, NSMenu
             return i
         }
         let isMe = name == store.index.me
-        return [item(isMe ? "New Message" : "New Message to \(name)", #selector(contextNewMessage(_:))),
-                .separator(),
-                item("Copy Name", #selector(contextCopyName(_:)))]
+        var items = [item(isMe ? "New Message" : "New Message to \(name)", #selector(contextNewMessage(_:)))]
+        if let who = store.index.participant(name), who.inDirectory, !isMe {
+            let onCall = item("On Call", #selector(contextToggleOnCall(_:)))
+            onCall.state = who.onCall ? .on : .off
+            onCall.toolTip = who.onCall
+                ? "Take \(name) off call: serve stops delivering its mail (agent-mail oncall remove \(name))"
+                : "Put \(name) on call: serve starts a session for each thread (agent-mail oncall add \(name))"
+            items.append(onCall)
+        }
+        return items + [.separator(), item("Copy Name", #selector(contextCopyName(_:)))]
+    }
+
+    @objc private func contextAddFolder(_ sender: NSMenuItem) { onAddFolder() }
+
+    /// Flips the agent's on-call flag through the CLI; the store watcher
+    /// brings the change back. A refusal is shown on the window.
+    @objc private func contextToggleOnCall(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String, let who = store.index.participant(name) else { return }
+        Task {
+            do {
+                try await store.setOnCall(name, !who.onCall)
+            } catch {
+                if let window = view.window {
+                    window.presentError(error, modalFor: window, delegate: nil, didPresent: nil, contextInfo: nil)
+                } else {
+                    NSApp.presentError(error)
+                }
+            }
+        }
     }
 
     @objc private func contextNewMessage(_ sender: NSMenuItem) {
@@ -210,12 +279,14 @@ private extension SidebarRow {
     }
 }
 
-/// A sidebar row: icon, title and a count on the right.
+/// A sidebar row: icon, title, a warning symbol when something needs the
+/// user (with its own tooltip), and a count on the right.
 final class SidebarCell: NSTableCellView {
     private let title = NSTextField.label()
     private let count = NSTextField.label(font: .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular),
                                           color: .secondaryLabelColor)
     private let icon = NSImageView()
+    private let warning = NSImageView()
 
     init(header: Bool) {
         super.init(frame: .zero)
@@ -234,18 +305,28 @@ final class SidebarCell: NSTableCellView {
         icon.translatesAutoresizingMaskIntoConstraints = false
         icon.imageScaling = .scaleProportionallyDown
         imageView = icon
+        warning.translatesAutoresizingMaskIntoConstraints = false
+        warning.imageScaling = .scaleNone
+        warning.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Warning")?
+            .withSymbolConfiguration(.init(pointSize: 11, weight: .regular).applying(.preferringMulticolor()))
+        warning.isHidden = true
         addSubview(icon)
+        addSubview(warning)
         addSubview(count)
         count.alignment = .right
         count.setContentCompressionResistancePriority(.required, for: .horizontal)
         count.setContentHuggingPriority(.required, for: .horizontal)
+        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        warning.setContentCompressionResistancePriority(.required, for: .horizontal)
         NSLayoutConstraint.activate([
             icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
             icon.widthAnchor.constraint(equalToConstant: 18),
             title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
             title.centerYAnchor.constraint(equalTo: centerYAnchor),
-            count.leadingAnchor.constraint(greaterThanOrEqualTo: title.trailingAnchor, constant: 6),
+            warning.leadingAnchor.constraint(equalTo: title.trailingAnchor, constant: 4),
+            warning.centerYAnchor.constraint(equalTo: centerYAnchor),
+            count.leadingAnchor.constraint(greaterThanOrEqualTo: warning.trailingAnchor, constant: 6),
             count.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             count.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
@@ -253,12 +334,26 @@ final class SidebarCell: NSTableCellView {
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
+    /// `warning`: what needs the user, the warning symbol's tooltip; nil
+    /// hides the symbol.
     func show(title text: String, image: NSImage? = nil, count n: Int = 0, tip: String? = nil,
-              accessibility: String? = nil) {
+              accessibility: String? = nil, warning warningText: String? = nil) {
         title.stringValue = text
         icon.image = image
         count.stringValue = n > 0 ? "\(n)" : ""
         toolTip = tip
+        warning.isHidden = warningText == nil
+        warning.toolTip = warningText
         setAccessibilityLabel(accessibility ?? (n > 0 ? "\(text), \(n)" : text))
     }
+
+    #if DEBUG
+    /// The icon's and the warning's descriptions, for the debug dump.
+    var debugIcons: String {
+        guard imageView != nil else { return "" }
+        var out = " | icon: \(icon.image?.accessibilityDescription ?? "-")"
+        if !warning.isHidden { out += " | warn: \(warning.toolTip?.replacingOccurrences(of: "\n", with: " / ") ?? "")" }
+        return out
+    }
+    #endif
 }

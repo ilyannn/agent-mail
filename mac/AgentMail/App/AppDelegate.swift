@@ -159,6 +159,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MailActions, NSMenuIte
         mainWindow?.newMessage()
     }
 
+    /// File › Add Folder… while the main window isn't key: the window comes
+    /// forward and asks for the folder.
+    @objc func addFolder(_ sender: Any?) {
+        showMainWindow(nil)
+        mainWindow?.addFolder()
+    }
+
     @objc func refresh(_ sender: Any?) {
         store.refresh(reason: "menu")
     }

@@ -94,6 +94,33 @@ public struct CLIClient: Sendable {
         try await run(["close", threadID], input: text, label: "close").stdoutString
     }
 
+    /// Adds folder `directory` (an absolute path) to the agent directory, on
+    /// call, named as the CLI names it (`agents add DIR`); returns the name.
+    /// The CLI refuses `/`, the home folder, a folder already in the
+    /// directory and a name already taken, saying why (AgentMailError.exit).
+    @discardableResult
+    public func addAgent(directory: String) async throws(AgentMailError) -> String? {
+        let out = try await run(["agents", "add", directory], label: "agents add").stdoutString
+        return Self.addedAgentName(out)
+    }
+
+    /// The name `agents add` gave the folder, from its first line: `infra is
+    /// in the agent directory, on call (/x/infra)`.
+    static func addedAgentName(_ output: String) -> String? {
+        let first = output.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+        guard let r = first.range(of: " is in the agent directory") else { return nil }
+        let name = String(first[..<r.lowerBound])
+        return Formatting.isValidName(name) ? name : nil
+    }
+
+    /// Puts agent `name` on call or takes it off (`oncall add NAME`, `oncall
+    /// remove NAME`).
+    @discardableResult
+    public func setOnCall(_ name: String, _ onCall: Bool) async throws(AgentMailError) -> String {
+        try await run(["oncall", onCall ? "add" : "remove", name], label: onCall ? "oncall add" : "oncall remove")
+            .stdoutString
+    }
+
     func run(_ args: [String], input: String? = nil, label: String) async throws(AgentMailError) -> ProcessResult {
         let r: ProcessResult
         do {

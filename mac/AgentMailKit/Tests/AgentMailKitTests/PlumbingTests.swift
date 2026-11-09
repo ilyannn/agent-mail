@@ -174,6 +174,53 @@ struct StubCLI {
                                                                     "--subject", "S", "--", "hi"])
     }
 
+    @Test func theDirectoryIsChangedThroughTheCLI() async throws {
+        let stub = try StubCLI(script: """
+            for a in "$@"; do echo "arg: $a" >> "$LOG"; done
+            echo "--" >> "$LOG"
+            if [ "$1" = agents ]; then
+              echo "my-repo is in the agent directory, on call (/x/my repo)"
+              echo "Say what it owns and what to ask it for: \\`agent-mail agents describe my-repo < about.md\\`"
+            else
+              echo "infra is on call (/x/infra)"
+            fi
+            """)
+        defer { stub.remove() }
+        let client = stub.client()
+        #expect(try await client.addAgent(directory: "/x/my repo") == "my-repo")
+        try await client.setOnCall("infra", true)
+        try await client.setOnCall("infra", false)
+        #expect(try stub.calls() == """
+            arg: agents
+            arg: add
+            arg: /x/my repo
+            --
+            arg: oncall
+            arg: add
+            arg: infra
+            --
+            arg: oncall
+            arg: remove
+            arg: infra
+            --
+
+            """)
+        #expect(CLIClient.addedAgentName("infra is in the agent directory, on call (/x/infra)\n") == "infra")
+        #expect(CLIClient.addedAgentName("something else\n") == nil)
+        #expect(CLIClient.addedAgentName("") == nil)
+    }
+
+    @Test func aRefusedFolderSaysWhy() async throws {
+        let stub = try StubCLI(script: "echo 'agent-mail: /x/infra is already in the agent directory, as infra' >&2\nexit 1\n")
+        defer { stub.remove() }
+        do {
+            try await stub.client().addAgent(directory: "/x/infra")
+            Issue.record("expected a refusal")
+        } catch {
+            #expect(error.errorDescription == "agent-mail agents add failed: /x/infra is already in the agent directory, as infra")
+        }
+    }
+
     @Test func nonZeroExitIsAnError() async throws {
         let stub = try StubCLI(script: "echo 'agent-mail: no thread #9' >&2\nexit 1\n")
         defer { stub.remove() }

@@ -463,6 +463,25 @@ final class MailStore {
         drafts[threadID] = nil
     }
 
+    /// Adds `folder` to the agent directory, on call (`agents add DIR`);
+    /// returns the name the CLI gave it. The sidebar lists it once the
+    /// store watcher brings the change in.
+    func addAgentFolder(_ folder: URL) async throws(AgentMailError) -> String? {
+        let client = try await requireClient()
+        let began = ContinuousClock.now
+        let name = try await client.addAgent(directory: folder.path)
+        Timing.note("agents add \(name ?? "?") \(Timing.ms(.now - began))")
+        return name
+    }
+
+    /// Puts directory agent `name` on call or takes it off.
+    func setOnCall(_ name: String, _ onCall: Bool) async throws(AgentMailError) {
+        let client = try await requireClient()
+        let began = ContinuousClock.now
+        try await client.setOnCall(name, onCall)
+        Timing.note("oncall \(onCall ? "add" : "remove") \(name) \(Timing.ms(.now - began))")
+    }
+
     #if DEBUG
     /// Tests: shows `st` as a refresh would, without the new-message
     /// bookkeeping (which reads the store and saves the seen set).

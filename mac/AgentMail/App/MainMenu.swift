@@ -11,6 +11,8 @@ import AppKit
 
 @objc protocol MailActions {
     func newMessage(_ sender: Any?)
+    /// File › Add Folder…: a folder for the agent directory (`agents add`).
+    func addFolder(_ sender: Any?)
     func showMainWindow(_ sender: Any?)
     func showSettings(_ sender: Any?)
     func refresh(_ sender: Any?)
@@ -86,9 +88,13 @@ enum MainMenu {
         return m
     }
 
-    private static func fileMenu() -> NSMenu {
+    static func fileMenu() -> NSMenu {
         let m = NSMenu(title: "File")
         m.addItem(item("New Message", #selector(MailActions.newMessage(_:)), "n"))
+        m.addItem(.separator())
+        let add = item("Add Folder…", #selector(MailActions.addFolder(_:)))
+        add.toolTip = "Add a folder to the agent directory, on call, so mail can go to its agent"
+        m.addItem(add)
         m.addItem(.separator())
         m.addItem(item("Close Window", #selector(NSWindow.performClose(_:)), "w"))
         return m

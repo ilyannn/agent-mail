@@ -5,6 +5,9 @@
 //   {"cmd": "dump", "out": "/tmp/state.txt"}
 //   {"cmd": "snapshot", "out": "/tmp/window.png", "window": "General"}
 //                                                   (+ .web.png for the thread)
+//   {"cmd": "sidebarsnapshot", "out": "/tmp/sidebar.png", "window": "240"}
+//                    (the sidebar, drawn offscreen that wide: a window
+//                    snapshot leaves the glass sidebar out)
 //   {"cmd": "select", "arg": "<thread id>"}         (clicks the row)
 //   {"cmd": "mailbox", "arg": "inbox|undelivered|allMail|agent:NAME"}
 //   {"cmd": "sort", "arg": "newestFirst|openFirst"}  (View › Sort By)
@@ -24,6 +27,10 @@
 //   {"cmd": "appearance", "arg": "dark|light|system"} (this app only)
 //   {"cmd": "pinch", "arg": "0.25"}                 (a finished pinch)
 //   {"cmd": "frame", "arg": "x,y,w,h"}              (the main window's frame)
+//   {"cmd": "sidebarmenu", "arg": "agent:NAME|inbox|…|"} (a row's context menu;
+//                                                   empty: the space below)
+//   {"cmd": "sidebarpick", "arg": "agent:NAME|On Call"} (picks its item)
+//   {"cmd": "addfolder", "arg": "/path"}            (Add Folder… once chosen)
 // mac/scripts/debug.bb sends them.
 #if DEBUG
 import AgentMailKit
@@ -57,6 +64,7 @@ final class DebugHooks: NSObject {
         switch cmd["cmd"] {
         case "dump": write(dump(app), to: out)
         case "snapshot": snapshot(to: out, title: cmd["window"])
+        case "sidebarsnapshot": sidebarSnapshot(to: out, width: Double(cmd["window"] ?? "") ?? 240)
         case "select": app.debugMain?.debugSelect(arg)
         case "mailbox": app.debugMain?.debugSelectMailbox(arg)
         case "sort": if let order = ThreadOrder(rawValue: arg) { app.store.threadOrder = order }
@@ -104,6 +112,15 @@ final class DebugHooks: NSObject {
             let v = arg.split(separator: ",").compactMap { Double($0) }
             if v.count == 4 { app.debugMain?.window?.setFrame(NSRect(x: v[0], y: v[1], width: v[2], height: v[3]), display: true) }
         case "statusmenu": write(app.debugStatusMenu(), to: out)
+        case "sidebarmenu":
+            write((app.debugMain?.sidebar.debugMenu(for: Self.mailbox(arg)) ?? []).joined(separator: "\n") + "\n", to: out)
+            return
+        case "sidebarpick":
+            let parts = arg.split(separator: "|", maxSplits: 1).map(String.init)
+            let picked = parts.count == 2 && app.debugMain?.sidebar.debugPickMenuItem(parts[1], for: Self.mailbox(parts[0])) == true
+            write("picked=\(picked)\n", to: out)
+            return
+        case "addfolder": app.debugMain?.addFolder(at: URL(filePath: arg))
         case "show": app.showMainWindow(nil)
         case "close": app.debugMain?.window?.performClose(nil)
         case "settings": app.showSettings(nil)
@@ -124,7 +141,7 @@ final class DebugHooks: NSObject {
             }
         default: break
         }
-        if let out, !["dump", "snapshot", "statusmenu", "js"].contains(cmd["cmd"] ?? "") {
+        if let out, !["dump", "snapshot", "sidebarsnapshot", "statusmenu", "js"].contains(cmd["cmd"] ?? "") {
             write("ok \(cmd["cmd"] ?? "")\n", to: out)
         }
     }
@@ -150,6 +167,30 @@ final class DebugHooks: NSObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
             MainActor.assumeIsolated { self?.whenActive(then, tries: tries - 1) }
         }
+    }
+
+    /// A mailbox as the hooks name it: inbox, undelivered, allMail or
+    /// agent:NAME; nil for anything else (the space below the rows).
+    static func mailbox(_ raw: String) -> Mailbox? {
+        switch raw {
+        case "inbox": .inbox
+        case "undelivered": .undelivered
+        case "allMail": .allMail
+        case _ where raw.hasPrefix("agent:"): .agent(String(raw.dropFirst(6)))
+        default: nil
+        }
+    }
+
+    /// The texts of a sheet on the main window (an alert), or "-".
+    private func sheetText(_ window: NSWindow?) -> String {
+        guard let sheet = window?.attachedSheet, let content = sheet.contentView else { return "-" }
+        var texts: [String] = []
+        func collect(_ v: NSView) {
+            if let f = v as? NSTextField, !f.stringValue.isEmpty { texts.append(f.stringValue) }
+            v.subviews.forEach(collect)
+        }
+        collect(content)
+        return texts.joined(separator: " / ")
     }
 
     private func write(_ s: String, to url: URL?) {
@@ -237,6 +278,35 @@ final class DebugHooks: NSObject {
         }
     }
 
+    /// The sidebar as a PNG. The window's own sidebar sits in a glass
+    /// container that a window snapshot leaves out, so this draws another
+    /// one, on the same store, in an offscreen window of `width` points.
+    private func sidebarSnapshot(to url: URL?, width: CGFloat) {
+        guard let url, let app else { return }
+        let sidebar = SidebarViewController(store: app.store)
+        let window = NSWindow(contentRect: NSRect(x: -20000, y: -20000, width: width, height: 600),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.appearance = app.debugMain?.window?.effectiveAppearance
+        window.contentViewController = sidebar
+        window.setContentSize(NSSize(width: width, height: 600))
+        window.layoutIfNeeded()
+        defer { window.close() }
+        guard let view = window.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+        view.cacheDisplay(in: view.bounds, to: rep)
+        guard let out = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+        let bounds = NSRect(origin: .zero, size: out.size)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: out)
+        window.effectiveAppearance.performAsCurrentDrawingAppearance {
+            NSColor.windowBackgroundColor.setFill()
+            bounds.fill()
+        }
+        rep.draw(in: bounds, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: false, hints: nil)
+        NSGraphicsContext.restoreGraphicsState()
+        try? out.representation(using: .png, properties: [:])?.write(to: url)
+    }
+
     /// Scrolls the first element matching `selector` into view and clicks
     /// its middle with real mouse events, so WebKit decides what the click
     /// does (link activation, <details> toggling).
@@ -321,6 +391,8 @@ final class DebugHooks: NSObject {
         lines.append("store: \(store.location.url.path) (\(store.location.source.rawValue))")
         lines.append("unreadInInbox: \(store.index.unreadInInbox)")
         lines.append("notifications: authorization=\(app.notifications.authorization.rawValue) alertStyle=\(app.notifications.alertStyle.rawValue) (0 = not determined / none)")
+        lines.append("sheet: \(sheetText(app.debugMain?.window))")
+        lines.append("fileMenu: \(menuState("File"))")
         lines.append("viewMenu: \(menuState("View"))")
         lines.append("messageMenu: \(menuState("Message"))")
         lines += app.debugMain?.debugDump() ?? []

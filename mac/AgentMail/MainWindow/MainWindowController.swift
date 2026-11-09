@@ -1,8 +1,8 @@
 // The main window: sidebar, thread list and thread view in a split view
 // controller, a unified toolbar whose sections track the split dividers, and
-// the thread commands (New Message, Reply, Forward, Send, Close Thread,
-// mailboxes, sort order, participant filter, text size) for the menus and
-// toolbar. Closing it leaves the app running in the menu bar, the draft and
+// the thread commands (New Message, Add Folder…, Reply, Forward, Send, Close
+// Thread, mailboxes, sort order, participant filter, text size) for the
+// menus and toolbar. Closing it leaves the app running in the menu bar, the draft and
 // unsent replies kept.
 import AgentMailKit
 import AppKit
@@ -87,6 +87,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         }
         list.onContextForward = { [weak self] id in self?.thread.forward(threadID: id) }
         sidebar.onNewMessage = { [weak self] to in self?.thread.newMessage(to: to) }
+        sidebar.onAddFolder = { [weak self] in self?.addFolder() }
         list.onContextDiscard = { [weak self] in
             self?.store.showDraft()
             self?.thread.discardDraft()
@@ -159,6 +160,38 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         thread.newMessage(to: recipient)
     }
 
+    /// Add Folder…: asks for a folder in a sheet, then adds it to the agent
+    /// directory through the CLI and shows the new agent's mailbox. What
+    /// the CLI says when it refuses (the home folder, a folder or name
+    /// already in the directory) is shown as an alert.
+    func addFolder() {
+        guard let window else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        panel.prompt = "Add"
+        panel.message = "Choose a folder for the agent directory. Its agent is named after it and starts on call: "
+            + "serve starts a Claude Code session there for each thread."
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            self?.addFolder(at: url)
+        }
+    }
+
+    /// Adds `folder` as Add Folder… does once the folder is chosen.
+    func addFolder(at folder: URL) {
+        Task {
+            do {
+                if let name = try await store.addAgentFolder(folder) { store.mailbox = .agent(name) }
+            } catch {
+                guard let window else { return }
+                window.presentError(error, modalFor: window, delegate: nil, didPresent: nil, contextInfo: nil)
+            }
+        }
+    }
+
     #if DEBUG
     func debugSelect(_ id: String) { list.debugSelect(id) }
 
@@ -202,6 +235,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         if let filter = ParticipantFilter(menuItem: sender) { store.participantFilter = filter }
     }
     @objc func newMessage(_ sender: Any?) { newMessage() }
+    @objc func addFolder(_ sender: Any?) { addFolder() }
     @objc func replyToThread(_ sender: Any?) { thread.focusReply() }
     @objc func forwardThread(_ sender: Any?) {
         guard let id = store.selectedThreadID else { return }

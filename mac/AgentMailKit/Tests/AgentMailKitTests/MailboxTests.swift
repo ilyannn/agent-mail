@@ -253,25 +253,95 @@ import Testing
         #expect(duty.participant("user")?.onDuty == false)
     }
 
-    @Test func onCallReposSayATabOpens() throws {
+    @Test func onCallReposSayServeDelivers() throws {
         func index(alive: Bool) -> MailboxIndex {
             MailboxIndex(status: MailStatus(now: .now, me: "user", threads: [],
                                             duty: [DutyRecord(repo: "website", session: "s1", onDuty: true)],
                                             oncall: [OnCallRepo(repo: "infra"), OnCallRepo(repo: "website"),
-                                                     OnCallRepo(repo: "docs", state: "backing-off")],
+                                                     OnCallRepo(repo: "docs", state: "backing-off",
+                                                                reason: "the folder is gone")],
                                             serve: ServeInfo(alive: alive, pid: 1)))
         }
         let up = index(alive: true)
         #expect(up.agents.map(\.name) == ["docs", "infra", "website"], "on-call repos are listed without threads")
         let infra = try #require(up.participant("infra"))
-        #expect(infra.onCall && !infra.onDuty)
-        #expect(infra.tooltip == "infra: on call — a tab opens when mail comes\nNothing waiting on infra")
+        #expect(infra.onCall && infra.delivering && !infra.onDuty)
+        #expect(!infra.inDirectory, "a CLI from before the directory")
+        #expect(infra.tooltip == "infra: on call — serve starts a session for each thread\nNothing waiting on infra")
         #expect(infra.accessibilityLabel == "infra, on call")
         #expect(up.participant("website")?.tooltip == "website: on duty — s1 (waiting)\nNothing waiting on website",
                 "on duty wins")
-        #expect(up.participant("docs")?.onCall == false, "backing off: no tab comes")
-        #expect(index(alive: false).participant("infra")?.tooltip == "infra: nobody on duty\nNothing waiting on infra",
-                "serve isn't running")
+        let docs = try #require(up.participant("docs"))
+        #expect(docs.onCall && !docs.delivering, "backing off: on call, but nothing comes")
+        #expect(docs.tooltip == "docs: on call, but serve backs off from it: the folder is gone\nNothing waiting on docs")
+        let down = try #require(index(alive: false).participant("infra"))
+        #expect(down.onCall && !down.delivering)
+        #expect(down.tooltip == "infra: on call, but serve isn’t running\nNothing waiting on infra")
+    }
+
+    @Test func theDirectoryListsEveryAgentAndKeepsOtherNames() throws {
+        let dir = MailboxIndex(status: try AgentMailJSON.decodeStatus(Fixture.data("status-directory")))
+        #expect(dir.participants.map(\.name) == ["user", "docs", "gone", "infra", "notes", "old-repo", "website"],
+                "docs and notes have no mail; old-repo left the directory but has a thread")
+        #expect(dir.participants.map(\.inDirectory) == [false, true, true, true, true, false, true])
+        #expect(dir.participants.map(\.onCall) == [false, true, true, true, false, false, true])
+        #expect(dir.directory?.count == 5)
+        #expect(dir.participant("user")?.entry == nil, "the user is never an agent")
+
+        let infra = try #require(dir.participant("infra"))
+        #expect(infra.summary == "Owns the servers, DNS and deploys.")
+        #expect(infra.tooltip.hasPrefix("infra: on call — serve starts a session for each thread\n"
+            + "Owns the servers, DNS and deploys.\n"))
+        #expect(infra.tooltip.hasSuffix("\n1 thread waiting on infra"))
+        #expect(dir.participant("website")?.tooltip == """
+            website: on call — serve starts a session for each thread
+            The public website: its pages, build and hosting. (from README.md)
+            1 thread waiting on website
+            """)
+        let notes = try #require(dir.participant("notes"))
+        #expect(notes.tooltip == """
+            notes: off call — its mail waits until a session starts in its folder
+            Keeps meeting notes.
+            Nothing waiting on notes
+            """)
+        #expect(notes.accessibilityLabel == "notes, off call")
+        #expect(notes.notices.isEmpty, "untrusted, but off call: serve wouldn't go there anyway")
+        #expect(dir.participant("old-repo")?.tooltip == "old-repo: not in the agent directory\n1 thread waiting on old-repo")
+        #expect(dir.participant("old-repo")?.accessibilityLabel == "old-repo, not on duty, 1 thread waiting on old-repo")
+    }
+
+    @Test func foldersServeCantUseAreFlagged() throws {
+        let dir = MailboxIndex(status: try AgentMailJSON.decodeStatus(Fixture.data("status-directory")))
+        let docs = try #require(dir.participant("docs"))
+        #expect(docs.notices.map(\.kind) == [.untrusted])
+        #expect(docs.notices.first?.text == "Claude Code hasn’t trusted /x/docs yet, so serve can’t start a session "
+            + "there: run `claude` in it once and accept the question.")
+        #expect(docs.accessibilityLabel == "docs, on call, 1 warning")
+        #expect(docs.tooltip == """
+            docs: on call — serve starts a session for each thread
+            Owns the documentation site.
+            \(docs.notices[0].text)
+            Nothing waiting on docs
+            """)
+        let gone = try #require(dir.participant("gone"))
+        #expect(gone.notices.map(\.kind) == [.folderGone])
+        #expect(gone.notices.first?.text == "Its folder /x/gone is gone, so serve can’t start a session there: "
+            + "`agent-mail agents move gone DIR` gives it the new one.")
+        #expect(dir.participant("website")?.notices.isEmpty == true)
+        #expect(dir.participant("old-repo")?.notices.isEmpty == true)
+        let offCallGone = AgentInfo(name: "x", entry: DirectoryEntry(name: "x", dir: "/x/x", onCall: false, dirExists: false))
+        #expect(offCallGone.notices.map(\.kind) == [.folderGone], "a folder that is gone is flagged on call or off")
+    }
+
+    @Test func thePostmasterIsServesRole() {
+        let st = MailStatus(now: .now, me: "user", threads: [
+            ThreadSummary(id: "n", subject: "postmaster: 2 threads wait on infra", from: "postmaster", owner: "user",
+                          participants: ["postmaster", "user"]),
+        ], agents: [])
+        let index = MailboxIndex(status: st)
+        #expect(index.agents.map(\.name) == ["postmaster"])
+        #expect(index.participant("postmaster")?.tooltip
+            == "postmaster: serve’s postmaster; mail to it goes to the agent agent-mail\nNothing waiting on postmaster")
     }
 
     @Test func agentsSeenOnlyOnDutyAreListed() {

@@ -7,6 +7,8 @@
 ;;   bb scripts/debug.bb select 2026-10-31-deploy-the-new-site
 ;;   bb scripts/debug.bb key r --mods cmd      (also: tab, return, space, esc)
 ;;   bb scripts/debug.bb snapshot /tmp/window.png [--window General]
+;;   bb scripts/debug.bb sidebarsnapshot /tmp/sidebar.png [--window 240]  (the
+;;     sidebar drawn offscreen, that wide: a window snapshot leaves it out)
 ;;   bb scripts/debug.bb js "document.title"      (in the thread's web view)
 ;;   bb scripts/debug.bb clickweb "#m1 a.button"  (a real click on an element)
 ;;   bb scripts/debug.bb recordopens              (log opens, launch nothing)
@@ -14,6 +16,9 @@
 ;;   bb scripts/debug.bb filter sent              (the participant filter)
 ;;   bb scripts/debug.bb compose                  (New Message: the draft)
 ;;   bb scripts/debug.bb forward ID[/FILE]        (Forward; discard drops a draft)
+;;   bb scripts/debug.bb sidebarmenu agent:infra  (a sidebar row's context menu)
+;;   bb scripts/debug.bb sidebarpick "agent:infra|On Call"  (picks one of its items)
+;;   bb scripts/debug.bb addfolder /path/to/folder (Add Folder… once the panel returns)
 (ns debug
   (:require [babashka.fs :as fs]
             [babashka.process :as p]
@@ -40,7 +45,7 @@
   (let [opt (fn [k] (second (drop-while #(not= k %) more)))
         mods (opt "--mods")
         window (opt "--window")
-        snapshot? (= cmd "snapshot")
+        snapshot? (contains? #{"snapshot" "sidebarsnapshot"} cmd)
         out (if snapshot?
               (str (fs/absolutize (or arg "window.png")))
               (str (fs/create-temp-file {:prefix "agent-mail-debug-" :suffix ".txt"})))

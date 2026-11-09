@@ -96,27 +96,90 @@ public enum ParticipantFilter: String, CaseIterable, Codable, Sendable {
     }
 }
 
-/// A row under Participants: the user (`status.me`) or a repo.
+/// Something wrong with an agent that the user should know of: shown as a
+/// warning on its sidebar row and at the top of its mailbox.
+public struct AgentNotice: Hashable, Sendable {
+    public enum Kind: Hashable, Sendable {
+        /// Its folder is gone: serve can't start a session there.
+        case folderGone
+        /// On call in a folder Claude Code hasn't trusted, where serve can't
+        /// start a session either.
+        case untrusted
+    }
+
+    public var kind: Kind
+    public var text: String
+
+    public init(_ kind: Kind, _ text: String) {
+        self.kind = kind
+        self.text = text
+    }
+}
+
+/// A row under Participants: the user (`status.me`), an agent in the
+/// directory, or a name that only appears in mail (from before the
+/// directory, an entry removed since, `postmaster`).
 public struct AgentInfo: Hashable, Sendable {
     public var name: String
     /// The user's own row, whose mailbox is every thread the user takes part in.
     public var isMe: Bool
     public var onDuty: Bool
-    /// On call: `agent-mail serve` opens a listener tab for it when mail
-    /// waits and nobody is on duty (MailStatus.onCallRepos).
-    public var onCall: Bool
+    /// Its directory entry; nil when the name isn't in the directory, or the
+    /// CLI predates the directory.
+    public var entry: DirectoryEntry?
+    /// Whether the status had a directory at all (a CLI that predates it
+    /// has none), so a name without an entry is known to be outside it.
+    public var directoryKnown: Bool
+    /// What serve is doing about it, while it is on call.
+    public var serve: OnCallRepo?
+    /// Serve delivers its mail now: it runs and doesn't back off from it
+    /// (MailStatus.onCallRepos).
+    public var delivering: Bool
+    /// Whether `agent-mail serve` runs, which on-call agents' mail needs.
+    public var serveRunning: Bool
     /// Open threads waiting on this participant: its sidebar badge.
     public var waiting: Int
     public var sessions: [DutyRecord]
 
-    public init(name: String, isMe: Bool = false, onDuty: Bool = false, onCall: Bool = false, waiting: Int = 0,
-                sessions: [DutyRecord] = []) {
+    public init(name: String, isMe: Bool = false, onDuty: Bool = false, entry: DirectoryEntry? = nil,
+                directoryKnown: Bool = false, serve: OnCallRepo? = nil, delivering: Bool = false,
+                serveRunning: Bool = false, waiting: Int = 0, sessions: [DutyRecord] = []) {
         self.name = name
         self.isMe = isMe
         self.onDuty = onDuty
-        self.onCall = onCall
+        self.entry = entry
+        self.directoryKnown = directoryKnown
+        self.serve = serve
+        self.delivering = delivering
+        self.serveRunning = serveRunning
         self.waiting = waiting
         self.sessions = sessions
+    }
+
+    /// On call: its directory entry says so, or, from a CLI that predates
+    /// the directory, `agent-mail oncall` lists it.
+    public var onCall: Bool { entry?.onCall ?? (serve != nil) }
+
+    public var inDirectory: Bool { entry != nil }
+
+    /// What it owns, from the directory (a borrowed summary says where from).
+    public var summary: String? { entry?.shownSummary }
+
+    /// What is wrong with it, for its row's warning and its mailbox: a
+    /// folder that is gone (`agent-mail agents` marks it), or one on call
+    /// that Claude Code hasn't trusted, where serve can't start sessions.
+    public var notices: [AgentNotice] {
+        guard let entry, !isMe else { return [] }
+        var out = [AgentNotice]()
+        let dir = entry.dir ?? "its folder"
+        if !entry.dirExists {
+            out.append(AgentNotice(.folderGone, "Its folder \(dir) is gone, so serve can’t start a session there: "
+                + "`agent-mail agents move \(name) DIR` gives it the new one."))
+        } else if entry.onCall, entry.trusted == false {
+            out.append(AgentNotice(.untrusted, "Claude Code hasn’t trusted \(dir) yet, so serve can’t start a session "
+                + "there: run `claude` in it once and accept the question."))
+        }
+        return out
     }
 
     /// The badge spelled out: "2 threads waiting on infra", "1 thread
@@ -130,24 +193,45 @@ public struct AgentInfo: Hashable, Sendable {
         }
     }
 
-    /// The sidebar row's tooltip: who it is (on duty, and in which sessions,
-    /// or on call, for a repo), then what the badge counts.
-    public var tooltip: String {
-        var who: String
-        if isMe {
-            who = "you (\(name)): every thread you take part in"
-        } else {
-            who = "\(name): " + (onDuty ? "on duty" : onCall ? "on call — a tab opens when mail comes" : "nobody on duty")
+    /// Who picks its mail up: on duty (in which sessions), on call (and
+    /// whether serve delivers), off call, or outside the directory.
+    public var stateText: String {
+        if onDuty {
             let live = sessions.filter(\.onDuty).map { "\($0.session) (\($0.state))" }
-            if !live.isEmpty { who += " — " + live.joined(separator: ", ") }
+            return "on duty" + (live.isEmpty ? "" : " — " + live.joined(separator: ", "))
         }
-        return who + "\n" + waitingText
+        if onCall {
+            if serve?.isBackingOff == true {
+                return "on call, but serve backs off from it" + (serve?.reason.map { ": \($0)" } ?? "")
+            }
+            return serveRunning ? "on call — serve starts a session for each thread"
+                : "on call, but serve isn’t running"
+        }
+        if inDirectory { return "off call — its mail waits until a session starts in its folder" }
+        if name == "postmaster" { return "serve’s postmaster; mail to it goes to the agent agent-mail" }
+        return directoryKnown ? "not in the agent directory" : "nobody on duty"
+    }
+
+    /// The sidebar row's tooltip: who it is and who picks its mail up, what
+    /// it owns, what is wrong with it, then what the badge counts.
+    public var tooltip: String {
+        var lines = [isMe ? "you (\(name)): every thread you take part in" : "\(name): \(stateText)"]
+        if let summary { lines.append(summary) }
+        lines += notices.map(\.text)
+        lines.append(waitingText)
+        return lines.joined(separator: "\n")
     }
 
     /// The sidebar row's VoiceOver label; it names the count only when the
     /// badge shows one.
     public var accessibilityLabel: String {
-        var parts = isMe ? ["\(name) (you)"] : [name, onDuty ? "on duty" : onCall ? "on call" : "not on duty"]
+        var parts = isMe ? ["\(name) (you)"]
+            : [name, onDuty ? "on duty" : onCall ? "on call" : inDirectory ? "off call" : "not on duty"]
+        switch notices.count {
+        case 0: break
+        case 1: parts.append("1 warning")
+        case let n: parts.append("\(n) warnings")
+        }
         if waiting > 0 { parts.append(waitingText) }
         return parts.joined(separator: ", ")
     }
@@ -159,9 +243,12 @@ public struct MailboxIndex: Sendable, Equatable {
     public let undelivered: [ThreadSummary]
     /// Every thread, newest first (ThreadOrder.newestFirst).
     public let allMail: [ThreadSummary]
-    /// The sidebar's Participants: the user (`me`) first, then every repo on
-    /// duty, on call or in a thread, by name.
+    /// The sidebar's Participants: the user (`me`) first, then, by name,
+    /// every agent in the directory and every other name on duty, on call
+    /// or in a thread.
     public let participants: [AgentInfo]
+    /// The agent directory, by name; nil from a CLI that predates it.
+    public let directory: [DirectoryEntry]?
     private let allMailOpenFirst: [ThreadSummary]
     private let byID: [String: ThreadSummary]
 
@@ -178,18 +265,26 @@ public struct MailboxIndex: Sendable, Equatable {
         undelivered = (status?.undelivered ?? []).compactMap { byID[$0] }
         allMail = newestFirst
         allMailOpenFirst = newestFirst.filter(\.isOpen) + newestFirst.filter { !$0.isOpen }
+        directory = status?.agents
 
         let duty = status?.duty ?? []
-        let onCall = status?.onCallRepos ?? []
-        let repos = Set(duty.map(\.repo)).union(threads.flatMap(\.participants))
-            .union((status?.oncall ?? []).map(\.repo)).subtracting([me])
+        let oncall = status?.oncall ?? []
+        let delivering = status?.onCallRepos ?? []
+        let entries = Dictionary((directory ?? []).map { ($0.name, $0) }, uniquingKeysWith: { a, _ in a })
+        let serveViews = Dictionary(oncall.map { ($0.repo, $0) }, uniquingKeysWith: { a, _ in a })
+        let repos = Set(entries.keys).union(duty.map(\.repo)).union(threads.flatMap(\.participants))
+            .union(oncall.map(\.repo)).subtracting([me])
             .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
         participants = ([me] + repos).map { name in
             let sessions = duty.filter { $0.repo == name }
             return AgentInfo(name: name,
                              isMe: name == me,
                              onDuty: sessions.contains(where: \.onDuty),
-                             onCall: onCall.contains(name),
+                             entry: name == me ? nil : entries[name],
+                             directoryKnown: status?.agents != nil,
+                             serve: name == me ? nil : serveViews[name],
+                             delivering: delivering.contains(name),
+                             serveRunning: status?.serve?.alive == true,
                              waiting: threads.filter { $0.isWaiting(on: name) }.count,
                              sessions: sessions)
         }

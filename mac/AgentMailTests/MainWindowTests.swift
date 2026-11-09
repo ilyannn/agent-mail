@@ -64,6 +64,62 @@ import Testing
         #expect(MainMenu.viewMenu().items.contains { $0.title == "Received" })
     }
 
+    /// The same threads with an agent directory: docs on call in a folder
+    /// Claude Code hasn't trusted, infra on call, notes off call; website
+    /// only appears in mail.
+    static let directoryStatus = MailStatus(
+        now: status.now, me: "user", threads: status.threads, oncall: [OnCallRepo(repo: "docs"), OnCallRepo(repo: "infra")],
+        serve: ServeInfo(alive: true, pid: 1), agents: [
+            DirectoryEntry(name: "docs", dir: "/x/docs", summary: "Owns the docs.", trusted: false),
+            DirectoryEntry(name: "infra", dir: "/x/infra", summary: "Owns the servers.", trusted: true),
+            DirectoryEntry(name: "notes", dir: "/x/notes", onCall: false, summary: "Keeps notes."),
+        ])
+
+    @Test func fileMenuAddsAFolder() throws {
+        let menu = MainMenu.fileMenu()
+        #expect(menu.items.map(\.title) == ["New Message", "", "Add Folder…", "", "Close Window"])
+        let add = try #require(menu.items.first { $0.title == "Add Folder…" })
+        #expect(add.action == #selector(MailActions.addFolder(_:)))
+    }
+
+    @Test func theSidebarListsTheDirectory() async throws {
+        try await withStore { store in
+            store.debugShow(Self.directoryStatus)
+            let sidebar = SidebarViewController(store: store)
+            let window = show(sidebar, size: NSSize(width: 260, height: 500))
+            defer { window.close() }
+            let rows = sidebar.debugRows().filter { $0.hasPrefix("sidebar") }.dropFirst(5)
+            #expect(rows.map { $0.components(separatedBy: " | ")[0] } == [
+                "sidebar  user (you), 1 thread waiting on you", "sidebar  docs, on call, 1 warning",
+                "sidebar  infra, on call, 1 thread waiting on infra",
+                "sidebar  notes, off call", "sidebar  website, not on duty",
+            ], "notes has no mail, but is in the directory")
+            let docs = try #require(rows.first { $0.hasPrefix("sidebar  docs") })
+            #expect(docs.hasSuffix(" | icon: On call | warn: Claude Code hasn’t trusted /x/docs yet, so serve can’t "
+                + "start a session there: run `claude` in it once and accept the question."))
+            #expect(docs.contains("| tip: docs: on call — serve starts a session for each thread / Owns the docs. / "))
+            #expect(rows.first { $0.hasPrefix("sidebar  notes") }?.hasSuffix(" | icon: Off call") == true)
+            #expect(rows.first { $0.hasPrefix("sidebar  website") }
+                == "sidebar  website, not on duty | tip: website: not in the agent directory / Nothing waiting on website"
+                + " | icon: Not on duty")
+
+            #expect(sidebar.debugMenu(for: .agent("docs")) == ["New Message to docs", "On Call✓", "---", "Copy Name",
+                                                               "---", "Add Folder…"])
+            #expect(sidebar.debugMenu(for: .agent("notes")).prefix(2) == ["New Message to notes", "On Call"])
+            #expect(sidebar.debugMenu(for: .agent("website")) == ["New Message to website", "---", "Copy Name", "---",
+                                                                  "Add Folder…"], "not in the directory: no On Call")
+            #expect(sidebar.debugMenu(for: .agent("user")) == ["New Message", "---", "Copy Name", "---", "Add Folder…"])
+            #expect(sidebar.debugMenu(for: .inbox) == ["Add Folder…"])
+            #expect(sidebar.debugMenu(for: nil) == ["Add Folder…"])
+
+            // Off call through the CLI, which isn't there: the error shows on the window.
+            #expect(sidebar.debugPickMenuItem("On Call", for: .agent("docs")))
+            await settle { window.attachedSheet != nil }
+            #expect(window.attachedSheet != nil)
+            if let sheet = window.attachedSheet { window.endSheet(sheet) }
+        }
+    }
+
     @Test func messageMenuHasForward() throws {
         let menu = MainMenu.messageMenu()
         #expect(menu.items.map(\.title) == ["Send", "", "Reply", "Forward", "Close Thread", "", "Copy Thread ID",

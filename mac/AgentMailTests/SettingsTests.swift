@@ -123,7 +123,8 @@ import Testing
                 "sidebar  Mailboxes", "sidebar* Inbox", "sidebar  Undelivered", "sidebar  All Mail",
                 "sidebar  Participants", "sidebar  user (you)",
             ])
-            #expect(rows.last == "sidebar  user (you) | tip: you (user): every thread you take part in / Nothing waiting on you")
+            #expect(rows.last == "sidebar  user (you) | tip: you (user): every thread you take part in / Nothing waiting on you"
+                + " | icon: You")
         }
     }
 
