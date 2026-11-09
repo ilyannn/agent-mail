@@ -148,6 +148,52 @@ import Testing
         }
     }
 
+    @Test func toOffersTheDirectoryAndSaysWhatIsWrong() async {
+        await withStore { store in
+            store.debugShow(Self.directoryStatus)
+            let thread = ThreadViewController(store: store)
+            let window = show(thread)
+            defer { window.close() }
+            thread.newMessage(to: nil)
+            #expect(state(thread, "mode") == "newThread to=\"\" items=[\"docs\", \"infra\", \"notes\"]",
+                    "the directory, not website from older mail")
+            #expect(thread.numberOfItems(in: NSComboBox()) == 3)
+            #expect(thread.comboBox(NSComboBox(), objectValueForItemAt: 1) as? String == "infra — Owns the servers.")
+            #expect(thread.comboBox(NSComboBox(), completedString: "IN") == "infra", "a name, never its summary")
+            #expect(thread.comboBox(NSComboBox(), indexOfItemWithStringValue: "notes") == 2)
+
+            thread.replyView.string = "Hello"
+            thread.debugCommitTo("infr")
+            await settle { state(thread, "status") != "" }
+            #expect(state(thread, "status") == "No agent named infr in the directory: did you mean infra?")
+            #expect(!thread.canSendReply, "the CLI would refuse it")
+            thread.debugCommitTo("infra — Owns the servers.")
+            #expect(store.newDraft?.to == "infra", "a picked title leaves the name")
+            await settle { state(thread, "status") == "Owns the servers." }
+            #expect(state(thread, "mode").hasPrefix("newThread to=\"infra\""))
+            #expect(state(thread, "status") == "Owns the servers.")
+            #expect(thread.canSendReply)
+            thread.debugCommitTo("notes")
+            await settle { state(thread, "status") != "Owns the servers." }
+            #expect(state(thread, "status") == "Keeps notes. (off call)")
+
+            // A reply to a name from older mail: the CLI refuses it. Forward
+            // mode offers the directory too.
+            store.discardDraft()
+            store.select(threadID: "c")
+            await settle { state(thread, "mode") == "reply to=website" }
+            thread.replyView.string = "Done?"
+            #expect(!thread.canSendReply)
+            store.select(threadID: "b")
+            thread.forward(threadID: "b")
+            #expect(state(thread, "mode") == "forward to=\"\" items=[\"docs\", \"infra\", \"notes\"]")
+            thread.debugCommitTo("website")
+            #expect(state(thread, "status").hasPrefix("No agent named website in the directory"))
+            thread.debugCommitTo("docs")
+            #expect(state(thread, "status") == "They see the whole thread, and it becomes their turn")
+        }
+    }
+
     @Test func messageMenuHasForward() throws {
         let menu = MainMenu.messageMenu()
         #expect(menu.items.map(\.title) == ["Send", "", "Reply", "Forward", "Close Thread", "", "Copy Thread ID",

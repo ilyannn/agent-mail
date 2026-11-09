@@ -141,3 +141,78 @@ import Testing
         #expect(!Formatting.isValidRecipient("a b", me: "user"))
     }
 }
+
+/// To's choices and what it says of a typed name, from the directory.
+@Suite struct RecipientTests {
+    let index: MailboxIndex
+
+    init() throws {
+        index = MailboxIndex(status: try AgentMailJSON.decodeStatus(Fixture.data("status-directory")))
+    }
+
+    @Test func theChoicesAreTheDirectoryWithSummaries() {
+        let choices = index.recipientChoices
+        #expect(choices.map(\.name) == ["docs", "gone", "infra", "notes", "website"],
+                "old-repo, outside the directory, isn't offered")
+        #expect(choices.map(\.onCall) == [true, true, true, false, true])
+        #expect(choices[2].listTitle == "infra — Owns the servers, DNS and deploys.")
+        #expect(choices[4].listTitle == "website — The public website: its pages, build and hosting.",
+                "where a borrowed summary comes from doesn't matter here")
+        let long = RecipientChoice(name: "x", summary: String(repeating: "a", count: 80))
+        #expect(long.listTitle == "x — " + String(repeating: "a", count: 59) + "…")
+        #expect(RecipientChoice(name: "x", summary: " ").listTitle == "x")
+        #expect(Recipients.name(fromListTitle: choices[2].listTitle) == "infra", "picking one puts the name in To")
+        #expect(Recipients.name(fromListTitle: "infra") == "infra")
+
+        let older = MailboxIndex(status: try? AgentMailJSON.decodeStatus(Fixture.data("status")))
+        #expect(older.recipientChoices == [RecipientChoice(name: "infra"), RecipientChoice(name: "website")],
+                "a CLI without the directory: the participants, as before")
+    }
+
+    @Test func toSaysWhatIsWrongBeforeSending() throws {
+        #expect(index.check(recipient: "") == .empty)
+        #expect(index.check(recipient: "in fra") == .invalid)
+        #expect(index.check(recipient: "user") == .me)
+        let infra = index.check(recipient: " infra ")
+        #expect(infra.allowsSending)
+        #expect(infra.message == "Owns the servers, DNS and deploys.")
+        #expect(index.check(recipient: "notes").message == "Keeps meeting notes. (off call)")
+        #expect(index.check(recipient: "postmaster") == .known(nil), "anyone may write to the postmaster")
+
+        let typo = index.check(recipient: "infr")
+        #expect(typo == .unknown("infr", closest: ["infra"]))
+        #expect(!typo.allowsSending)
+        #expect(typo.message == "No agent named infr in the directory: did you mean infra?")
+        #expect(index.check(recipient: "zzzzzz").message == "No agent named zzzzzz in the directory: File › Add Folder… adds one")
+        #expect(!index.check(recipient: "old-repo").allowsSending, "a name from older mail, refused by the CLI")
+        #expect(RecipientCheck.known(DirectoryEntry(name: "n", onCall: false)).message
+            == "Off call: nothing delivers its mail until a session starts in its folder")
+
+        let older = MailboxIndex(status: try AgentMailJSON.decodeStatus(Fixture.data("status")))
+        #expect(older.check(recipient: "anyone") == .known(nil), "a CLI without the directory takes any name")
+        #expect(older.check(recipient: "user") == .me)
+    }
+
+    @Test func sendWaitsForANameTheCLITakes() {
+        var d = NewThreadDraft(to: "infr", body: "Hello")
+        #expect(d.canSend(me: "user"), "a valid name")
+        #expect(!index.canSend(d), "but not in the directory")
+        d.to = "infra"
+        #expect(index.canSend(d))
+        d.body = ""
+        #expect(!index.canSend(d))
+    }
+
+    @Test func closestNamesAsTheCLIPicksThem() {
+        let names = ["infra", "infra-old", "website", "docs", "user", "hub", "b"]
+        #expect(Recipients.closest(to: "infr", in: names) == ["infra", "infra-old"])
+        #expect(Recipients.closest(to: "web", in: names) == ["website", "hub"], "never b, by deleting all of it")
+        #expect(Recipients.closest(to: "Docs2", in: names) == ["docs"], "case aside")
+        #expect(Recipients.closest(to: "zzzzzz", in: names) == [])
+        #expect(Recipients.closest(to: "i", in: ["id", "ic", "ib", "ia"]) == ["ia", "ib", "ic"],
+                "three at most, by name when equally near")
+        #expect(Recipients.editDistance("kitten", "sitting") == 3)
+        #expect(Recipients.orList(["a", "b", "c"]) == "a, b or c")
+        #expect(Recipients.orList(["a"]) == "a")
+    }
+}

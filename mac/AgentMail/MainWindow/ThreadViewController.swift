@@ -19,7 +19,7 @@ import Observation
 import WebKit
 
 final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSplitViewDelegate, NSTextViewDelegate,
-    NSComboBoxDelegate {
+    NSComboBoxDelegate, NSComboBoxDataSource {
     /// What the pane below the thread writes.
     enum PaneMode: String {
         /// A reply to the reply recipient, shown as text.
@@ -68,6 +68,8 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
                                              color: .tertiaryLabelColor)
     private var replyScroll: NSScrollView!
     private(set) var replyView: NSTextView!
+    /// To's list: the directory's agents, each with its summary.
+    private var recipientChoices: [RecipientChoice] = []
     private let placeholder = NSTextField.label(font: .systemFont(ofSize: NSFont.systemFontSize + 4), color: .tertiaryLabelColor)
     private var observation: Task<Void, Never>?
 
@@ -279,13 +281,14 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
         toField.controlSize = .small
         toField.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         toField.completes = true
-        toField.usesDataSource = false
+        toField.usesDataSource = true
+        toField.dataSource = self
         toField.delegate = self
         toField.target = self
         toField.action = #selector(toCommitted(_:))
         toField.setAccessibilityLabel("To")
         toField.isHidden = true
-        toField.widthAnchor.constraint(equalToConstant: 180).isActive = true
+        toField.widthAnchor.constraint(equalToConstant: 240).isActive = true
         let top = NSStackView(views: [toLabel, recipientLabel, toField, statusLabel, NSView()])
         top.orientation = .horizontal
         top.spacing = 8
@@ -409,12 +412,15 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
             statusLabel.stringValue = "Loading…"
         } else if forwarding {
             statusLabel.stringValue = forwardStatus
+        } else if let to = replyRecipient, case .unknown = store.index.check(recipient: to) {
+            // From older mail: the CLI refuses a reply to it.
+            statusLabel.stringValue = store.index.check(recipient: to).message + "; Forward hands the thread to one that is"
         } else {
             statusLabel.stringValue = ""
         }
 
         recipientLabel.stringValue = replyRecipient ?? "—"
-        if forwarding { setComboItems(forwardCandidates(summary: summary, detail: detail)) }
+        if forwarding { setChoices(forwardCandidates(summary: summary, detail: detail)) }
         let busy = id.map { store.busyThreadIDs.contains($0) } ?? false
         let open = detail?.isOpen ?? summary?.isOpen ?? false
         closeButton.isEnabled = open && !busy
@@ -426,13 +432,13 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
     }
 
     /// Forward mode's status line: what handing the thread on does, or what
-    /// is wrong with the name typed.
+    /// is wrong with the name typed (not a name, mine, not in the directory).
     private var forwardStatus: String {
-        let to = toField.stringValue.trimmingCharacters(in: .whitespaces)
-        if to.isEmpty || Formatting.isValidRecipient(to, me: me) {
-            return "They see the whole thread, and it becomes their turn"
+        let check = store.index.check(recipient: Recipients.name(fromListTitle: toField.stringValue))
+        switch check {
+        case .empty, .known: return "They see the whole thread, and it becomes their turn"
+        case .invalid, .me, .unknown: return check.message
         }
-        return to == me ? "That’s you" : "A name has no spaces or slashes"
     }
 
     /// The draft on screen: its header and preview, the pane with To,
@@ -443,7 +449,7 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
         split.isHidden = false
         placeholder.isHidden = true
         configurePane(for: .newThread, forwardDraft: draft.forward != nil)
-        setComboItems(store.index.agents.map(\.name))
+        setChoices(store.index.recipientChoices)
 
         if let source = draft.forward {
             let loaded = store.forwardSource?.id == source.threadID ? store.forwardSource : nil
@@ -477,12 +483,9 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
             statusLabel.stringValue = "Sending…"
         } else if let error = store.forwardSourceError, draft.forward != nil, store.forwardSource == nil {
             statusLabel.stringValue = error.errorDescription ?? "Couldn’t load the forwarded thread"
-        } else if !to.isEmpty, !Formatting.isValidName(to) {
-            statusLabel.stringValue = "A name has no spaces or slashes"
-        } else if to == me {
-            statusLabel.stringValue = "That’s you"
         } else {
-            statusLabel.stringValue = ""
+            // What is wrong with the name, or what the agent owns.
+            statusLabel.stringValue = store.index.check(recipient: to).message
         }
         let sending = store.isSendingDraft
         sendButton.isEnabled = canSendDraft
@@ -552,11 +555,38 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
         }
     }
 
-    private func setComboItems(_ names: [String]) {
-        if (toField.objectValues as? [String]) != names {
-            toField.removeAllItems()
-            toField.addItems(withObjectValues: names)
-        }
+    private func setChoices(_ choices: [RecipientChoice]) {
+        guard choices != recipientChoices else { return }
+        recipientChoices = choices
+        toField.reloadData()
+    }
+
+    // MARK: NSComboBoxDataSource
+
+    /// To's list shows each agent with its summary ("infra — Owns…");
+    /// picking one puts the name alone in To (normalizeTo()).
+    func numberOfItems(in comboBox: NSComboBox) -> Int { recipientChoices.count }
+
+    func comboBox(_ comboBox: NSComboBox, objectValueForItemAt index: Int) -> Any? {
+        recipientChoices.indices.contains(index) ? recipientChoices[index].listTitle : nil
+    }
+
+    /// Typing completes a name, never a summary.
+    func comboBox(_ comboBox: NSComboBox, completedString string: String) -> String? {
+        let typed = string.lowercased()
+        return recipientChoices.first { $0.name.lowercased().hasPrefix(typed) }?.name
+    }
+
+    func comboBox(_ comboBox: NSComboBox, indexOfItemWithStringValue string: String) -> Int {
+        let name = Recipients.name(fromListTitle: string)
+        return recipientChoices.firstIndex { $0.name == name } ?? NSNotFound
+    }
+
+    /// A picked list title becomes the name it starts with.
+    private func normalizeTo() {
+        let value = toField.stringValue
+        let name = Recipients.name(fromListTitle: value)
+        if name != value { toField.stringValue = name }
     }
 
     /// Whom a reply goes to: a card's choice, else whoever wrote last that
@@ -568,11 +598,14 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
         return detail?.replyRecipient(me: me) ?? store.index.thread(id)?.replyRecipient(me: me)
     }
 
-    /// Whom Forward mode offers: every repo, and anyone else in the thread.
-    private func forwardCandidates(summary: ThreadSummary?, detail: ThreadDetail?) -> [String] {
+    /// Whom Forward mode offers: the directory's agents; from a CLI that
+    /// predates the directory, every repo and anyone else in the thread.
+    private func forwardCandidates(summary: ThreadSummary?, detail: ThreadDetail?) -> [RecipientChoice] {
+        if store.index.directory != nil { return store.index.recipientChoices }
         let inThread = detail?.participants ?? summary?.participants ?? []
         return Set(store.index.agents.map(\.name) + inThread).subtracting([me])
             .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+            .map { RecipientChoice(name: $0) }
     }
 
     /// The editor's text moves with the selection: each thread keeps its own
@@ -628,7 +661,7 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
     #if DEBUG
     func debugState() -> [String] {
         let to = paneMode == .reply ? "to=\(recipientLabel.stringValue)"
-            : "to=\(toField.stringValue.debugDescription) items=\(toField.objectValues.compactMap { $0 as? String })"
+            : "to=\(toField.stringValue.debugDescription) items=\(recipientChoices.map(\.name))"
         func button(_ b: NSButton) -> String { b.isHidden ? "hidden" : "\(b.title)(\(b.isEnabled ? "on" : "off"))" }
         let header = draftHeader.isHidden ? "hidden"
             : "subject=\(subjectField.stringValue.debugDescription) "
@@ -688,6 +721,13 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
 
     /// A whole pinch of `step`, as if the fingers had lifted.
     func debugPinch(_ step: Double) { pinch(step, ended: true) }
+
+    /// Puts `value` in To and commits it, as picking it from the list or
+    /// pressing Return there does.
+    func debugCommitTo(_ value: String) {
+        toField.stringValue = value
+        toCommitted(nil)
+    }
     #endif
 
     // MARK: Rendering
@@ -910,7 +950,7 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
     private var threadRecipient: String? {
         switch paneMode {
         case .reply: replyRecipient
-        case .forward: toField.stringValue.trimmingCharacters(in: .whitespaces)
+        case .forward: Recipients.name(fromListTitle: toField.stringValue).trimmingCharacters(in: .whitespaces)
         case .newThread: nil
         }
     }
@@ -924,15 +964,16 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
 
     private var canSendDraft: Bool {
         guard let draft = draftAsShown, !store.isSendingDraft else { return false }
-        return draft.canSend(me: me)
+        return store.index.canSend(draft)
     }
 
-    /// Send (⌘↩, ⇧⌘D): a recipient and a body (a forward draft's note is
-    /// optional), and nothing on its way already.
+    /// Send (⌘↩, ⇧⌘D): a recipient the CLI takes (in the directory, when
+    /// there is one) and a body (a forward draft's note is optional), and
+    /// nothing on its way already.
     var canSendReply: Bool {
         if paneMode == .newThread { return canSendDraft }
         guard let id = store.selectedThreadID, !store.busyThreadIDs.contains(id),
-              let to = threadRecipient, Formatting.isValidRecipient(to, me: me) else { return false }
+              let to = threadRecipient, store.index.check(recipient: to).allowsSending else { return false }
         return !replyView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
@@ -955,8 +996,12 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
     }
 
     func comboBoxSelectionDidChange(_ notification: Notification) {
-        // The field takes the picked name after this returns.
-        Task { [weak self] in self?.toChanged() }
+        // The field takes the picked title after this returns; it keeps
+        // only the name.
+        Task { [weak self] in
+            self?.normalizeTo()
+            self?.toChanged()
+        }
     }
 
     /// To was edited: the draft's recipient, or Forward mode's.
@@ -990,6 +1035,8 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
     /// A name picked from To's list with the mouse (the click is in the
     /// list's own window) moves on to the body.
     @objc private func toCommitted(_ sender: Any?) {
+        normalizeTo()
+        toChanged()
         let event = NSApp.currentEvent
         guard paneMode != .reply, hasRecipientName, event?.type == .leftMouseUp, event?.window !== view.window
         else { return }
@@ -997,7 +1044,7 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
     }
 
     private var hasRecipientName: Bool {
-        Formatting.isValidName(toField.stringValue.trimmingCharacters(in: .whitespaces))
+        Formatting.isValidName(Recipients.name(fromListTitle: toField.stringValue).trimmingCharacters(in: .whitespaces))
     }
 
     /// After the field has finished with the Return (it selects its text
