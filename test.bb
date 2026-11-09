@@ -311,6 +311,7 @@
         (is (= ["t1" "t2" "t3"] (map :id (:threads st))) "every thread, closed too, newest-updated first")
         (is (not-any? :msgs (:threads st)) "summaries, no messages")
         (is (= [3 2 0] (map :unread [t1 t2 t3])) "the caller's own count: a bystander on t1 and t2, read up on t3")
+        (is (= [0 0 0] (map :unread-to-me [t1 t2 t3])) "none of it addressed to the caller; t3's one is read")
         (is (= {"a" 2 "b" 0 "c" 2} (:unread-by t1)))
         (is (= ["on-duty" nil "user"] (map :listener [t1 t2 t3])))
         (is (= [58 nil 60] (map :waiting-s [t1 t2 t3])))
@@ -319,6 +320,19 @@
         (is (= ["t3" "t1"] (:undelivered (core/status {:now now :me "x" :seen {} :duty []
                                                      :threads [open-th (core/thread-state meta "t3" [(msg 0 "a" "d")]) closed-th]})))
             "nobody on duty: every open thread not waiting on the user, longest waiting first")))
+    (testing "unread-to-me: the caller's unread messages addressed to the caller, not the agents' talk before them"
+      (let [;; a and b talk it over, then a hands it to the user, who answers; a writes twice more
+            relayed (core/thread-state meta "t4" [(msg 0 "a" "b") (msg 1 "b" "a") (msg 2 "a" "b") (msg 3 "a" "user")
+                                                  (msg 4 "user" "a") (msg 5 "a" "b") (msg 6 "a" "user")])
+            mine (fn [mark] (first (:threads (core/status {:now now :me "user" :threads [relayed] :duty []
+                                                           :seen (if mark {"user" {"t4" mark}} {})}))))]
+        (is (= [6 2] ((juxt :unread :unread-to-me) (mine nil))) "never read: six unread, two of them to the user")
+        (is (= [2 1] ((juxt :unread :unread-to-me) (mine "004.md"))) "after the marker only, like unread")
+        (is (= [0 0] ((juxt :unread :unread-to-me) (mine "006.md"))))
+        (is (= [4 1] ((juxt :unread :unread-to-me)
+                      (first (:threads (core/status {:now now :me "b" :threads [relayed] :duty []
+                                                     :seen {"b" {"t4" "002.md"}}})))))
+            "the same for an agent: of b's four unread, one went to b")))
     (testing "duration: one rounded-down unit"
       (is (= ["0s" "59s" "1m" "59m" "1h" "23h" "1d" "40d"] (map core/duration [0 59 60 3599 3600 86399 86400 (* 40 86400)]))))
     (testing "listener on-call: serve hands it to a session; on duty wins"
@@ -1481,14 +1495,15 @@
         (is (= (sort #(compare %2 %1) (map :updated (:threads st))) (map :updated (:threads st)))))
       (testing "each thread is what list --json gives, plus the derived fields"
         (is (every? #(= #{:id :number :subject :from :last-from :created :owner :status :count :updated :unread :flow
-                          :unread-by :participants :waiting-s :listener} (set (keys %))) (:threads st)))
+                          :unread-to-me :unread-by :participants :waiting-s :listener} (set (keys %))) (:threads st)))
         (is (every? #(= (get listed (:id %)) (select-keys % (keys (get listed (:id %))))) (:threads st))
             "same values as list --all --json for the same caller"))
       (testing "unread counts for the caller and for every participant"
         (is (= {:infra 1 :website 0} (:unread-by (th vault))) "website closed after infra's reply")
         (is (= 3 (:unread (th vault))) "the user is a bystander there")
+        (is (= 0 (:unread-to-me (th vault))) "none of it to the user")
         (is (= {:infra 0 :user 1} (:unread-by (th cert))))
-        (is (= 1 (:unread (th cert))))
+        (is (= [1 1] ((juxt :unread :unread-to-me) (th cert))))
         (is (= {:infra 0 :website 0} (:unread-by (th dns))) "infra read it")
         (is (= {:billing 1 :website 0} (:unread-by (th invoice))) "replying marks what came before as seen")
         (is (= {:user 0 :website 1} (:unread-by (th typo))))
@@ -1526,7 +1541,8 @@
           (is (str/includes? h "undelivered: #2 website, #1 billing"))))
       (testing "a participant's view counts its own unread"
         (let [mine (into {} (map (juxt :id identity)) (:threads (status-json {:who "infra"})))]
-          (is (= [0 1 0 3] (map #(:unread (mine %)) [dns vault cert invoice])) "read, not yet read, written by infra, a bystander")))
+          (is (= [0 1 0 3] (map #(:unread (mine %)) [dns vault cert invoice])) "read, not yet read, written by infra, a bystander")
+          (is (= [0 1 0 0] (map #(:unread-to-me (mine %)) [dns vault cert invoice])) "website's close came to infra")))
       (testing "status is a read: no seen marker moves, nothing is committed or left uncommitted"
         (is (= seen-before (seen-files)))
         (is (= head-before (store-git "rev-parse" "HEAD")))

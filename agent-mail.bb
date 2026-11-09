@@ -1090,7 +1090,8 @@
             (println (serve-line))))))))
 (defn cmd-status
   "Everything at once, for UIs (a menu bar app calls it on every refresh): all
-   threads with per-reader unread counts, waiting time, listener and the
+   threads with per-reader unread counts (and the caller's unread addressed
+   to it, :unread-to-me), waiting time, listener and the
    session serve delivered each to, the duty records, the open threads nobody
    is listening for, the repos on call and whether serve runs. A pure read: no
    seen marker moves, nothing is written or committed (not even the thread
@@ -1436,7 +1437,10 @@
                                               lists them, `claude attach ID` opens one. One serve
                                               at a time; --standby (launchd's) waits for a
                                               running one to end
-  agent-mail status [--json]                  everything at once, for UIs
+  agent-mail status [--json]                  everything at once, for UIs. --json gives each
+                                              thread's unread (new to me) and unread-to-me
+                                              (those of them addressed to me: what an inbox
+                                              counts), unread-by, flow, waiting-s, listener
   agent-mail hook                             SessionStart hook output
   agent-mail whoami                           who the caller is
 

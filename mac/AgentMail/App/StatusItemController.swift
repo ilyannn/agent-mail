@@ -1,6 +1,7 @@
 // The menu bar extra: the app's envelope glyph (a template image from
-// Icon/menubar.svg) with the unread count, opening a menu (not a popover)
-// that is rebuilt each time it opens.
+// Icon/menubar.svg) with the Inbox's unread count (messages addressed to the
+// user, MailboxIndex.unreadInInbox), opening a menu (not a popover) that is
+// rebuilt each time it opens.
 import AgentMailKit
 import AppKit
 import Observation

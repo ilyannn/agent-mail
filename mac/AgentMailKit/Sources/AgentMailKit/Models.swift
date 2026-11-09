@@ -108,6 +108,10 @@ public struct ThreadSummary: Sendable, Equatable, Hashable, Identifiable, Decoda
     public var updated: Date?
     /// Messages the caller (`me`) has not seen and did not write.
     public var unread: Int
+    /// The unread messages addressed to the caller, leaving out what agents
+    /// sent each other in the thread: what the Inbox counts. `unread` from a
+    /// CLI that predates the field.
+    public var unreadToMe: Int
     /// Unread count for each participant.
     public var unreadBy: [String: Int]
     public var participants: [String]
@@ -127,6 +131,7 @@ public struct ThreadSummary: Sendable, Equatable, Hashable, Identifiable, Decoda
     enum CodingKeys: String, CodingKey {
         case id, number, subject, from, created, owner, status, count, updated, unread, participants, flow, listener
         case lastFrom = "last-from"
+        case unreadToMe = "unread-to-me"
         case unreadBy = "unread-by"
         case waitingSeconds = "waiting-s"
         case forwardedFrom = "forwarded-from"
@@ -134,8 +139,9 @@ public struct ThreadSummary: Sendable, Equatable, Hashable, Identifiable, Decoda
 
     public init(id: String, number: Int? = nil, subject: String, from: String? = nil, lastFrom: String? = nil,
                 created: Date? = nil, owner: String? = nil, status: String = "open", count: Int = 1,
-                updated: Date? = nil, unread: Int = 0, unreadBy: [String: Int] = [:], participants: [String] = [],
-                flow: [String] = [], waitingSeconds: Int? = nil, listener: String? = nil, forwardedFrom: String? = nil) {
+                updated: Date? = nil, unread: Int = 0, unreadToMe: Int? = nil, unreadBy: [String: Int] = [:],
+                participants: [String] = [], flow: [String] = [], waitingSeconds: Int? = nil, listener: String? = nil,
+                forwardedFrom: String? = nil) {
         self.id = id
         self.number = number
         self.subject = subject
@@ -147,6 +153,7 @@ public struct ThreadSummary: Sendable, Equatable, Hashable, Identifiable, Decoda
         self.count = count
         self.updated = updated
         self.unread = unread
+        self.unreadToMe = unreadToMe ?? unread
         self.unreadBy = unreadBy
         self.participants = participants
         self.flow = flow
@@ -168,6 +175,7 @@ public struct ThreadSummary: Sendable, Equatable, Hashable, Identifiable, Decoda
         count = try c.decodeIfPresent(Int.self, forKey: .count) ?? 0
         updated = try c.decodeIfPresent(Date.self, forKey: .updated)
         unread = try c.decodeIfPresent(Int.self, forKey: .unread) ?? 0
+        unreadToMe = try c.decodeIfPresent(Int.self, forKey: .unreadToMe) ?? unread
         unreadBy = try c.decodeIfPresent([String: Int].self, forKey: .unreadBy) ?? [:]
         participants = try c.decodeIfPresent([String].self, forKey: .participants) ?? []
         flow = try c.decodeIfPresent([String].self, forKey: .flow) ?? []

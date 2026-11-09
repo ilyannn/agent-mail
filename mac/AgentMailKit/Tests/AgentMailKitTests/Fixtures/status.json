@@ -4,6 +4,7 @@
   "me" : "user",
   "threads" : [ {
     "unread" : 0,
+    "unread-to-me" : 0,
     "number" : 4,
     "participants" : [ "infra", "user" ],
     "updated" : "2026-10-31T23:05:04.296Z",
@@ -24,6 +25,7 @@
     "owner" : "infra"
   }, {
     "unread" : 2,
+    "unread-to-me" : 0,
     "number" : 3,
     "participants" : [ "infra", "website" ],
     "updated" : "2026-10-31T23:05:04.085Z",
@@ -44,6 +46,7 @@
     "owner" : "infra"
   }, {
     "unread" : 1,
+    "unread-to-me" : 1,
     "number" : 2,
     "participants" : [ "user", "website" ],
     "updated" : "2026-10-31T23:05:03.634Z",
@@ -64,6 +67,7 @@
     "owner" : "user"
   }, {
     "unread" : 2,
+    "unread-to-me" : 1,
     "number" : 1,
     "participants" : [ "infra", "user", "website" ],
     "updated" : "2026-10-31T23:05:03.415Z",

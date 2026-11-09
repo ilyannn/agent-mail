@@ -11,8 +11,37 @@ import Testing
 
     @Test func inboxHoldsOpenThreadsWaitingOnTheUser() {
         #expect(index.inbox.map(\.number) == [2, 1])
-        #expect(index.badge(for: .inbox) == 3)
-        #expect(index.unreadInInbox == 3)
+        #expect(index.badge(for: .inbox) == 2)
+        #expect(index.unreadInInbox == 2)
+    }
+
+    @Test func inboxCountsOnlyUnreadMessagesToTheUser() throws {
+        // #1: website asked infra, infra handed it to the user. Both are
+        // unread, but only infra's message came to the user.
+        let deploy = try #require(index.thread("2026-10-31-deploy-the-new-site"))
+        #expect(deploy.unread == 2)
+        #expect(deploy.unreadToMe == 1)
+        #expect(index.inbox.map(\.unread) == [1, 2], "the thread's own unread count stays")
+        #expect(index.unreadInInbox == 2, "not 3: website's message to infra isn't the user's mail")
+
+        // Agents talk it over, then one message reaches the user: the badge
+        // says 1, not 4.
+        let relayed = ThreadSummary(id: "r", number: 9, subject: "Relayed", owner: "user", count: 4, unread: 4,
+                                    unreadToMe: 1, participants: ["infra", "user", "website"])
+        let busy = MailboxIndex(status: MailStatus(now: .now, me: "user", threads: [relayed]))
+        #expect(busy.badge(for: .inbox) == 1)
+        #expect(busy.unreadInInbox == 1)
+        #expect(busy.badge(for: .agent("user")) == 1, "the user's row still counts threads")
+    }
+
+    @Test func inboxCountsAllUnreadFromACLIWithoutTheField() throws {
+        var json = try #require(String(data: Fixture.data("status"), encoding: .utf8))
+        json = json.replacingOccurrences(of: #"(?m)^\s*"unread-to-me" : \d+,\n"#, with: "", options: .regularExpression)
+        #expect(!json.contains("unread-to-me"))
+        let older = MailboxIndex(status: try AgentMailJSON.decodeStatus(Data(json.utf8)))
+        #expect(older.allMail.allSatisfy { $0.unreadToMe == $0.unread })
+        #expect(older.unreadInInbox == 3, "every unread message, as before")
+        #expect(ThreadSummary(id: "x", subject: "s", unread: 2).unreadToMe == 2, "made without it: the unread count")
     }
 
     @Test func undeliveredFollowsTheCLIsOrder() {
@@ -189,7 +218,7 @@ import Testing
         #expect(index.participants.map(\.waiting) == [2, 1, 0])
         #expect(index.badge(for: .agent("user")) == index.inbox.count)
         #expect(index.badge(for: .agent("user")) == 2, "threads, while the Inbox badge counts messages")
-        #expect(index.badge(for: .inbox) == 3)
+        #expect(index.badge(for: .inbox) == 2, "#1's and #2's one message each to the user")
         #expect(index.badge(for: .agent("infra")) == 1, "#4; infra's unread closing note on #3 doesn't count")
         #expect(index.badge(for: .agent("website")) == 0, "nothing open waits on website: no badge")
         #expect(index.badge(for: .agent("nobody")) == 0)

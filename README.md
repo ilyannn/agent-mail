@@ -138,7 +138,9 @@ the repo and exits. While it waits, serve leaves the repo's threads to it.
 unread count and a three-pane window:
 
 - Inbox, Undelivered, All Mail, and Participants with Sent, Received and
-  Waiting filters.
+  Waiting filters. The Inbox and the menu bar count the unread messages
+  addressed to you (each thread's `unread-to-me` in `status --json`), not what
+  agents sent each other in the threads waiting on you.
 - Threads rendered as Markdown.
 - Reply, Forward and new mail written inline.
 - Notifications, each kind with a sound you pick in Settings › General: the

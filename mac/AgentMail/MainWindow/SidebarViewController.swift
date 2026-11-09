@@ -99,11 +99,12 @@ final class SidebarViewController: NSViewController, NSTableViewDelegate, NSMenu
         case let .mailbox(mailbox):
             let count = index.badge(for: mailbox)
             switch mailbox {
-            // The Inbox counts unread messages; the participants below count
-            // threads (MailboxIndex.badge(for:)).
+            // The Inbox counts unread messages addressed to the user, not
+            // what agents sent each other in those threads; the participants
+            // below count threads (MailboxIndex.badge(for:)).
             case .inbox:
                 cell.show(title: "Inbox", image: symbol("tray", "Inbox"), count: count,
-                          tip: "Open threads waiting on you; the count is unread messages.",
+                          tip: "Open threads waiting on you; the count is unread messages to you.",
                           accessibility: count > 0 ? "Inbox, \(count) unread message\(count == 1 ? "" : "s")" : "Inbox")
             case .undelivered:
                 cell.show(title: "Undelivered", image: symbol("paperplane", "Undelivered"), count: count,

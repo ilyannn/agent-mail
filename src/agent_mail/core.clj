@@ -302,10 +302,13 @@
 (defn status
   "Everything at once, for a UI that must not re-derive anything: every thread
    (closed ones too), newest-updated first, as a summary (flow included) with
-   the caller's unread count, unread counts per participant, how long it has
-   waited and who will pick it up; the duty records as given; and the
-   undelivered thread ids; the on-call repos and whether serve runs; and,
-   for a thread serve delivered, the session holding it (thread-session).
+   the caller's unread count, how many of those are addressed to the caller
+   (:unread-to-me, what an inbox counts: not what agents sent each other in
+   a thread that now waits on the caller), unread counts per participant,
+   how long it has waited and who will pick it up; the duty records as
+   given; and the undelivered thread ids; the on-call repos and whether
+   serve runs; and, for a thread serve delivered, the session holding it
+   (thread-session).
    `seen` maps each reader (the caller and every participant) to their seen
    markers; `duty` is the duty records with :on-duty already decided;
    `oncall` is oncall-view's list, `serve` is {:alive :pid} and `memory`
@@ -316,13 +319,15 @@
         on-call-repos (if (:alive serve) (set (map :repo (remove #(= "backing-off" (:state %)) oncall))) #{})
         ths (->> threads
                  (map (fn [th]
-                        (cond-> (assoc (summary th)
-                                       :unread (count (unread (:msgs th) me (get-in seen [me (:id th)])))
-                                       :unread-by (unread-by th seen)
-                                       :participants (participants th)
-                                       :waiting-s (waiting-s th now)
-                                       :listener (listener th on-duty-repos on-call-repos))
-                          (thread-session memory (:id th)) (assoc :session (thread-session memory (:id th))))))
+                        (let [mine (unread (:msgs th) me (get-in seen [me (:id th)]))]
+                          (cond-> (assoc (summary th)
+                                         :unread (count mine)
+                                         :unread-to-me (count (filter #(= me (:to %)) mine))
+                                         :unread-by (unread-by th seen)
+                                         :participants (participants th)
+                                         :waiting-s (waiting-s th now)
+                                         :listener (listener th on-duty-repos on-call-repos))
+                            (thread-session memory (:id th)) (assoc :session (thread-session memory (:id th)))))))
                  (sort-by :updated #(compare %2 %1))
                  vec)]
     {:schema status-schema :now now :me me :threads ths :duty (vec duty) :undelivered (undelivered ths)

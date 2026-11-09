@@ -250,10 +250,11 @@ public struct MailboxIndex: Sendable, Equatable {
     }
 
     /// The count shown next to a mailbox, 0 for none. The units differ on
-    /// purpose: the Inbox counts unread messages (the menu bar's number),
-    /// Undelivered counts threads, and a participant counts the open threads
-    /// waiting on it. So the user's row shows as many threads as the Inbox
-    /// holds, while the Inbox badge counts the messages in them.
+    /// purpose: the Inbox counts unread messages addressed to the user (the
+    /// menu bar's number), Undelivered counts threads, and a participant
+    /// counts the open threads waiting on it. So the user's row shows as many
+    /// threads as the Inbox holds, while the Inbox badge counts the messages
+    /// in them that came to the user.
     public func badge(for mailbox: Mailbox) -> Int {
         switch mailbox {
         case .inbox: unreadInInbox
@@ -263,8 +264,11 @@ public struct MailboxIndex: Sendable, Equatable {
         }
     }
 
-    /// Unread messages in threads waiting on the user: the menu bar count.
-    public var unreadInInbox: Int { inbox.reduce(0) { $0 + $1.unread } }
+    /// Unread messages addressed to the user in threads waiting on the user:
+    /// the Inbox badge and the menu bar count. What agents sent each other in
+    /// those threads doesn't count, though it is unread too (the thread's
+    /// unread dot).
+    public var unreadInInbox: Int { inbox.reduce(0) { $0 + $1.unreadToMe } }
 
     public var onDuty: [AgentInfo] { agents.filter(\.onDuty) }
 

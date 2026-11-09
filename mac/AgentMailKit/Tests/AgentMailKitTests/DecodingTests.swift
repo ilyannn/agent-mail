@@ -21,6 +21,7 @@ import Testing
         #expect(deploy.status == "open")
         #expect(deploy.count == 2)
         #expect(deploy.unread == 2)
+        #expect(deploy.unreadToMe == 1, "website's message went to infra")
         #expect(deploy.unreadBy == ["infra": 0, "user": 2, "website": 1])
         #expect(deploy.participants == ["infra", "user", "website"])
         #expect(deploy.flow == ["website", "infra", "user"])
@@ -151,6 +152,7 @@ import Testing
         #expect(t.updated == nil)
         #expect(!t.isWaiting(on: "user"))
         #expect(t.flow.isEmpty, "a status without flow (an older CLI) decodes to none")
+        #expect(t.unreadToMe == 0, "nor unread-to-me: the unread count")
     }
 
     @Test func datesWithAndWithoutMilliseconds() {
