@@ -94,8 +94,9 @@
        ~@body)))
 
 (def regulars
-  "The names the end-to-end tests mail, which with-store puts in the agent
-   directory, off call, each with a folder of its own next to the store."
+  "The names the end-to-end tests mail. Mail goes only to `user` and to
+   agents in the directory, so with-store puts these in, off call, each
+   with a folder of its own next to the store."
   ["a" "b" "c" "d" "e" "x" "y" "hub" "infra" "website" "docs" "survey" "billing"])
 
 (defn agent-entry!
@@ -1497,7 +1498,9 @@
         (try
           (testing "outside Claude Code a wait is classic and registers nothing"
             (is (= 3 (:exit (am {:dir web :env (dissoc env "CLAUDE_CODE_MESSAGING_SOCKET")} "wait" "--timeout" "0"))))
-            (is (= [] (listed))))
+            (is (= [] (listed)))
+            (is (str/starts-with? (err {:who "a"} "@web" "Mail for web") "agent-mail: no agent named web in the directory")
+                "so web can't be mailed yet"))
           (testing "in a Claude Code session: on call, at the main worktree, a notice, exit 0"
             (let [r (am {:dir src :env env} "wait" "--timeout" "21600")]
               (is (zero? (:exit r)))
@@ -2276,6 +2279,7 @@
             (is (= "📇 agents: remove web-app" (store-git "log" "-1" "--format=%s")))
             (is (= "web-app" (:to (first (:msgs (thread-json id))))))
             (is (= id (text {:env user-shell} "reply" id "One more thing.")) "a reply to past mail still goes to it")
+            (is (str/starts-with? (refused {:env user-shell} "@web-app" "After") "agent-mail: no agent named web-app in the directory"))
             (is (str/starts-with? (refused {} "agents" "remove" "web-app") "agent-mail: no agent named web-app"))))
         (testing "on call is the directory's field"
           (is (= ["infra" "site"] (map :repo (json/parse-string (text {} "oncall" "--json") true)))))))))
@@ -2363,7 +2367,20 @@
                 (is (zero? (:exit r)))
                 (is (str/includes? (:err r) (str "agent-mail: the agent directory has fresh for " (real fresh) ", not " (real twin)
                                                  "; `agent-mail agents add --name NAME` gives this folder a name of its own")))
-                (is (= (real fresh) (:dir (agent "fresh"))))))))))))
+                (is (= (real fresh) (:dir (agent "fresh"))))))
+            (testing "mail to a name the directory doesn't have is refused, with the closest names"
+              (let [before (commits)
+                    r (am {:dir fresh} "@tool" "x")]
+                (is (= 1 (:exit r)))
+                (is (= (str "agent-mail: no agent named tool in the directory; did you mean tools? "
+                            "`agent-mail agents` lists them, and `agent-mail agents add DIR` adds a folder")
+                       (str/trim (:err r))))
+                (is (str/starts-with? (err {:env user-shell} "reply" id "--to" "frsh" "x")
+                                      "agent-mail: no agent named frsh in the directory; did you mean fresh?"))
+                (is (str/starts-with? (err {:env user-shell} "forward" id "--to" "pk")
+                                      "agent-mail: no agent named pk in the directory; did you mean pkg?"))
+                (is (= 1 (:exit (am {:env user-shell} "send" "--to" "nobody" "--subject" "S" "x"))))
+                (is (= before (commits)) "nothing was written")))))))))
 
 (deftest migration-of-on-call-registrations
   (with-bare-store

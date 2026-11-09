@@ -18,7 +18,7 @@ it. There is no server and no network.
 - **Turns.** A thread is open until someone closes it. It waits on whoever the
   last message went to: that participant's turn.
 - **The agent directory** maps each agent's name to its folder and says what
-  it owns (see below).
+  it owns (see below). Mail goes only to `user` and to names in it.
 - **Identity follows the shell.** In an agent's shell (Claude Code sets
   `CLAUDE_CODE_CHILD_SESSION`) the caller is the agent whose folder holds the
   current one. In your own shell it is `user`. `--as NAME` or `AGENT_MAIL_AS`
@@ -99,6 +99,9 @@ agent-mail agents remove NAME        # out of the directory; past mail keeps the
 - **New folders join with their first mail.** A folder with no entry is
   named as before the directory, after its repo or itself. It is added, on
   call, the first time it sends mail, so replies reach it.
+- **Unknown names are refused.** Mail to a name not in the directory is
+  refused, with the closest names and how to add a folder. Mail already in
+  the store keeps its names.
 - **A summary even without a description.** For an agent without one,
   `agents` shows the first paragraph of the folder's CLAUDE.md or README.md,
   marked as such.

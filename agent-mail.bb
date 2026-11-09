@@ -702,6 +702,13 @@
                   "; `agent-mail agents add --name NAME` gives this folder a name of its own"))))
       added)))
 
+(defn known!
+  "Refuses `to` as a recipient unless it is `user` or in the directory."
+  [to]
+  (let [d (directory)]
+    (when-not (or (= "user" to) (contains? d to))
+      (fail (core/unknown-agent to (cons "user" (keys d)))))))
+
 (defn recipient [opts]
   (let [to (or (:to opts) (fail "send needs --to NAME (or `agent-mail @NAME text`)"))]
     (when-not (core/valid-name? to) (fail "bad recipient name:" (pr-str to)))
@@ -1015,14 +1022,15 @@
 ;; ---------------------------------------------------------------- commands
 
 (defn cmd-send
-  "A new thread to --to. A sender the directory doesn't know yet is added
-   to it (auto-add!)."
+  "A new thread to --to, which must be `user` or in the directory. A sender
+   the directory doesn't know yet is added to it (auto-add!)."
   [opts args]
   (ensure-store!)
   (let [w (whoami opts)
         from (:name w)
         to (recipient opts)
         _ (when (= from to) (fail "refusing to mail yourself (" from ")"))
+        _ (known! to)
         body (body-from args)
         _ (when (str/blank? body) (fail "empty body"))
         _ (check-attachments! (:attach opts))
@@ -1046,12 +1054,14 @@
 (declare cmd-compose)
 
 (defn reply-to
-  "The recipient of a reply from `me` to `th`: --to, else whoever wrote last
-   that isn't me. Never me."
+  "The recipient of a reply from `me` to `th`: --to, which must be `user`
+   or in the directory, else whoever wrote last that isn't me (mail from
+   before the directory may name anyone). Never me."
   [opts th me]
   (let [to (or (:to opts) (core/other-party th me) (fail "nobody to reply to; use --to NAME"))]
     (when-not (core/valid-name? to) (fail "bad recipient name:" (pr-str to)))
     (when (= to me) (fail "refusing to mail yourself (" me ")"))
+    (when (:to opts) (known! to))
     to))
 
 (defn cmd-reply [opts args {:keys [close?]}]
@@ -1097,6 +1107,7 @@
         to (or (:to opts) (fail "forward needs --to NAME"))
         _ (when-not (core/valid-name? to) (fail "bad recipient name:" (pr-str to)))
         _ (when (= from to) (fail "refusing to mail yourself (" from ")"))
+        _ (known! to)
         src (if (first args) (resolve-id (first args)) (fail "forward needs a thread: agent-mail forward ID --to NAME"))
         th (fold src)
         msgs (if (:msg opts) [(core/pick-message th (:msg opts))] (vec (:msgs th)))
@@ -1166,6 +1177,7 @@
   [opts args]
   (ensure-store!)
   (let [me (caller opts)
+        _ (when-let [to (:to opts)] (known! to))
         id (if (first args) (resolve-id (first args)) (pick-thread me))
         th (fold id)
         dir (fs/path store "drafts")
@@ -1887,7 +1899,8 @@ found by its file id (and the directory follows it), and outside git the
 folder the session started in is tried too. Else the repo's name (main
 worktree), or outside any repo the folder's; that folder joins the
 directory, on call, with its first mail. --as NAME or AGENT_MAIL_AS
-overrides. Bodies are Markdown; attachments are
+overrides. Mail goes only to `user` and to names in the directory.
+Bodies are Markdown; attachments are
 copied into the thread and `read` prints their absolute paths. --date backfills
 a timestamp when importing old threads; otherwise the tool stamps time.
 A message written in a Claude Code session records it (CLAUDE_CODE_SESSION_ID),

@@ -7,7 +7,9 @@ description: Send, read and answer mail between repos' agents and the user with 
 
 Repos ask each other for things by mail. An address is an agent's name in the
 agent directory, which maps each name to its folder and says what the agent
-owns; `user` is the person. `agent-mail agents` lists them.
+owns; `user` is the person. `agent-mail agents` lists them. Mail goes only to
+`user` and to names in the directory: a name that isn't there is refused, with
+the closest names.
 
 Identity follows the shell. In an agent's shell (Claude Code sets
 `CLAUDE_CODE_CHILD_SESSION` in the commands it runs) the caller is the agent
