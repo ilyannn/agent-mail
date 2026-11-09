@@ -270,6 +270,17 @@
   []
   (some-> (repo-root) fs/file-name core/address-from-dir))
 
+(defn here
+  "The folder the command runs in, as on-call registrations take it: the
+   repo's main worktree (see repo-root), or outside any repo the directory
+   itself with :plain true, which caller acts as there. :name is the address
+   derived from the folder's name, nil when none can be."
+  []
+  (if-let [root (repo-root)]
+    {:name (core/address-from-dir (fs/file-name root)) :dir root}
+    (let [cwd (fs/normalize (fs/absolutize "."))]
+      {:name (core/address-from-dir (fs/file-name cwd)) :dir cwd :plain true})))
+
 (defn agent-session?
   "True inside a coding agent's shell. Claude Code (2.1.172+) sets
    CLAUDE_CODE_CHILD_SESSION in the processes it launches itself (Bash, hooks,
@@ -453,10 +464,8 @@
    `me` is its name. nil otherwise (an --as name), since a session started
    there would not write as `me`."
   [me]
-  (if-let [root (repo-root)]
-    (when (= me (core/address-from-dir (fs/file-name root))) (str root))
-    (let [cwd (fs/normalize (fs/absolutize "."))]
-      (when (= me (core/address-from-dir (fs/file-name cwd))) (str cwd)))))
+  (let [{:keys [name dir]} (here)]
+    (when (= me name) (str dir))))
 
 (defn auto-register!
   "A wait in a Claude Code session puts its repo on call the first time, so
@@ -1087,23 +1096,37 @@
                                         (str/join ", " (map #(str "#" (number-of %) " " (owner-of %)) u))
                                         "none")))))))
 
+(defn here-oncall
+  "[name dir] that `oncall add` and `remove` take with no NAME: the folder
+   (see here), whoever the caller is, since the user registers repos too.
+   Outside any repo a note on stderr says so, as caller's does. `sub` and
+   `params` name the command that chooses instead."
+  [sub params]
+  (let [{:keys [name dir plain]} (here)]
+    (when-not name
+      (fail (str "this folder's name makes no address (" dir "); give " params)))
+    (when plain
+      (binding [*out* *err*]
+        (println (str "agent-mail: not in a git repo; taking this folder as " (pr-str name)
+                      " (`agent-mail oncall " sub " " params "` to choose)"))))
+    [name dir]))
+
 (defn cmd-oncall
   "Lists the repos on call (--json: oncall-view's entries); `add [NAME DIR]`
-   registers one, by default the caller's repo at its main worktree (from the
-   directory, whoever the caller is: the user registers repos too); `remove
+   registers one, by default the folder it runs in (see here-oncall); `remove
    [NAME]` takes one off and keeps it off, since wait would otherwise put it
    back."
   [opts [sub & args]]
   (case sub
     "add" (let [[nm dir] (cond (second args) [(first args) (fs/normalize (fs/absolutize (second args)))]
-                               (first args) (fail "oncall add takes NAME and DIR, or neither for this repo")
-                               :else [(or (repo-name) (fail "not in a git repo; give NAME DIR")) (repo-root)])]
+                               (first args) (fail "oncall add takes NAME and DIR, or neither for this folder")
+                               :else (here-oncall "add" "NAME DIR"))]
             (when-not (core/valid-name? nm) (fail "bad name:" (pr-str nm)))
             (when-not (fs/directory? dir) (fail "no such directory:" (str dir)))
             (register-oncall! nm dir)
             (println (str nm " is on call (" dir ")"))
             (when-not (:alive (serve-info)) (println (serve-line))))
-    "remove" (let [nm (or (first args) (repo-name) (fail "not in a git repo; give NAME"))
+    "remove" (let [nm (or (first args) (first (here-oncall "remove" "NAME")))
                    e (get (oncall-entries) nm)]
                (when-not (core/valid-name? nm) (fail "bad name:" (pr-str nm)))
                (spit-atomic! (oncall-file nm) (pr-str (assoc (or e {:repo nm}) :off true :removed (core/now-utc))))
@@ -1348,8 +1371,12 @@
   agent-mail oncall [--json]                  repos on call: serve hands each of their threads
                                               to a Claude Code session
   agent-mail oncall add [NAME DIR]            put a repo on call; no arguments: this repo, at
-                                              its main worktree. /agent-mail-listen does this
-  agent-mail oncall remove [NAME]             take it off; wait won't put it back
+                                              its main worktree; outside any repo, this
+                                              folder, as its name with whitespace made `-`
+                                              (the name an agent there writes as).
+                                              /agent-mail-listen does this
+  agent-mail oncall remove [NAME]             take it off (no NAME: this folder, as add); wait
+                                              won't put it back
   agent-mail serve [--interval S] [--once] [--standby]
                                               the on-call daemon (`just install-serve` runs it
                                               under launchd). Every S (5) seconds, each open

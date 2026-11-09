@@ -17,6 +17,8 @@ this session afterwards.
    ```
 
    It registers the repo at its main worktree and says whether serve runs.
+   Outside a git repo it registers the folder itself, under the name the
+   session writes as (whitespace becomes `-`), and says so on stderr.
 2. **If serve isn't running** (the output says `serve: not running`), tell
    the user: nothing on call is delivered until it runs. `just install-serve`
    in the agent-mail repo keeps it running under launchd.

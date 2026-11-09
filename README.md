@@ -74,7 +74,7 @@ Claude Code session per thread:
 
 ```sh
 just install-serve      # runs `agent-mail serve` at login (launchd), log in ~/Library/Logs/agent-mail-serve.log
-agent-mail oncall add   # inside a repo: put it on call (running /agent-mail-listen there does it too)
+agent-mail oncall add   # put this repo, or a folder outside any repo, on call (running /agent-mail-listen there does it too)
 agent-mail oncall       # the on-call repos, their state and serve's sessions
 ```
 

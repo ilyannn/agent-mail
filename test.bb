@@ -1778,10 +1778,11 @@
           (is (zero? (:exit (am {} "oncall" "add" "docs" d))))
           (is (= [["docs" d] ["repo-x" "on call"]] (map (juxt :repo #(if (= "docs" (:repo %)) (:dir %) (:text %))) (listed)))))
         (testing "refusals"
-          (is (= "agent-mail: oncall add takes NAME and DIR, or neither for this repo" (err {} "oncall" "add" "docs")))
+          (is (= "agent-mail: oncall add takes NAME and DIR, or neither for this folder" (err {} "oncall" "add" "docs")))
           (is (= (str "agent-mail: no such directory: " (fs/path d "nope")) (err {} "oncall" "add" "x" (str (fs/path d "nope")))))
           (is (= "agent-mail: bad name: \"a b\"" (err {} "oncall" "add" "a b" d)))
-          (is (= "agent-mail: not in a git repo; give NAME DIR" (err {:dir d} "oncall" "add")))
+          (is (= "agent-mail: this folder's name makes no address (/); give NAME DIR" (err {:dir "/"} "oncall" "add")))
+          (is (= "agent-mail: this folder's name makes no address (/); give NAME" (err {:dir "/"} "oncall" "remove")))
           (is (= "agent-mail: unknown oncall command list (add or remove)" (err {} "oncall" "list"))))
         (testing "the list: repo, directory, state; then whether serve runs"
           (let [lines (str/split-lines (out {} "oncall"))]
@@ -1798,7 +1799,22 @@
           (is (= "web was not on call; wait won't put it on call either" (out {} "oncall" "remove" "web"))))
         (testing "add puts it back"
           (out {:dir repo} "oncall" "add")
-          (is (= ["docs" "repo-x"] (map :repo (listed)))))))))
+          (is (= ["docs" "repo-x"] (map :repo (listed)))))
+        (testing "outside any repo, no arguments: the folder itself, by the name an agent there writes as"
+          (let [plain (str (fs/path d "2026-10 iPhone"))]
+            (fs/create-dirs plain)
+            (let [r (am {:dir plain :env user-shell} "oncall" "add")]
+              (is (zero? (:exit r)) (:err r))
+              (is (str/starts-with? (:out r) "2026-10-iPhone is on call ("))
+              (is (= (str "agent-mail: not in a git repo; taking this folder as \"2026-10-iPhone\""
+                          " (`agent-mail oncall add NAME DIR` to choose)")
+                     (str/trim (:err r)))))
+            (is (= (real plain) (real (:dir (first (filter #(= "2026-10-iPhone" (:repo %)) (listed)))))))
+            (is (= "2026-10-iPhone" (out {:dir plain} "whoami")))
+            (let [r (am {:dir plain} "oncall" "remove")]
+              (is (= "2026-10-iPhone is no longer on call; wait won't put it back (`oncall add` does)" (str/trim (:out r))))
+              (is (str/includes? (:err r) "(`agent-mail oncall remove NAME` to choose)")))
+            (is (= ["docs" "repo-x"] (map :repo (listed))))))))))
 
 (deftest on-call-in-status-and-delivery-notes
   (with-store
