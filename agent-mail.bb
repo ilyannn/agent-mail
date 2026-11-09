@@ -223,18 +223,33 @@
              (fs/copy p (fs/path dir nm) {:replace-existing true})
              (str "files/" nm))))))
 
-(defn write-msg! [id {:keys [from to date in-reply-to status attachments body]}]
+(defn writer-session
+  "The Claude Code session writing a message from `from`: its
+   CLAUDE_CODE_SESSION_ID, which Claude Code exports to the commands it
+   runs, so the thread's later messages can be posted into it. nil for the
+   user and outside Claude Code."
+  [from]
+  (let [s (System/getenv "CLAUDE_CODE_SESSION_ID")]
+    (when (and (not= "user" from) (not (str/blank? s))) (str/trim s))))
+
+(defn write-msg!
+  "Writes one message file into thread `id`, in one move, and returns its
+   name. A message written from a Claude Code session records it as
+   `session` (see writer-session)."
+  [id {:keys [from to date in-reply-to status attachments body]}]
   (let [dir (fs/path (thread-dir id) "msgs")
         last-date (some-> (seq (msg-files id)) last read-msg :date)
         date (core/after (or date (core/now-utc)) last-date)
         nm (str (core/stamp->name date) "__" from "__" (format "%04x" (rand-int 65536)) ".md")
-        tmp (fs/path dir (str "." nm ".tmp"))]
+        tmp (fs/path dir (str "." nm ".tmp"))
+        session (writer-session from)]
     (fs/create-dirs dir)
     (spit (str tmp)
           (str (core/fm-str (cond-> {:from from :to to :date date}
                               in-reply-to (assoc :in-reply-to in-reply-to)
                               status (assoc :status status)
-                              (seq attachments) (assoc :attachments attachments)))
+                              (seq attachments) (assoc :attachments attachments)
+                              session (assoc :session session)))
                "\n" (str/trim body) "\n"))
     (fs/move tmp (fs/path dir nm))
     nm))
@@ -1234,6 +1249,7 @@ Who am I: the repo I run in (main worktree name), `user` outside any repo;
 --as NAME or AGENT_MAIL_AS overrides. Bodies are Markdown; attachments are
 copied into the thread and `read` prints their absolute paths. --date backfills
 a timestamp when importing old threads; otherwise the tool stamps time.
+A message written in a Claude Code session records it (CLAUDE_CODE_SESSION_ID).
 wait finds its session through CLAUDE_CODE_MESSAGING_SOCKET (and _TOKEN),
 which Claude Code exports to the commands it runs, and the session's name in
 <config>/sessions/$CLAUDE_PID.json (CLAUDE_CONFIG_DIR, else ~/.claude).

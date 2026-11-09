@@ -30,7 +30,10 @@
 ;; Run from Claude Code, the tests inherit its session socket: cleared, so a
 ;; wait never posts into the real session; a test sets its own fake one. Its
 ;; pid too, or a wait would take the real session's name from the registry.
-(def no-session {"CLAUDE_CODE_MESSAGING_SOCKET" "" "CLAUDE_CODE_MESSAGING_TOKEN" "" "CLAUDE_PID" ""})
+;; Its session id too, or every message a test writes would record the real
+;; session as its writer.
+(def no-session {"CLAUDE_CODE_MESSAGING_SOCKET" "" "CLAUDE_CODE_MESSAGING_TOKEN" "" "CLAUDE_PID" ""
+                 "CLAUDE_CODE_SESSION_ID" ""})
 ;; Nor may a test reach the real WezTerm (run from a WezTerm tab, the tests
 ;; inherit its pane) or the real Claude Code registry: both point at nothing
 ;; next to the store unless a test sets its own.
@@ -190,6 +193,8 @@
       (let [th (core/thread-state meta "id" [(msg 0 "a" "b") (msg 1 "b" "c")])]
         (is (= "c" (:owner th)))
         (is (= "b" (core/other-party th "c")))))
+    (testing "each message keeps the session that wrote it"
+      (is (= ["s-1" nil] (map :session (:msgs (core/thread-state meta "id" [(msg 0 "a" "b" :session "s-1") (msg 1 "b" "a")]))))))
     (testing "status is the last one set"
       (is (= "done" (:status (core/thread-state meta "id" [(msg 0 "a" "b") (msg 1 "b" "a" :status "done")]))))
       (is (= "done" (:status (core/thread-state meta "id" [(msg 0 "a" "b") (msg 1 "b" "a" :status "done") (msg 2 "a" "b")])))
@@ -1137,6 +1142,23 @@
               (is (= ["agent-mail: could not post to this session's socket; printing the thread ids instead"]
                      (str/split-lines (str/trim (:err r))))))))
         (finally ((:close sess)) (fs/delete-tree sock-dir))))))
+
+(deftest messages-record-their-session
+  (with-store
+    (let [in-session (fn [who] {:who who :env {"CLAUDE_CODE_SESSION_ID" "5e55-1011"}})
+          id (out (in-session "website") "@infra" "Hello")]
+      (out (in-session "infra") "reply" id "Hi")
+      (out (in-session "user") "reply" id "From the user")
+      (out {:who "website"} "reply" id "From a shell without a session")
+      (out (in-session "infra") "close" id "Done.")
+      (testing "send, reply and close record the writer's session; never the user's, nor outside Claude Code"
+        (is (= ["5e55-1011" "5e55-1011" nil nil "5e55-1011"] (map :session (:msgs (thread-json id)))))
+        (is (str/includes? (slurp (str (first (sort (fs/glob (fs/path *store* "threads" id "msgs") "*__website__*.md")))))
+                           "session: \"5e55-1011\"")
+            "in the frontmatter"))
+      (testing "forward too"
+        (let [fwd (out (in-session "infra") "forward" id "--to" "docs")]
+          (is (= ["5e55-1011"] (map :session (:msgs (thread-json fwd))))))))))
 
 (defn registry!
   "Claude Code's session registry entry for `pid` in config dir `cfg`, written

@@ -112,7 +112,9 @@
 
 (defn thread-state
   "A thread's state, derived from its messages (in file order): owner is the
-   `to` of the last message, status the last `status` set (default open)."
+   `to` of the last message, status the last `status` set (default open).
+   The messages are kept as read, :session (the Claude Code session that
+   wrote one) included."
   [meta id msgs]
   (let [msgs (vec msgs) last-m (peek msgs)]
     (assoc meta :id id :msgs msgs :count (count msgs)
