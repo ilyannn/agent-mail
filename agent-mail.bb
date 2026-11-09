@@ -1691,12 +1691,10 @@
 
 ;; ---- landing: what serve's sessions pushed reaches the main checkout (see core)
 
-(def fetch-timeout-ms "How long serve gives `git fetch` in a main checkout." 30000)
-
 (defn git-at
   "Runs git ARGS… in folder `dir`, {:exit :out :err}: without
-   git-redirects (git-env), never asking for credentials, and killed past
-   `timeout-ms` (exit 124). Never throws."
+   git-redirects (git-env), never prompting, and killed past `timeout-ms`
+   (exit 124). Never throws."
   [dir timeout-ms & args]
   (try
     (let [proc (apply p/process {:dir (str dir) :env (assoc (git-env) "GIT_TERMINAL_PROMPT" "0") :in ""
@@ -1724,18 +1722,19 @@
 
 (defn land-facts
   "What git says of agent folder `dir` for core/land-plan, all but
-   :working and the candidate's :handed-on: whether it is its repo's main
-   worktree, its branch and upstream (fetched first when `fetch?`), its
-   tracked files' changes, how far HEAD is behind and ahead; without an
-   upstream, the same against the worktree branch of the session whose
-   folder is `cwd`. Only reads, but the fetch."
-  [dir cwd fetch?]
+   :working and the candidate's :closed: whether it is its repo's main
+   worktree, its branch and upstream, its tracked files' changes, how far
+   HEAD is behind and ahead of the upstream as the local remote-tracking
+   ref has it (never fetched: a session's push from its worktree moved
+   it); without an upstream, the same against the worktree branch of the
+   session whose folder is `cwd`. Only reads, and nothing over the
+   network."
+  [dir cwd]
   (let [{:keys [top main]} (git-roots dir)]
     (if-not (and top (core/same-path? top dir) (core/same-path? main dir))
       {:main? false}
       (let [branch (git-out dir "symbolic-ref" "-q" "--short" "HEAD")
             upstream (when branch (git-out dir "rev-parse" "--abbrev-ref" "--symbolic-full-name" "@{u}"))
-            fetch (when (and upstream fetch?) (git-at dir fetch-timeout-ms "fetch" "-q"))
             status (git-at dir 30000 "--no-optional-locks" "status" "--porcelain" "--untracked-files=no")
             wt (when (and branch (not upstream) cwd)
                  (core/worktree-of (map #(update % :path real-dir)
@@ -1744,7 +1743,6 @@
             ref (some->> (:branch wt) (str "refs/heads/"))]
         (cond-> {:main? true :branch branch :upstream upstream
                  :dirty? (or (pos? (:exit status)) (not (str/blank? (:out status))))}
-          (and fetch (pos? (:exit fetch))) (assoc :fetch-error (git-why fetch))
           upstream (assoc :behind (git-count dir "HEAD..@{u}") :ahead (git-count dir "@{u}..HEAD"))
           ref (assoc :candidate {:branch (:branch wt) :behind (git-count dir (str "HEAD.." ref))
                                  :ahead (git-count dir (str ref "..HEAD"))}))))))
@@ -1754,8 +1752,8 @@
    `agent`'s main checkout `dir` as core/land-plan says, once with an
    upstream, else for each of `sessions` in turn, logging each
    fast-forward, e.g. `land infra: main 3 commits to abc1234 (upstream)`.
-   Nothing but `git fetch` and `git merge --ff-only` changes anything
-   there, and untracked files are never touched. Returns why it can't
+   Nothing but `git merge --ff-only` changes anything there, nothing is
+   fetched, and untracked files are never touched. Returns why it can't
    land (the last reason), nil when nothing keeps the checkout behind;
    never throws."
   [agent dir sessions working]
@@ -1771,12 +1769,12 @@
                          (str "main checkout " (:commits plan) " behind " (or (:upstream f) (get-in f [:candidate :branch]))
                               ": `git merge --ff-only` failed: " (git-why r))))
                      (:blocked plan))))
-          f (land-facts dir nil true)]
+          f (land-facts dir nil)]
       (cond (not (:main? f)) nil
             (:upstream f) (step f)
             :else (reduce (fn [blocked s]
-                            (or (step (update (land-facts dir (:cwd s) false) :candidate
-                                              #(some-> % (assoc :handed-on (:handed-on s)))))
+                            (or (step (update (land-facts dir (:cwd s)) :candidate
+                                              #(some-> % (assoc :closed (:closed s)))))
                                 blocked))
                           nil sessions)))
     (catch Exception e (str "landing failed: " (ex-message e)))))
@@ -2093,10 +2091,10 @@
                                               or waiting on you): a later message resumes them
                                               while their cache is warm. When one of them goes
                                               idle or stops, the repo's main checkout is
-                                              fast-forwarded to what it pushed: `git fetch`
-                                              and `git merge --ff-only @{u}`; without an
-                                              upstream, to its worktree branch once it handed
-                                              its thread on. Only on a branch, with clean
+                                              fast-forwarded to what it pushed, `git merge
+                                              --ff-only @{u}` (never fetched: its push moved
+                                              @{u}); without an upstream, to its worktree
+                                              branch once its thread is closed. Only on a branch, with clean
                                               tracked files and no other session working
                                               there; `oncall` and `who` say why not
                                               (status --json: cannot-land). A stopped one

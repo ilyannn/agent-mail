@@ -176,19 +176,22 @@ Every few seconds serve looks at the open threads waiting on an on-call repo:
   own under `.claude/worktrees`, and Claude Code refuses its git commands
   aimed at the main checkout. So when one of serve's sessions goes idle or
   stops, serve brings the repo's main checkout up to date with its work.
-  With an upstream, it runs `git fetch` and, when the checkout is strictly
-  behind `@{u}`, `git merge --ff-only @{u}`. Without one, as in a repo with
-  no remote, it fast-forwards the checkout to the session's worktree
-  branch, once the session has handed its thread on (closed it, or
-  answered so that it is no longer the repo's turn) and the branch is
-  strictly ahead of the checkout. Either way only when the agent's folder is the
+  With an upstream, when the checkout is strictly behind `@{u}`, it runs
+  `git merge --ff-only @{u}`. It never fetches: the worktree shares the
+  repository, so the session's push has already moved the local
+  `origin/…` ref (a push from another clone lands once something has
+  fetched it). Without an upstream, as in a repo with no remote, it
+  fast-forwards the checkout to the session's worktree branch, once the
+  session's thread is closed and the branch is strictly ahead of the
+  checkout; a session that only answered, perhaps with a question, may
+  still be midway. Either way only when the agent's folder is the
   repo's main worktree, on a branch, with no changes to tracked files, and
   no other Claude Code session works in it (its folder is the checkout or
   inside it, outside `.claude/worktrees`). Untracked files are never
-  touched, and nothing but fetch and a fast-forward runs there. Serve logs
-  each landing, e.g. `land infra: main 3 commits to abc1234 (upstream)`.
-  When it can't land (uncommitted changes, someone working there, diverged
-  history, a failed fetch), it logs why, and `agent-mail oncall`, `who` and
+  touched, and nothing but a fast-forward changes anything there. Serve
+  logs each landing, e.g. `land infra: main 3 commits to abc1234
+  (upstream)`. When it can't land (uncommitted changes, someone working
+  there, diverged history), it logs why, and `agent-mail oncall`, `who` and
   `status --json` (`cannot-land`) show it, e.g. `main checkout 2 behind
   origin/main: uncommitted changes`.
 - **Removing.** Once one of serve's sessions is stopped and holds no open

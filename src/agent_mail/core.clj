@@ -973,21 +973,22 @@
      :dirty?      tracked files have changes (untracked ones never count)
      :working     names of the sessions working in it (working-in)
      :upstream    its branch's upstream, e.g. origin/main; nil without
-     :fetch-error why `git fetch` failed
      :behind :ahead  commits HEAD lacks and has against the upstream
      :candidate   without an upstream, the session's worktree branch:
-                  {:branch :behind :ahead (HEAD against it) :handed-on
-                   (the session holds no open thread whose turn is the
-                   agent's: it closed it or handed it on)}
-   With an upstream, fetched: a fast-forward to it when HEAD is strictly
-   behind. Without, the session's worktree branch counts, once it has
-   handed its thread on and HEAD is its ancestor. Either only on a branch,
-   with clean tracked files and nobody working there. Returns {:ff target
-   :commits n :via label} for `git merge --ff-only target`, {:blocked
-   text} when there is something to land but serve can't, e.g. `main
-   checkout 2 behind origin/main: uncommitted changes`, or nil when there
-   is nothing to land."
-  [{:keys [main? branch dirty? working upstream fetch-error behind ahead candidate]}]
+                  {:branch :behind :ahead (HEAD against it) :closed (its
+                   thread is closed, and it holds no other open thread)}
+   With an upstream: a fast-forward to it when HEAD is strictly behind.
+   The upstream is the local remote-tracking ref, never fetched: a
+   session pushes from its worktree, which shares the repository, so its
+   push has already moved that ref. Without one, the session's worktree
+   branch counts, once its thread is closed (a session that asks something
+   midway must not have unfinished commits landed) and HEAD is its
+   ancestor. Either only on a branch, with clean tracked files and nobody
+   working there. Returns {:ff target :commits n :via label} for `git
+   merge --ff-only target`, {:blocked text} when there is something to
+   land but serve can't, e.g. `main checkout 2 behind origin/main:
+   uncommitted changes`, or nil when there is nothing to land."
+  [{:keys [main? branch dirty? working upstream behind ahead candidate]}]
   (let [blocked (fn [n label ahead]
                   (let [ahead (or ahead 0)
                         why (cond-> []
@@ -1000,11 +1001,10 @@
                                      ": " (str/join ", " why))})))]
     (cond
       (not (and main? branch)) nil
-      upstream (cond fetch-error {:blocked (str "fetching " upstream " failed: " fetch-error)}
-                     (not (pos? (or behind 0))) nil
-                     :else (or (blocked behind upstream ahead) {:ff "@{u}" :commits behind :via "upstream"}))
-      :else (let [{b :branch n :behind a :ahead :keys [handed-on]} candidate]
-              (when (and b handed-on (pos? (or n 0)))
+      upstream (when (pos? (or behind 0))
+                 (or (blocked behind upstream ahead) {:ff "@{u}" :commits behind :via "upstream"}))
+      :else (let [{b :branch n :behind a :ahead :keys [closed]} candidate]
+              (when (and b closed (pos? (or n 0)))
                 (or (blocked n b a) {:ff (str "refs/heads/" b) :commits n :via (str "branch " b)}))))))
 
 (def unlanded-recheck-ms
@@ -1113,14 +1113,12 @@
   [s oncall]
   (boolean (and (:ours s) (= "stopped" (:state s)) (:cwd s) (get-in oncall [(:agent s) :dir]))))
 
-(defn- retirable
-  "The sessions of serve's memory, [k s], that serve looks at this round
-   to remove them (see rm-plan): removable?, holding no open thread (their
-   own is closed, and they hold no other: see holder), and either not
-   looked at yet, or kept for unlanded commits and due again: their
-   agent's checkout is landed this round (an agent in `landing`), or
-   unlanded-recheck-ms have passed."
-  [{:keys [now oncall threads memory]} landing]
+(defn- finished-ids
+  "The short ids of the sessions in serve's memory that are done with
+   their threads: their own is closed (not among `threads` open), and they
+   hold no other open thread for their agent, whoever's turn it is (see
+   holder)."
+  [threads memory]
   (let [open (set (keep #(when (= "open" (:status %)) (:id %)) threads))
         agents (distinct (keep :agent (vals (:sessions memory))))
         holding (set (for [th threads, a agents
@@ -1128,8 +1126,18 @@
                            :let [h (holder th a memory (get-in memory [:threads (:id th) :deaf]))]
                            :when h]
                        (short-id (:sid h))))]
+    (set (for [[k s] (:sessions memory) :when (and (not (open (:thread s))) (not (holding k)))] k))))
+
+(defn- retirable
+  "The sessions of serve's memory, [k s], that serve looks at this round
+   to remove them (see rm-plan): removable?, done with their threads
+   (finished-ids), and either not looked at yet, or kept for unlanded
+   commits and due again: their agent's checkout is landed this round (an
+   agent in `landing`), or unlanded-recheck-ms have passed."
+  [{:keys [now oncall threads memory]} landing]
+  (let [finished (finished-ids threads memory)]
     (for [[k s] (sort-by key (:sessions memory))
-          :when (and (removable? s oncall) (not (open (:thread s))) (not (holding k))
+          :when (and (removable? s oncall) (finished k)
                      (let [u (:unlanded s)]
                        (or (nil? u) (contains? landing (:agent s)) (>= (- now (or (:at u) 0)) unlanded-recheck-ms))))]
       [k s])))
@@ -1259,7 +1267,7 @@
                             busy, waiting or starting), ended, is being
                             stopped this round, or is finished and looked
                             at for the first time (see :retire). info:
-                            {:dir :sessions [{:id :name :cwd :handed-on}]
+                            {:dir :sessions [{:id :name :cwd :closed}]
                             :working}, :working the sessions working in
                             the checkout (working-in)
    [:retire S info]         S, serve's own, is stopped and holds no open
@@ -1357,10 +1365,7 @@
                                           (get-in memory [:sessions k :ours]) (= "live" (get-in memory [:sessions k :state])))]
                            k)
                          (map second stops)))
-        held (set (for [th (vals open)
-                        :let [h (holder th (:owner th) memory (get-in memory [:threads (:id th) :deaf]))]
-                        :when h]
-                    (short-id (:sid h))))
+        finished (finished-ids threads memory)
         lands (for [[agent ks] (sort-by key (group-by #(get-in memory [:sessions % :agent]) settled))
                     :let [dir (get-in oncall [agent :dir])]
                     :when dir]
@@ -1368,7 +1373,7 @@
                               :sessions (vec (for [k (sort ks)
                                                    :let [s (get-in memory [:sessions k]) e (find-session live k)]]
                                                {:id k :name (or (:name e) (:name s)) :cwd (or (:cwd e) (:cwd s))
-                                                :handed-on (not (held k))}))
+                                                :closed (boolean (finished k))}))
                               :working (working-in dir live)}])
         retires (when live
                   (for [[k s] (retirable in (set (map second lands)))
