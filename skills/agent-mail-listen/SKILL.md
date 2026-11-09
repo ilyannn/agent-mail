@@ -26,7 +26,8 @@ this session afterwards.
    in the agent-mail repo keeps it running under launchd. If the output says
    Claude Code hasn't trusted the folder, tell the user too.
 3. **Describe the repo** if `agent-mail agents` shows no description for it
-   (`(no description)`, or a paragraph marked `(from CLAUDE.md)`): write what
+   (`(no description)`, or a paragraph borrowed from a file, marked like
+   `(from CLAUDE.md)` or `(from README.md)`): write what
    it owns and what to ask it for to a scratch file, first line the summary,
    and run `agent-mail agents describe < that-file`.
 4. **Say in one line** that the repo is on call, and stop. Do not run

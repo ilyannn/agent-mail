@@ -1193,7 +1193,39 @@
     (is (= "After." (core/borrowed-paragraph "<p align=\"center\">\n<img src=x>\n</p>\n\n```sh\ncode\n```\n\nAfter.")) "HTML, code")
     (is (= "Then text." (core/borrowed-paragraph "## Heading\nThen text.")))
     (is (nil? (core/borrowed-paragraph "# Only a title\n")))
-    (is (= 300 (count (core/borrowed-paragraph (apply str (repeat 400 "w")))))))
+    (is (= 300 (count (core/borrowed-paragraph (apply str (repeat 400 "w"))))))
+    (is (= "@README.md @docs/agents.md" (core/borrowed-paragraph "# CLAUDE.md\n\n@README.md\n@docs/agents.md\n"))
+        "an import paragraph read as text"))
+  (testing "a CLAUDE.md of nothing but @path imports borrows from the first imported file with a paragraph"
+    (is (= ["README.md" "docs/agents.md"] (core/import-paths "# CLAUDE.md\n\n@README.md\n@docs/agents.md\n\nMore.")))
+    (is (nil? (core/import-paths "See @README.md for the overview.")) "an import inside text is text")
+    (is (nil? (core/import-paths "@README.md\nAnd text.")) "imports and text in one paragraph")
+    (is (nil? (core/import-paths "Text first.\n\n@README.md")) "the first paragraph decides")
+    (is (= "README.md" (core/import-target "CLAUDE.md" "README.md")))
+    (is (= "docs/README.md" (core/import-target "docs/agents.md" "./README.md")) "next to the importing file")
+    (is (= "README.md" (core/import-target "docs/agents.md" "../README.md")))
+    (is (= "../shared.md" (core/import-target "CLAUDE.md" "../shared.md")))
+    (is (nil? (core/import-target "CLAUDE.md" "~/.claude/mine.md")) "the home folder is not the folder's")
+    (is (nil? (core/import-target "CLAUDE.md" "/etc/notes.md")))
+    (let [files {"CLAUDE.md" "# infra\n\n@docs/empty.md\n@README.md\n"
+                 "docs/empty.md" "# Nothing here\n"
+                 "README.md" "# infra\n\nOwns the servers.\n"
+                 "chain.md" "@docs/deeper.md"
+                 "docs/deeper.md" "@../README.md"}
+          summary #(core/borrowed-summary (merge files %))]
+      (is (= ["Owns the servers." "README.md"] (summary {})) "past an import without a paragraph")
+      (is (= ["Owns the servers." "README.md"] (summary {"CLAUDE.md" "@chain.md"})) "imports in imported files, next to them")
+      (is (= ["Owns the CLAUDE.md." "CLAUDE.md"] (summary {"CLAUDE.md" "Owns the CLAUDE.md.\n\n@README.md"})) "text first: its own")
+      (is (= ["Owns the servers." "README.md"] (summary {"CLAUDE.md" "@missing.md"})) "nothing imported has one: README.md")
+      (is (= ["Owns the servers." "README.md"] (summary {"CLAUDE.md" nil})) "no CLAUDE.md")
+      (is (nil? (summary {"CLAUDE.md" "@CLAUDE.md" "README.md" nil})) "an import of itself ends")
+      (is (nil? (core/borrowed-summary {})))
+      (is (= ["Deep." "d5.md"]
+             (core/borrowed-summary {"CLAUDE.md" "@d1.md" "d1.md" "@d2.md" "d2.md" "@d3.md" "d3.md" "@d4.md" "d4.md" "@d5.md" "d5.md" "Deep."}))
+          "five imports deep")
+      (is (nil? (core/borrowed-summary {"CLAUDE.md" "@d1.md" "d1.md" "@d2.md" "d2.md" "@d3.md" "d3.md" "@d4.md" "d4.md" "@d5.md"
+                                        "d5.md" "@d6.md" "d6.md" "Too deep."}))
+          "not six")))
   (testing "an entry's file round-trips; on call stays a boolean"
     (let [e {:name "infra" :dir "/x/infra" :file-id "1:10" :oncall true :kind "claude" :added "2026-11-09T00:00:00.000Z"
              :description "Owns the servers.\n\nAsk it for DNS."}
@@ -2600,6 +2632,7 @@
         (git-in web "worktree" "add" "-q" wt "-b" "wt")
         (spit (str (fs/path infra "CLAUDE.md")) "# infra\n\nNot this: infra has a description.\n")
         (spit (str (fs/path docs "README.md")) "# Docs\n\n[![ci](x)](y)\n\nThe documentation site.\nAsk it for pages.\n\nMore.\n")
+        (spit (str (fs/path docs "CLAUDE.md")) "# CLAUDE.md\n\n@README.md\n\nRules for agents.\n")
         (spit (str (fs/path cfg ".claude.json"))
               (json/generate-string {:projects {(real infra) {:hasTrustDialogAccepted true} (real docs) {:hasTrustDialogAccepted false}
                                                 (real (mk "parent")) {:hasTrustDialogAccepted true}}}))

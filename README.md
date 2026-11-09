@@ -111,7 +111,10 @@ and every folder below it without an entry of its own is the new agent.
   the store keeps its names.
 - **A summary even without a description.** For an agent without one,
   `agents` shows the first paragraph of the folder's CLAUDE.md or README.md,
-  marked as such. A session serve starts for it is asked to write one.
+  marked as such. A CLAUDE.md whose first paragraph is only Claude Code
+  imports, such as `@README.md`, lends the first paragraph of the first
+  file it imports that has one (relative to the folder, following imports
+  there too). A session serve starts for it is asked to write one.
 - **Trust.** `agents` marks an on-call folder that Claude Code hasn't trusted
   yet, which serve can't start sessions in.
 - **From on-call registrations.** The first time the store is written or

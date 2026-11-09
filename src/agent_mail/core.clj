@@ -391,11 +391,10 @@
 
 (def borrowed-chars "How much of a borrowed paragraph a summary keeps." 300)
 
-(defn borrowed-paragraph
-  "The first paragraph of a CLAUDE.md or README.md, as one line, for an
-   agent without a description: after any frontmatter, skipping headings,
-   badges, images, HTML and code; cut at borrowed-chars. nil when there is
-   none."
+(defn- first-paragraph
+  "The lines of the first paragraph of a CLAUDE.md or README.md, trimmed:
+   after any frontmatter, skipping headings, badges, images, HTML and
+   code. nil when there is none."
   [text]
   (let [t (str/replace (str text) #"\r\n?" "\n")
         t (if-let [[_ rest] (re-matches #"(?s)---\n.*?\n---\n(.*)" t)] rest t)
@@ -403,8 +402,59 @@
     (some (fn [para]
             (let [lines (->> (str/split-lines para) (map str/trim) (drop-while skip?))]
               (when (and (seq lines) (not (re-find #"^(```|~~~|\|)" (first lines))))
-                (truncate (str/join " " (remove str/blank? lines)) borrowed-chars))))
+                (vec (remove str/blank? lines)))))
           (str/split t #"\n\s*\n"))))
+
+(defn borrowed-paragraph
+  "The first paragraph of a CLAUDE.md or README.md, as one line, for an
+   agent without a description: after any frontmatter, skipping headings,
+   badges, images, HTML and code; cut at borrowed-chars. nil when there is
+   none."
+  [text]
+  (some-> (first-paragraph text) (->> (str/join " ")) (truncate borrowed-chars)))
+
+(defn import-paths
+  "The files that the first paragraph of a CLAUDE.md (as
+   borrowed-paragraph finds it) imports, when it is nothing but Claude
+   Code `@path` import lines, e.g. `@README.md`; nil otherwise."
+  [text]
+  (let [lines (first-paragraph text)]
+    (when (and (seq lines) (every? #(re-matches #"@\S+" %) lines))
+      (mapv #(subs % 1) lines))))
+
+(defn import-target
+  "Import `path`, written in file `from` (both relative to the agent's
+   folder), relative to the folder: next to `from`, as Claude Code reads
+   it, with `.` and `..` resolved. nil for an absolute or home path,
+   which lies outside the folder."
+  [from path]
+  (when-not (re-find #"^[/~]" path)
+    (let [segs (reduce (fn [acc s] (cond (= "." s) acc
+                                         (and (= ".." s) (seq acc) (not= ".." (peek acc))) (pop acc)
+                                         :else (conj acc s)))
+                       [] (concat (butlast (path-segments from)) (path-segments path)))]
+      (when (seq segs) (str/join "/" segs)))))
+
+(def import-depth
+  "How many imports deep a borrowed summary follows, as Claude Code does."
+  5)
+
+(defn borrowed-summary
+  "[paragraph file] for an agent without a description: the first
+   paragraph (borrowed-paragraph) of its folder's CLAUDE.md, else of its
+   README.md; nil when neither has one. A CLAUDE.md whose first paragraph
+   is only `@path` imports (import-paths) borrows from the first file it
+   imports that has a paragraph, following imports there too, up to
+   import-depth: `file` is then that file. `read` gives a file's text by
+   its path relative to the folder, nil when there is none."
+  [read]
+  (letfn [(from [path depth]
+            (when-let [text (read path)]
+              (if-let [imports (import-paths text)]
+                (when (pos? depth) (some #(some-> (import-target path %) (from (dec depth))) imports))
+                (some-> (borrowed-paragraph text) (vector path)))))]
+    (or (from "CLAUDE.md" import-depth)
+        (some-> (read "README.md") borrowed-paragraph (vector "README.md")))))
 
 (defn entry-from-registration
   "The entry an on-call registration ({:repo :dir :added}, with :off after

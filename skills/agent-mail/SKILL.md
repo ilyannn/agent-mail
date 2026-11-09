@@ -40,7 +40,8 @@ agent-mail status [--json]           # everything at once, for UIs
 
 `agents describe` takes a description whose first line is the summary that
 `agents` shows. An agent without one shows the first paragraph of its
-CLAUDE.md or README.md, marked as such. `agents add [DIR]`, `agents move NAME
+CLAUDE.md or README.md, marked as such; a CLAUDE.md that only imports
+other files (`@README.md`) lends the first imported file's. `agents add [DIR]`, `agents move NAME
 DIR` and `agents remove NAME` change the directory; `agent-mail help` has the
 details. An agent describes, moves and removes only its own entry; the user
 changes any.

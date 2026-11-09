@@ -569,14 +569,12 @@
          " run `claude` in it once and accept the question")))
 
 (defn borrowed-summary
-  "[paragraph file] for a folder without a description: the first paragraph
-   of its CLAUDE.md, else of its README.md; nil when neither has one."
+  "[paragraph file] for folder `dir` without a description (see
+   core/borrowed-summary): the first paragraph of its CLAUDE.md, or of the
+   file that one imports, else of its README.md; nil when none has one."
   [dir]
-  (some (fn [f] (let [p (fs/path dir f)]
-                  (when-let [para (try (when (fs/regular-file? p) (core/borrowed-paragraph (slurp (str p))))
-                                       (catch Exception _ nil))]
-                    [para f])))
-        ["CLAUDE.md" "README.md"]))
+  (core/borrowed-summary (fn [rel] (let [p (fs/path dir rel)]
+                                     (try (when (fs/regular-file? p) (slurp (str p))) (catch Exception _ nil))))))
 
 (defn agents-view
   "Each agent as `agents` and `status` show it (core/agent-view), by name;
@@ -2046,7 +2044,9 @@
                                               folder, by the names SendMessage takes
   agent-mail agents [--json]                  the agent directory: each agent's folder, whether
                                               it is on call, and its summary (else the first
-                                              paragraph of the folder's CLAUDE.md or README.md)
+                                              paragraph of the folder's CLAUDE.md, or of the
+                                              file it imports when it only has `@path` lines,
+                                              or of README.md)
   agent-mail agents add [DIR] [--name NAME] [description…]
                                               add a folder, on call: by default this repo at
                                               its main worktree, else this folder; NAME
