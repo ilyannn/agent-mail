@@ -566,7 +566,9 @@
 ;;                         :ours (serve started it) :state :status :since
 ;;                         :started-at :cwd
 ;;                         :waiting-since :waiting-for :needs :alerted
-;;                         (while it waits on the user, see needs-input-ms)}}
+;;                         (while it waits on the user, see needs-input-ms)
+;;                         :unlanded {:branch :commits :at} (finished,
+;;                         but kept: see rm-plan)}}
 ;;    :agents   {agent {:failures :until :reason}}
 ;;    :land     {agent {:blocked (why its main checkout can't be brought
 ;;                                up to date, see land-plan)}}}
@@ -762,12 +764,15 @@
   "How much of a thread's subject the also-line quotes."
   60)
 
+(declare unlanded-phrase)
+
 (defn session-phrase
   "A session as serve names it to others: \"name\" (kind, activity), with
    the thread for a session serve started for one, and its subject when
    :subject has it, e.g. \"📫 infra #70\" (background, busy, thread #70
    \"Rotate the staging key\"), then, for one of serve's waiting on the
-   user, what it needs (needs-you). The name is `claude agents`' name field,
+   user, what it needs (needs-you), and for one finished but kept, what of
+   it is unlanded (see rm-plan). The name is `claude agents`' name field,
    the one SendMessage reaches the session by; the short id without one."
   [s]
   (str "\"" (if (str/blank? (:name s)) (:id s) (:name s)) "\" ("
@@ -777,7 +782,8 @@
                                            (when-not (str/blank? (:subject s))
                                              (str " \"" (truncate (:subject s) subject-chars) "\""))))]))
        ")"
-       (when-let [n (needs-you s)] (str " " n))))
+       (when-let [n (needs-you s)] (str " " n))
+       (when-let [u (:unlanded s)] (str " " (unlanded-phrase u)))))
 
 (def coordinate-sentence
   "What the also-line asks of a session when others work in its folder:
@@ -871,7 +877,8 @@
 ;; <repo>/.claude/worktrees, and Claude Code's worktree guard refuses any
 ;; git command from there that targets the main checkout. What a session
 ;; pushes would leave the main checkout behind, with nothing to bring it
-;; up to date; so serve fast-forwards it (see land-plan).
+;; up to date; so serve fast-forwards it (see land-plan), and removes a
+;; finished session once nothing of its is unlanded (see rm-plan).
 
 (defn commits-phrase "`1 commit`, `3 commits`." [n] (str n (if (= 1 n) " commit" " commits")))
 
@@ -950,6 +957,44 @@
               (when (and b handed-on (pos? (or n 0)))
                 (or (blocked n b a) {:ff (str "refs/heads/" b) :commits n :via (str "branch " b)}))))))
 
+(def unlanded-recheck-ms
+  "How often serve looks again at a finished session it kept for its
+   unlanded commits (see rm-plan); it also looks after every landing of
+   its agent's."
+  600000)
+
+(defn rm-plan
+  "Whether serve removes a finished session of its own (stopped, holding
+   no open thread) with `claude rm`, which removes the job and its
+   worktree when that is safe and keeps the transcript for `claude
+   --resume`; from what git says of the session's worktree:
+     :worktree     the linked worktree its folder is in, {:branch :head};
+                   nil when there is none
+     :commits      how many commits of its branch the main checkout's
+                   HEAD lacks
+     :in-head?     its branch is contained in that HEAD
+     :in-upstream? or in HEAD's upstream (@{u})
+     :error        why git could not tell
+   Nothing unlanded, so removed: no worktree, or a branch contained in
+   either. Returns {:rm why} or {:keep {:branch :commits}}, :branch a
+   detached HEAD's commit when there is no branch; {:keep {:error why}}
+   when git could not tell."
+  [{:keys [worktree commits in-head? in-upstream? error]}]
+  (cond error {:keep {:error error}}
+        (nil? worktree) {:rm "no worktree"}
+        in-head? {:rm (str "branch " (:branch worktree) " landed")}
+        in-upstream? {:rm (str "branch " (:branch worktree) " pushed")}
+        :else {:keep {:branch (or (:branch worktree) (some-> (:head worktree) (subs 0 (min 7 (count (:head worktree))))))
+                      :commits commits}}))
+
+(defn unlanded-phrase
+  "What a kept session's :unlanded says, e.g. unlanded: branch
+   worktree-x, 2 commits."
+  [{:keys [branch commits error]}]
+  (if error
+    (str "unlanded, perhaps: " error)
+    (str "unlanded: branch " branch (when commits (str ", " (commits-phrase commits))))))
+
 ;; ---- deciding
 
 (defn serve-memory
@@ -1011,16 +1056,45 @@
         :when (and c (>= (- now (or (:at c) 0)) check-ms))]
     [t c]))
 
+(defn- removable?
+  "Whether session `s` of serve's memory is one serve removes once it is
+   finished (see rm-plan): its own, stopped, its folder known and its
+   agent on call (in `oncall`), so its worktree can be found."
+  [s oncall]
+  (boolean (and (:ours s) (= "stopped" (:state s)) (:cwd s) (get-in oncall [(:agent s) :dir]))))
+
+(defn- retirable
+  "The sessions of serve's memory, [k s], that serve looks at this round
+   to remove them (see rm-plan): removable?, holding no open thread (their
+   own is closed, and they hold no other: see holder), and either not
+   looked at yet, or kept for unlanded commits and due again: their
+   agent's checkout is landed this round (an agent in `landing`), or
+   unlanded-recheck-ms have passed."
+  [{:keys [now oncall threads memory]} landing]
+  (let [open (set (keep #(when (= "open" (:status %)) (:id %)) threads))
+        agents (distinct (keep :agent (vals (:sessions memory))))
+        holding (set (for [th threads, a agents
+                           :when (open (:id th))
+                           :let [h (holder th a memory (get-in memory [:threads (:id th) :deaf]))]
+                           :when h]
+                       (short-id (:sid h))))]
+    (for [[k s] (sort-by key (:sessions memory))
+          :when (and (removable? s oncall) (not (open (:thread s))) (not (holding k))
+                     (let [u (:unlanded s)]
+                       (or (nil? u) (contains? landing (:agent s)) (>= (- now (or (:at u) 0)) unlanded-recheck-ms))))]
+      [k s])))
+
 (defn serve-wants
   "Which session lists a round needs, so serve asks Claude Code (some 100 ms
    a call) only when it has something to decide: :live for something to
-   deliver, a post to check, or a session of its own starting or running;
-   :known (stopped sessions too) only to choose between resuming and
-   starting. Takes serve-actions' input."
+   deliver, a post to check, a session of its own starting or running, or
+   one finished to look at for removal; :known (stopped sessions too) only
+   to choose between resuming and starting. Takes serve-actions' input."
   [{:keys [now memory check-ms] :as in}]
   (let [todo (boolean (or (seq (deliverable in #{})) (seq (due-checks memory now (or check-ms post-check-ms)))))]
     {:live (boolean (or todo (some #(or (= "starting" (:state %)) (and (:ours %) (= "live" (:state %))))
-                                   (vals (:sessions memory)))))
+                                   (vals (:sessions memory)))
+                        (seq (retirable in #{}))))
      :known todo}))
 
 (defn- observed
@@ -1108,7 +1182,9 @@
    [:back-off A until why]  a session serve started or resumed for A did not
                             show up in `grace-ms` (then [:lost S T]: T is to
                             go out again), or the sessions could not be listed
-   [:drop S]                S is down and its thread closed: forget it
+   [:drop S]                S is down and its thread closed: forget it (one
+                            of serve's own that stopped is looked at to be
+                            removed instead, see :retire)
    [:checked T]             the post into T's holder was taken up (or it ended,
                             or T has closed)
    [:deaf T S]              it was not: S stayed idle `check-ms` after it, so
@@ -1130,10 +1206,18 @@
                             a post into it checked or made this round
    [:land A info]           bring A's main checkout up to date (land-plan):
                             one of serve's sessions for A went idle (from
-                            busy, waiting or starting), ended, or is being
-                            stopped this round. info: {:dir :sessions [{:id
-                            :name :cwd :handed-on}] :working}, :working the
-                            sessions working in the checkout (working-in)
+                            busy, waiting or starting), ended, is being
+                            stopped this round, or is finished and looked
+                            at for the first time (see :retire). info:
+                            {:dir :sessions [{:id :name :cwd :handed-on}]
+                            :working}, :working the sessions working in
+                            the checkout (working-in)
+   [:retire S info]         S, serve's own, is stopped and holds no open
+                            thread: `claude rm` it unless its worktree
+                            branch has unlanded commits (rm-plan), after
+                            any landing this round. Looked at again while
+                            kept, see retirable. info: {:id :name :agent
+                            :dir :cwd}
    [:needs-input S info]    tell the user: background session S has waited
                             on them (a permission prompt) `needs-input-ms`
                             (see needs-input); serve's own are looked at
@@ -1172,7 +1256,7 @@
                    sessions))
         drops (for [[k s] sessions
                     :when (and (contains? #{"stopped" "gone"} (:state s)) (not (open (:thread s)))
-                               (not (find-session live k)))]
+                               (not (find-session live k)) (not (removable? s oncall)))]
                 [:drop k])
         backing (into #{} (keep #(when (= :back-off (first %)) (second %))) observe)
         checks (when live
@@ -1206,10 +1290,14 @@
                       :when (and (:ours s) e (resting? e) (number? since) (>= (- now since) idle-stop-ms)
                                  (not (checking k)) (not (targeted k)))]
                   [:stop k {:id (:id e) :name (or (:name e) (:name s)) :agent (:agent s) :idle-since since}]))
-        ;; serve's own sessions that went idle, ended or are being stopped:
-        ;; what they pushed is to land in their agent's main checkout
+        unseen (when live
+                 (for [[k s] (retirable in #{}) :when (and (nil? (:unlanded s)) (not (find-session live k)))] k))
+        ;; serve's own sessions that went idle, ended, are being stopped or
+        ;; are finished: what they pushed is to land in their agent's main
+        ;; checkout
         settled (distinct
-                 (concat (for [[k s] sessions
+                 (concat unseen
+                         (for [[k s] sessions
                                :let [e (find-session live k)]
                                :when (and (:ours s) e (contains? idle-statuses (:status e))
                                           (not (contains? idle-statuses (:status s))))]
@@ -1232,9 +1320,13 @@
                                                {:id k :name (or (:name e) (:name s)) :cwd (or (:cwd e) (:cwd s))
                                                 :handed-on (not (held k))}))
                               :working (working-in dir live)}])
+        retires (when live
+                  (for [[k s] (retirable in (set (map second lands)))
+                        :when (not (find-session live k))]
+                    [:retire k {:id k :name (:name s) :agent (:agent s) :dir (get-in oncall [(:agent s) :dir]) :cwd (:cwd s)}]))
         alerts (when live
                  (keep (fn [[k s]] (when-let [e (find-session live k)] (needs-input k s e now))) sessions))]
-    (vec (concat forget observe drops checks deliveries stops lands alerts))))
+    (vec (concat forget observe drops checks deliveries stops lands retires alerts))))
 
 (defn remember
   "serve's memory after `action` at `now`: one of serve-actions' bookkeeping
@@ -1244,9 +1336,11 @@
    info], [:post-failed T S] (S counts as deaf for T), [:resumed T S info],
    [:started A T short-id session-id info] (session-id nil until `claude
    agents` lists it), [:stopped S], [:land-checked A blocked] (blocked:
-   land-plan's text, nil when nothing keeps A's main checkout behind).
-   [:post], [:resume], [:start], [:stop] and [:land] themselves change
-   nothing: they end as one of those or a :back-off."
+   land-plan's text, nil when nothing keeps A's main checkout behind),
+   [:removed S] (`claude rm` ran: forgotten), [:unlanded S {:branch
+   :commits}] (kept, see rm-plan). [:post], [:resume], [:start], [:stop],
+   [:land] and [:retire] themselves change nothing: they end as one of
+   those or a :back-off."
   [memory [kind & args] now]
   (let [known-thread (fn [m t f & xs] (if (get-in m [:threads t]) (apply update-in m [:threads t] f xs) m))
         known-session (fn [m k f & xs] (if (get-in m [:sessions k]) (apply update-in m [:sessions k] f xs) m))
@@ -1256,7 +1350,8 @@
         strip (fn [m] (into {} (remove (comp nil? val)) m))]
     (case kind
       :forget (update memory :threads dissoc (first args))
-      :drop (update memory :sessions dissoc (first args))
+      (:drop :removed) (update memory :sessions dissoc (first args))
+      :unlanded (let [[k info] args] (known-session memory k assoc :unlanded (assoc info :at now)))
       :reset (update memory :agents dissoc (first args))
       :back-off (let [[a until reason] args]
                   (update-in memory [:agents a] #(assoc % :until until :reason reason :failures (inc (or (:failures %) 0)))))
@@ -1266,7 +1361,9 @@
                      waiting? #(and (background? %) (= "live" (:state %)) (= "waiting" (:status %)))]
                  (known-session memory k
                                 (fn [s] (let [s' (cond-> (merge s changes)
-                                                   (and (:state changes) (not= (:state changes) (:state s))) (assoc :since now))]
+                                                   (and (:state changes) (not= (:state changes) (:state s))) (assoc :since now)
+                                                   ;; running again: looked at afresh once it is finished
+                                                   (= "live" (:state changes)) (dissoc :unlanded))]
                                           (cond (not (waiting? s')) (dissoc s' :waiting-since :waiting-for :needs :alerted)
                                                 (waiting? s) (cond-> s' (not (:waiting-for changes)) (dissoc :waiting-for)
                                                                      (not (:needs changes)) (dissoc :needs))
@@ -1336,9 +1433,11 @@
 (defn oncall-view
   "Each registered agent with what serve is doing about it, for `oncall`,
    `who` and `status`: {:repo :dir :state :pane :text}, plus :sessions on
-   duty, :until (a UTC stamp) with :reason while backing off, and
+   duty, :until (a UTC stamp) with :reason while backing off,
    :cannot-land while its main checkout stays behind what a session of
-   serve's pushed (land-plan's text). :state is \"on-duty\" (a listener's
+   serve's pushed (land-plan's text), and :unlanded, serve's finished
+   sessions kept for their unlanded commits ([{:id :name :branch
+   :commits}], see rm-plan). :state is \"on-duty\" (a listener's
    duty record covers it, so serve leaves its threads alone),
    \"backing-off\" or \"on-call\"; :pane is always nil (serve opened
    WezTerm tabs until 9 Nov 2026). The text says why it can't land, then
@@ -1363,7 +1462,11 @@
                          tail)}
        (seq names) (assoc :sessions names)
        until (assoc :until (fmt-utc (java.time.Instant/ofEpochMilli until)) :reason (:reason m))
-       blocked (assoc :cannot-land blocked)))))
+       blocked (assoc :cannot-land blocked)
+       (some :unlanded held) (assoc :unlanded (vec (for [s held :when (:unlanded s)]
+                                                     (into {} (remove (comp nil? val))
+                                                           {:id (:id s) :name (:name s) :branch (get-in s [:unlanded :branch])
+                                                            :commits (get-in s [:unlanded :commits])}))))))))
 ;; ---------------------------------------------------------------- drafts
 
 (def reply-marker "<!-- agent-mail: the thread above is quoted with `>`; answer inline under any line, or write below this marker. Quoted text is kept only next to what you write. Sent when you close the editor; nothing is sent if you write nothing. -->")

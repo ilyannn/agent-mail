@@ -1783,6 +1783,29 @@
                           nil sessions)))
     (catch Exception e (str "landing failed: " (ex-message e)))))
 
+(defn retire-facts
+  "What git says, for core/rm-plan, of the worktree of the session whose
+   folder was `cwd`, in agent folder `dir`'s repo: the linked worktree it
+   was in (none outside git or in the main worktree), how many commits of
+   its branch (a detached one's commit) HEAD lacks, and whether HEAD or
+   @{u} contains it; {:error why} when git can't list the worktrees. Only
+   reads."
+  [dir cwd]
+  (if-not (git-roots dir)
+    {:worktree nil}
+    (let [listed (git-at dir 30000 "worktree" "list" "--porcelain")
+          wt (when (zero? (:exit listed))
+               (core/worktree-of (map #(update % :path real-dir) (core/parse-worktrees (:out listed))) cwd))
+          ref (when wt (if (:branch wt) (str "refs/heads/" (:branch wt)) (:head wt)))
+          in? (fn [base] (zero? (:exit (git-at dir 30000 "merge-base" "--is-ancestor" ref base))))]
+      (cond (pos? (:exit listed)) {:error (str "`git worktree list` failed: " (git-why listed))}
+            (not ref) {:worktree nil}
+            :else {:worktree (select-keys wt [:branch :head])
+                   :commits (git-count dir (str "HEAD.." ref))
+                   :in-head? (in? "HEAD")
+                   :in-upstream? (boolean (and (git-out dir "rev-parse" "--abbrev-ref" "--symbolic-full-name" "@{u}")
+                                               (in? "@{u}")))}))))
+
 (defn carry-out!
   "Carries out one of core/serve-actions, logs it, and returns serve's
    memory after it. A start or resume that fails backs its agent off with
@@ -1833,6 +1856,17 @@
               (when (and blocked (not= blocked (get-in memory [:land agent :blocked])))
                 (log! (str "can't land " agent ": " blocked)))
               (remember [:land-checked agent blocked]))
+      :retire (let [[sid {:keys [id name dir cwd]}] args
+                    plan (core/rm-plan (try (retire-facts dir cwd) (catch Exception e {:error (ex-message e)})))]
+                (if-let [why (:rm plan)]
+                  (let [r (run-claude! {} "rm" (or id sid))]
+                    (log! (str "rm " (named name sid) ": stopped, holding no open thread, " why
+                               (when-not (zero? (:exit r)) (str "; " (core/claude-failure "`claude rm`" r) ", so only forgotten"))))
+                    (remember [:removed sid]))
+                  (let [u (:keep plan)]
+                    (when (not= u (dissoc (get-in memory [:sessions sid :unlanded]) :at))
+                      (log! (str "keep " (named name sid) ": stopped, holding no open thread, " (core/unlanded-phrase u))))
+                    (remember [:unlanded sid u]))))
       :back-off (backed-off action)
       :observe (let [[sid changes] args
                      s (get-in memory [:sessions sid])]
@@ -2006,7 +2040,8 @@
                                               NAME is needed only outside Claude Code
   agent-mail who [--json]                     who is on duty, the repos on call, and the
                                               sessions serve handed threads to (one waiting
-                                              on you says what for and `claude attach ID`)
+                                              on you says what for and `claude attach ID`;
+                                              one kept says what of it is unlanded)
   agent-mail who --here                       the other Claude Code sessions working in this
                                               folder, by the names SendMessage takes
   agent-mail agents [--json]                  the agent directory: each agent's folder, whether
@@ -2064,7 +2099,11 @@
                                               its thread on. Only on a branch, with clean
                                               tracked files and no other session working
                                               there; `oncall` and `who` say why not
-                                              (status --json: cannot-land). A background session of its
+                                              (status --json: cannot-land). A stopped one
+                                              holding no open thread is removed (`claude rm`;
+                                              the transcript stays) unless its worktree branch
+                                              has commits neither HEAD nor @{u} has: `who` and
+                                              `oncall` list it as unlanded. A background session of its
                                               that waits on you (a permission prompt) for 2 min
                                               is reported once: a notification, serve's log,
                                               and `who`/`oncall` while it waits. `claude agents`

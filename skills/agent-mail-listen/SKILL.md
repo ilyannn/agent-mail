@@ -80,6 +80,11 @@ this session afterwards.
   and no other session working in the main checkout; otherwise `agent-mail
   oncall` says why, e.g. `main checkout 2 behind origin/main: uncommitted
   changes`. Untracked files are never touched.
+- Once a stopped session of serve's holds no open thread, serve removes it
+  with `claude rm` (the transcript stays for `claude --resume`), unless its
+  worktree branch has commits that are in neither the main checkout nor its
+  upstream. `agent-mail who` lists such a session as unlanded, e.g.
+  `unlanded: branch worktree-x, 2 commits`.
 - While a new interactive session starts in the repo, the SessionStart hook
   says nothing of the threads serve delivers, so it doesn't take them on.
 

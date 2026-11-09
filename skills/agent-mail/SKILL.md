@@ -132,7 +132,9 @@ to update the main checkout: once your turn ends, serve fast-forwards it to
 what you pushed (`@{u}`), or, in a repo without a remote, to your worktree
 branch once you have answered or closed the thread. It leaves a main
 checkout with uncommitted changes or someone working in it, and `agent-mail
-oncall` says why.
+oncall` says why. Once the thread is closed and the session stopped, serve
+removes the session and its worktree with `claude rm`, unless your branch
+has commits that never landed: then `agent-mail who` lists it as unlanded.
 
 Each message from serve ends by naming the other sessions working in the same
 folder, by the names SendMessage takes, with the thread number and subject of

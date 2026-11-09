@@ -188,6 +188,14 @@ Every few seconds serve looks at the open threads waiting on an on-call repo:
   history, a failed fetch), it logs why, and `agent-mail oncall`, `who` and
   `status --json` (`cannot-land`) show it, e.g. `main checkout 2 behind
   origin/main: uncommitted changes`.
+- **Removing.** Once one of serve's sessions is stopped and holds no open
+  thread, serve runs `claude rm` on it, which removes the job and its
+  worktree when that is safe; the transcript stays for `claude --resume`.
+  It does so only when nothing of the session is unlanded: it has no
+  worktree, or its worktree branch is contained in the main checkout's HEAD
+  or in its upstream. A session with unlanded commits is kept, and `who`
+  and `oncall` list it, e.g. `unlanded: branch worktree-x, 2 commits`;
+  serve looks again after each landing for the repo and every 10 minutes.
 - **Waiting on you.** Nobody sits at a background session, so a permission
   prompt would hold one, and its thread, unseen. When one of serve's
   background sessions has waited on you for 2 minutes, serve sends a

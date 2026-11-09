@@ -836,6 +836,76 @@
                             :cannot-land))
             "nothing blocked: no field")))))
 
+(deftest serve-removing
+  (testing "rm-plan: removed when nothing of its worktree branch is unlanded"
+    (let [wt {:branch "worktree-w" :head "2222222abc"}
+          plan core/rm-plan]
+      (is (= {:rm "no worktree"} (plan {:worktree nil})))
+      (is (= {:rm "branch worktree-w landed"} (plan {:worktree wt :commits 0 :in-head? true :in-upstream? false})))
+      (is (= {:rm "branch worktree-w pushed"} (plan {:worktree wt :commits 2 :in-head? false :in-upstream? true}))
+          "in @{u}, not yet in the checkout's HEAD")
+      (is (= {:keep {:branch "worktree-w" :commits 2}} (plan {:worktree wt :commits 2 :in-head? false :in-upstream? false})))
+      (is (= {:keep {:branch "2222222" :commits 1}} (plan {:worktree (assoc wt :branch nil) :commits 1})) "a detached HEAD: its commit")
+      (is (= {:keep {:error "`git worktree list` failed: x"}} (plan {:error "`git worktree list` failed: x"})) "git can't tell: kept")
+      (is (= "unlanded: branch worktree-x, 2 commits" (core/unlanded-phrase {:branch "worktree-x" :commits 2})))
+      (is (= "unlanded, perhaps: `git worktree list` failed: x" (core/unlanded-phrase {:error "`git worktree list` failed: x"})))))
+  (let [now t0
+        wt "/x/infra/.claude/worktrees/w"
+        done (th "t1" 1 [(msg 0 "web" "infra") (msg 1 "infra" "web" :session "bbbb2222-full") (msg 2 "web" "infra" :status "done")])
+        open (th "t1" 1 [(msg 0 "web" "infra") (msg 1 "infra" "web" :session "bbbb2222-full")])
+        stopped {:ours true :agent "infra" :thread "t1" :number 1 :name "📫 infra #1" :session-id "bbbb2222-full" :kind "background"
+                 :state "stopped" :cwd wt :started-at (- now 600000)}
+        mem #(core/serve-memory {:sessions {"bbbb2222" (merge stopped %)} :threads {"t1" {:delivered "002.md"}}})
+        base {:now now :oncall {"infra" {:dir "/x/infra"}} :threads [done] :memory (mem {}) :on-duty #{} :live [] :known nil
+              :seen {"infra" {"t1" "002.md"}} :grace-ms 120000 :check-ms 30000}
+        acts #(core/serve-actions (merge base %))
+        retire [:retire "bbbb2222" {:id "bbbb2222" :name "📫 infra #1" :agent "infra" :dir "/x/infra" :cwd wt}]
+        land [:land "infra" {:dir "/x/infra" :sessions [{:id "bbbb2222" :name "📫 infra #1" :cwd wt :handed-on true}] :working []}]
+        kept (fn [at] (mem {:unlanded {:branch "worktree-w" :commits 2 :at at}}))]
+    (testing "a stopped session of serve's own holding no open thread: landed first, then looked at for removal"
+      (is (= [[:forget "t1"] land retire] (acts {})))
+      (is (= {:live true :known false} (core/serve-wants (merge base {:live nil}))) "Claude Code is asked whether it runs")
+      (is (= [[:forget "t1"]] (acts {:live nil})) "not without knowing it does not run")
+      (is (= [:forget :observe :land]
+             (mapv first (acts {:live [(live-s "bbbb2222" :status "idle" :cwd wt :status-updated-at (- now 1000))]})))
+          "it runs again: not removed"))
+    (testing "kept while it holds an open thread, its own or another"
+      (is (= [] (acts {:threads [open]})))
+      (let [t2 (th "t2" 2 [(msg 0 "web" "infra") (msg 1 "infra" "web" :session "bbbb2222-full")])]
+        (is (= [[:forget "t1"]] (acts {:threads [done t2]})) "it wrote last in t2 for infra")))
+    (testing "not serve's to remove: dropped, as before"
+      (is (= [[:forget "t1"] [:drop "bbbb2222"]] (acts {:memory (mem {:ours false})})))
+      (is (= [[:forget "t1"] [:drop "bbbb2222"]] (acts {:memory (mem {:state "gone"})})) "not even `--all` lists it")
+      (is (= [[:forget "t1"] [:drop "bbbb2222"]] (acts {:memory (mem {:cwd nil})})) "its folder is unknown")
+      (is (= [[:forget "t1"] [:drop "bbbb2222"]] (acts {:oncall {}})) "its agent is off call"))
+    (testing "kept for unlanded commits: looked at again after 10 min, or at its agent's next landing"
+      (is (= [[:forget "t1"]] (acts {:memory (kept (- now 1000))})) "not due")
+      (is (= {:live false :known false} (core/serve-wants (merge base {:memory (kept (- now 1000)) :threads []}))))
+      (is (= [[:forget "t1"] retire] (acts {:memory (kept (- now core/unlanded-recheck-ms))})) "due: no landing first")
+      (is (= {:live true :known false} (core/serve-wants (merge base {:memory (kept (- now core/unlanded-recheck-ms)) :threads []}))))
+      (let [m (update (kept (- now 1000)) :sessions assoc "cccc3333"
+                      (merge stopped {:state "live" :status "busy" :thread "t3" :number 3 :name "📫 infra #3" :session-id "cccc3333-full"}))
+            all (acts {:memory m :live [(live-s "cccc3333" :status "idle" :cwd wt :status-updated-at (- now 1000))]})]
+        (is (= [:forget :observe :land :retire] (mapv first all)) "another session of infra's went idle: landing, then a look")
+        (is (= ["cccc3333"] (map :id (:sessions (nth (nth all 2) 2)))) "the kept one is not landed again")
+        (is (= "bbbb2222" (second (nth all 3))))))
+    (testing "remember: removed sessions are forgotten, kept ones say what is unlanded"
+      (let [r #(core/remember (mem {}) % now)]
+        (is (= {} (:sessions (r [:removed "bbbb2222"]))))
+        (is (= {:branch "worktree-w" :commits 2 :at now} (get-in (r [:unlanded "bbbb2222" {:branch "worktree-w" :commits 2}])
+                                                                 [:sessions "bbbb2222" :unlanded])))
+        (is (= (mem {}) (r [:retire "bbbb2222" {}])) "a look ends as :removed or :unlanded")
+        (is (nil? (get-in (core/remember (kept now) [:observe "bbbb2222" {:state "live" :status "busy"}] now) [:sessions "bbbb2222" :unlanded]))
+            "running again: looked at afresh once it is finished")))
+    (testing "who and oncall list a kept session with what is unlanded"
+      (let [m (kept now)]
+        (is (= "#1 → bbbb2222 \"📫 infra #1\" (background, stopped) unlanded: branch worktree-w, 2 commits"
+               (core/session-line (first (core/serve-sessions m)))))
+        (let [v (first (core/oncall-view {:now now :oncall {"infra" {:dir "/x/infra"}} :memory m :duty []}))]
+          (is (= "on call; serve's sessions: \"📫 infra #1\" (background, stopped, thread #1) unlanded: branch worktree-w, 2 commits"
+                 (:text v)))
+          (is (= [{:id "bbbb2222" :name "📫 infra #1" :branch "worktree-w" :commits 2}] (:unlanded v))))))))
+
 (deftest serve-texts
   (let [t1 (th "t1" 1 [(msg 0 "web" "infra")])
         t1' (th "t1" 1 [(msg 0 "web" "infra") (msg 1 "infra" "web") (msg 2 "web" "infra")])]
@@ -1878,7 +1948,7 @@
    agents.json, `agents --json --all` with all.json; `--bg` prints the
    background service's start line and `backgrounded · <bg.id, else
    deadbeef> · <its --name>`, or, while bg.fail exists, that file with exit
-   1; `stop` says what it stopped. Returns its path."
+   1; `stop` and `rm` say what they stopped or removed. Returns its path."
   [d]
   (script! d "claude"
            (str "d=\"$(dirname \"$0\")\"\n"
@@ -1890,6 +1960,7 @@
                 "        echo 'Starting background service…'\n"
                 "        echo \"backgrounded · $(cat \"$d/bg.id\" 2>/dev/null || echo deadbeef) · $name\" ;;\n"
                 "  stop) echo \"stopped $2\" ;;\n"
+                "  rm) echo \"removed $2\" ;;\n"
                 "esac")))
 
 (defn claude-calls
@@ -2109,8 +2180,12 @@
               (is (= [] (calls)) "nothing of its own runs: Claude Code is not asked")
               (is (= "stopped" (get-in (memory) [:sessions "cafebabe" :state])) "kept in mind while its thread is open")
               (out {:who "website"} "close" id "Never mind the backup key.")
-              (serve)
-              (is (= {} (:sessions (memory))) "their thread closed: forgotten")
+              (clear!)
+              (let [r (serve)]
+                (is (str/includes? (:err r) "rm \"📫 infra #1\" (cafebabe): stopped, holding no open thread, no worktree")))
+              (is (= [["rm" "cafebabe"] ["rm" "deadbeef"]] (map #(vec (take 2 %)) (filter #(= "rm" (first %)) (calls))))
+                  "their thread closed, and nothing of theirs in a worktree: removed")
+              (is (= {} (:sessions (memory))) "and forgotten")
               (is (= [id] (keys (:threads (memory)))) "the thread is kept while its close is news for infra")
               (out as-session "read" id)
               (serve)
@@ -2222,7 +2297,7 @@
 (deftest serve-lands-what-its-sessions-push
   (with-store
     (with-dir [d]
-      (let [{:keys [env serve turn!]} (serve-rig d)
+      (let [{:keys [env serve turn! json!]} (serve-rig d)
             remote (str (fs/path d "remote.git"))
             infra (str (fs/path d "infra"))
             wt (str (fs/path infra ".claude" "worktrees" "w"))
@@ -2288,15 +2363,23 @@
             (session "busy")
             (is (str/includes? (session "idle") "can't land infra: fetching origin/main failed: "))
             (is (str/starts-with? (:cannot-land (oncall)) "fetching origin/main failed: ")))
+          (testing "stopped, its thread closed, its branch landed: removed with `claude rm`, and forgotten"
+            (is (re-find #"stop \"📫 #1\" \(deadbeef\): idle since " (session "idle" :since (- (System/currentTimeMillis) (* 6 60000)))))
+            (json! "agents.json" [])
+            (out {:who "website"} "close" "1")
+            (is (str/includes? (serve) "rm \"📫 #1\" (deadbeef): stopped, holding no open thread, branch worktree-w landed"))
+            (is (= [["rm" "deadbeef"]] (map #(vec (take 2 %)) (filter #(= "rm" (first %)) (claude-calls d)))))
+            (is (= {} (:sessions (core/serve-memory (serve-state))))))
           (finally (p/destroy other)))))))
 
 (deftest serve-lands-a-worktree-branch-without-a-remote
   (with-store
     (with-dir [d]
-      (let [{:keys [env full serve turn!]} (serve-rig d)
+      (let [{:keys [env full serve turn! json!]} (serve-rig d)
             site (str (fs/path d "site"))
             wt (str (fs/path site ".claude" "worktrees" "w"))
-            session (fn [status] (turn! {:cwd (str (fs/real-path wt)) :status status}))
+            session (fn [status & {:as more}] (turn! (merge {:cwd (str (fs/real-path wt)) :status status} more)))
+            rms #(map (fn [c] (vec (take 2 c))) (filter (fn [c] (= "rm" (first c))) (claude-calls d)))
             main-head #(head-of site)]
         (git-in d "init" "-q" "-b" "main" site)
         (commit-file! site "README.md" "site\n")
@@ -2322,7 +2405,24 @@
             (commit-file! site "local.md" "On main.\n")
             (commit-file! wt "more.md" "More.\n")
             (session "busy")
-            (is (str/includes? (session "idle") "can't land site: main checkout 1 behind worktree-w and 1 ahead: diverged"))))))))
+            (is (str/includes? (session "idle") "can't land site: main checkout 1 behind worktree-w and 1 ahead: diverged")))
+          (testing "stopped, its thread closed, unlanded commits on its branch: kept, and listed"
+            (session "idle" :since (- (System/currentTimeMillis) (* 6 60000)))
+            (json! "agents.json" [])
+            (out {:who "website"} "close" id)
+            (is (str/includes? (serve) "keep \"📫 #1\" (deadbeef): stopped, holding no open thread, unlanded: branch worktree-w, 1 commit"))
+            (is (= [] (rms)) "no `claude rm`")
+            (is (re-find #"(?m)^site\s+\(serve\)\s+#1 → deadbeef \"📫 #1\" \(background, stopped\) unlanded: branch worktree-w, 1 commit$"
+                         (out {:env env} "who")))
+            (is (= [{:id "deadbeef" :name "📫 #1" :branch "worktree-w" :commits 1}]
+                   (:unlanded (first (json/parse-string (out {:env env} "oncall" "--json") true)))))
+            (is (not (str/includes? (serve) "deadbeef")) "said once, and not looked at again yet"))
+          (testing "its branch merged into main: removed at the next look"
+            (git-in site "merge" "-q" "--no-edit" "worktree-w")
+            (spit (str (serve-file "state.edn")) (pr-str (assoc-in (serve-state) [:sessions "deadbeef" :unlanded :at] 0)))
+            (is (str/includes? (serve) "rm \"📫 #1\" (deadbeef): stopped, holding no open thread, branch worktree-w landed"))
+            (is (= [["rm" "deadbeef"]] (rms)))
+            (is (= {} (:sessions (core/serve-memory (serve-state)))))))))))
 
 (deftest oncall-registration
   (with-store
