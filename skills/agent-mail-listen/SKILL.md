@@ -45,7 +45,9 @@ this session afterwards.
   `agent-mail who` lists the ones serve handed threads to.
 - `claude --bg` only runs in a folder Claude Code trusts: run `claude` in the
   repo once and accept the question. Until then serve backs off, and
-  `agent-mail oncall` shows why.
+  `agent-mail oncall` shows why. A plain folder inside a trusted one is
+  trusted too, but a git repo nested inside one is not: run `claude` in the
+  repo itself.
 - Nobody sits at a background session. A permission prompt holds it until the
   user opens it with `claude attach <id>`. Once one of serve's sessions has
   waited 2 minutes, serve tells the user with a notification, and `agent-mail

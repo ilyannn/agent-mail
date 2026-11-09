@@ -125,7 +125,8 @@ Requirements: `claude` on PATH or on your login shell's PATH
 (`AGENT_MAIL_CLAUDE` names another), and every on-call repo trusted by Claude
 Code: run `claude` in it once and accept the "trust this folder" question.
 Until then `claude --bg` fails there, serve backs off, and `agent-mail oncall`
-shows why.
+shows why. A git repo nested inside a trusted folder needs its own `claude`
+run: trust reaches plain folders below a trusted one, not repos.
 
 **On duty.** A script or Codex can wait for mail with
 `agent-mail wait --timeout S`, which prints the ids of the threads waiting on
