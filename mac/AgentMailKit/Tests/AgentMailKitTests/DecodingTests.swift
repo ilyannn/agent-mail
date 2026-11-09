@@ -60,14 +60,74 @@ import Testing
                          "text": "backing off until 06:40: no session came on duty"}],
              "serve": {"alive": true, "pid": 4242}}
             """.utf8))
-        #expect(st.oncall == [OnCallRepo(repo: "infra", dir: "/x/infra", state: "on-call"),
-                              OnCallRepo(repo: "docs", dir: "/x/docs", state: "backing-off", pane: 41)])
+        #expect(st.oncall == [OnCallRepo(repo: "infra", dir: "/x/infra", state: "on-call", text: "on call"),
+                              OnCallRepo(repo: "docs", dir: "/x/docs", state: "backing-off", pane: 41,
+                                         text: "backing off until 06:40: no session came on duty",
+                                         until: Fixture.date("2026-11-03T05:40:00.000Z"),
+                                         reason: "no session came on duty")])
+        #expect(st.oncall.map(\.isBackingOff) == [false, true])
         #expect(st.serve == ServeInfo(alive: true, pid: 4242))
         #expect(st.onCallRepos == ["infra"], "a repo backing off gets no tab")
         let older = try AgentMailJSON.decodeStatus(Fixture.data("status"))
         #expect(older.oncall.isEmpty, "a CLI from before on call")
         #expect(older.serve == nil)
         #expect(older.onCallRepos.isEmpty)
+    }
+
+    @Test func theDirectoryDecodes() throws {
+        let st = try AgentMailJSON.decodeStatus(Fixture.data("status-directory"))
+        let agents = try #require(st.agents)
+        #expect(agents.map(\.name) == ["docs", "gone", "infra", "notes", "website"])
+        #expect(agents.map(\.onCall) == [true, true, true, false, true])
+        #expect(agents.map(\.trusted) == [false, nil, true, false, true])
+        #expect(agents.map(\.dirExists) == [true, false, true, true, true])
+        #expect(agents[2] == DirectoryEntry(name: "infra", dir: "/x/infra", summary: "Owns the servers, DNS and deploys.",
+                                            trusted: true))
+        #expect(agents[2].shownSummary == "Owns the servers, DNS and deploys.")
+        #expect(agents[4].borrowed == "README.md")
+        #expect(agents[4].shownSummary == "The public website: its pages, build and hosting. (from README.md)")
+
+        let older = try AgentMailJSON.decodeStatus(Fixture.data("status"))
+        #expect(older.agents == nil, "a CLI from before the directory: not an empty one")
+        let empty = try AgentMailJSON.decodeStatus(Data("""
+            {"schema": 1, "now": "2026-11-09T22:44:10.629Z", "me": "user", "threads": [], "duty": [],
+             "undelivered": [], "agents": [{"name": "x", "summary": "  ", "borrowed": ""}]}
+            """.utf8))
+        #expect(empty.agents == [DirectoryEntry(name: "x", onCall: false)], "missing fields read defensively")
+    }
+
+    @Test func threadSessionsDecode() throws {
+        let st = try AgentMailJSON.decodeStatus(Fixture.data("status-directory"))
+        let rotate = try #require(st.threads.first { $0.number == 1 })
+        #expect(rotate.session == ThreadSession(id: "1a2b3c4d", name: "📫 infra #1", kind: "background", state: "live"))
+        #expect(rotate.session?.isWaitingOnUser == false)
+        #expect(rotate.session?.attachCommand == "claude attach 1a2b3c4d")
+        let deploy = try #require(st.threads.first { $0.number == 2 })
+        let waiting = try #require(deploy.session)
+        #expect(waiting.isWaitingOnUser)
+        #expect(waiting.waitingSince == Fixture.date("2026-11-09T22:39:04.453Z"))
+        #expect(waiting.waitingFor == "permission")
+        #expect(waiting.need == "approve Bash: npm run deploy")
+        #expect(ThreadSession(id: "a", waitingSince: .now, waitingFor: "permission").need == "permission")
+        #expect(ThreadSession(id: "a", waitingSince: .now, needs: " ").need == "input")
+        #expect(ThreadSession(id: "a", name: "").shownName == "a")
+        #expect(st.threads.filter { $0.session != nil }.map(\.number) == [2, 1], "only the threads serve delivered")
+        let older = try AgentMailJSON.decodeStatus(Fixture.data("status"))
+        #expect(older.threads.allSatisfy { $0.session == nil })
+    }
+
+    @Test func landingDecodes() throws {
+        let st = try AgentMailJSON.decodeStatus(Fixture.data("status-directory"))
+        let infra = try #require(st.oncall.first { $0.repo == "infra" })
+        #expect(infra.cannotLand == "main checkout 2 behind origin/main: uncommitted changes")
+        #expect(infra.unlanded == [UnlandedSession(id: "9c0d1e2f", name: "📫 infra #0", branch: "worktree-agent-9c0d",
+                                                   commits: 2)])
+        #expect(infra.unlanded.first?.text == "“📫 infra #0”: branch worktree-agent-9c0d, 2 commits")
+        #expect(UnlandedSession(id: "ab12", branch: "w", commits: 1).text == "“ab12”: branch w, 1 commit")
+        #expect(UnlandedSession(id: "ab12", name: "n").text == "“n”: branch unknown", "git couldn't tell")
+        let website = try #require(st.oncall.first { $0.repo == "website" })
+        #expect(website.cannotLand == nil)
+        #expect(website.unlanded.isEmpty)
     }
 
     @Test func threadFixtureDecodes() throws {

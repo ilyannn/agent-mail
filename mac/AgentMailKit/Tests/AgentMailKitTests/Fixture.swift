@@ -1,6 +1,11 @@
 // Fixtures captured from real `agent-mail status --json` and `read --json`
 // output against a scratch store (repos `infra` and `website`, and `user`;
 // the -forward ones also `docs`, with two forwards of a closed thread).
+// status-directory has the agent directory (docs untrusted, gone's folder
+// removed, notes off call, website's summary borrowed from its README) and
+// a hand-written serve state: infra's #1 and website's #2 held by sessions,
+// website's waiting on the user, infra unable to land and with an unlanded
+// session; old-repo, the owner of #4, was removed from the directory.
 import Foundation
 
 enum Fixture {

@@ -24,14 +24,18 @@ public struct MailStatus: Sendable, Equatable, Decodable {
     public var oncall: [OnCallRepo]
     /// Whether `agent-mail serve` runs; nil from a CLI that predates it.
     public var serve: ServeInfo?
+    /// The agent directory, by name: the names mail may go to (with `user`
+    /// and `postmaster`). nil from a CLI that predates the directory, which
+    /// isn't the same as an empty one.
+    public var agents: [DirectoryEntry]?
 
     enum CodingKeys: String, CodingKey {
-        case schema, now, me, threads, duty, undelivered, oncall, serve
+        case schema, now, me, threads, duty, undelivered, oncall, serve, agents
     }
 
     public init(schema: Int = MailStatus.supportedSchema, now: Date, me: String,
                 threads: [ThreadSummary], duty: [DutyRecord] = [], undelivered: [String] = [],
-                oncall: [OnCallRepo] = [], serve: ServeInfo? = nil) {
+                oncall: [OnCallRepo] = [], serve: ServeInfo? = nil, agents: [DirectoryEntry]? = nil) {
         self.schema = schema
         self.now = now
         self.me = me
@@ -40,6 +44,7 @@ public struct MailStatus: Sendable, Equatable, Decodable {
         self.undelivered = undelivered
         self.oncall = oncall
         self.serve = serve
+        self.agents = agents
     }
 
     public init(from decoder: any Decoder) throws {
@@ -52,6 +57,7 @@ public struct MailStatus: Sendable, Equatable, Decodable {
         undelivered = try c.decode([String].self, forKey: .undelivered)
         oncall = try c.decodeIfPresent([OnCallRepo].self, forKey: .oncall) ?? []
         serve = try c.decodeIfPresent(ServeInfo.self, forKey: .serve)
+        agents = try c.decodeIfPresent([DirectoryEntry].self, forKey: .agents)
     }
 
     /// The repos for which a listener tab opens when mail comes: on call,
@@ -62,22 +68,193 @@ public struct MailStatus: Sendable, Equatable, Decodable {
     }
 }
 
-/// A repo on call, as `status` lists it (core/oncall-view).
+/// A repo on call, as `status` lists it (core/oncall-view): what serve is
+/// doing about it.
 public struct OnCallRepo: Sendable, Equatable, Hashable, Decodable {
     public var repo: String
-    /// Where its listener tab starts.
+    /// The agent's folder, where serve starts its sessions.
     public var dir: String?
-    /// `on-duty`, `starting`, `tab-open`, `backing-off` or `on-call`.
+    /// `on-duty`, `backing-off` or `on-call` (older CLIs: also `starting`
+    /// and `tab-open`).
     public var state: String
-    /// The WezTerm pane of the tab serve opened for it, if one is open.
+    /// The WezTerm pane of the tab an older serve opened for it; always nil
+    /// since serve starts sessions instead.
     public var pane: Int?
+    /// The CLI's line about it, as `agent-mail oncall` prints it.
+    public var text: String?
+    /// While backing off: until when, and why.
+    public var until: Date?
+    public var reason: String?
+    /// Why serve can't bring the repo's main checkout up to date with what
+    /// one of its sessions pushed (core/land-plan's text); nil when it can.
+    public var cannotLand: String?
+    /// Serve's finished sessions kept because their worktree branch isn't
+    /// merged; empty from a CLI that predates the field.
+    public var unlanded: [UnlandedSession]
 
-    public init(repo: String, dir: String? = nil, state: String = "on-call", pane: Int? = nil) {
+    enum CodingKeys: String, CodingKey {
+        case repo, dir, state, pane, text, until, reason, unlanded
+        case cannotLand = "cannot-land"
+    }
+
+    public init(repo: String, dir: String? = nil, state: String = "on-call", pane: Int? = nil, text: String? = nil,
+                until: Date? = nil, reason: String? = nil, cannotLand: String? = nil,
+                unlanded: [UnlandedSession] = []) {
         self.repo = repo
         self.dir = dir
         self.state = state
         self.pane = pane
+        self.text = text
+        self.until = until
+        self.reason = reason
+        self.cannotLand = cannotLand
+        self.unlanded = unlanded
     }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        repo = try c.decode(String.self, forKey: .repo)
+        dir = try c.decodeIfPresent(String.self, forKey: .dir)
+        state = try c.decodeIfPresent(String.self, forKey: .state) ?? "on-call"
+        pane = try c.decodeIfPresent(Int.self, forKey: .pane)
+        text = try c.decodeIfPresent(String.self, forKey: .text)
+        until = try c.decodeIfPresent(Date.self, forKey: .until)
+        reason = try c.decodeIfPresent(String.self, forKey: .reason)
+        cannotLand = try c.decodeIfPresent(String.self, forKey: .cannotLand).flatMap(\.nonBlank)
+        unlanded = try c.decodeIfPresent([UnlandedSession].self, forKey: .unlanded) ?? []
+    }
+
+    public var isBackingOff: Bool { state == "backing-off" }
+}
+
+/// One of serve's finished sessions, kept because what it committed in its
+/// worktree hasn't reached the main checkout (core/rm-plan).
+public struct UnlandedSession: Sendable, Equatable, Hashable, Decodable {
+    /// The short id `claude attach` takes.
+    public var id: String
+    public var name: String?
+    /// Its worktree branch (a detached HEAD's commit); nil when git couldn't
+    /// tell.
+    public var branch: String?
+    public var commits: Int?
+
+    public init(id: String, name: String? = nil, branch: String? = nil, commits: Int? = nil) {
+        self.id = id
+        self.name = name
+        self.branch = branch
+        self.commits = commits
+    }
+
+    /// What is unlanded, as the CLI says it (core/unlanded-phrase): “📫 infra
+    /// #3”: branch worktree-x, 2 commits.
+    public var text: String {
+        let who = "“\(name?.nonBlank ?? id)”"
+        guard let branch = branch?.nonBlank else { return "\(who): branch unknown" }
+        return "\(who): branch \(branch)" + (commits.map { ", \($0) commit\($0 == 1 ? "" : "s")" } ?? "")
+    }
+}
+
+/// An agent in the directory, as `status` lists it (core/agent-view).
+public struct DirectoryEntry: Sendable, Equatable, Hashable, Decodable {
+    public var name: String
+    /// Its folder (a real path).
+    public var dir: String?
+    /// Serve delivers its mail, one Claude Code session per thread.
+    public var onCall: Bool
+    /// What kind of agent: `claude`.
+    public var kind: String
+    /// The description's first line, else a paragraph borrowed from the
+    /// folder's CLAUDE.md or README.md (see `borrowed`).
+    public var summary: String?
+    /// The file a borrowed summary comes from, e.g. `README.md`.
+    public var borrowed: String?
+    /// Whether Claude Code trusts the folder; nil when that is unknown.
+    public var trusted: Bool?
+    public var dirExists: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case name, dir, kind, summary, borrowed, trusted
+        case onCall = "oncall"
+        case dirExists = "dir-exists"
+    }
+
+    public init(name: String, dir: String? = nil, onCall: Bool = true, kind: String = "claude", summary: String? = nil,
+                borrowed: String? = nil, trusted: Bool? = nil, dirExists: Bool = true) {
+        self.name = name
+        self.dir = dir
+        self.onCall = onCall
+        self.kind = kind
+        self.summary = summary
+        self.borrowed = borrowed
+        self.trusted = trusted
+        self.dirExists = dirExists
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        dir = try c.decodeIfPresent(String.self, forKey: .dir)
+        onCall = try c.decodeIfPresent(Bool.self, forKey: .onCall) ?? false
+        kind = try c.decodeIfPresent(String.self, forKey: .kind) ?? "claude"
+        summary = try c.decodeIfPresent(String.self, forKey: .summary).flatMap(\.nonBlank)
+        borrowed = try c.decodeIfPresent(String.self, forKey: .borrowed).flatMap(\.nonBlank)
+        trusted = try c.decodeIfPresent(Bool.self, forKey: .trusted)
+        dirExists = try c.decodeIfPresent(Bool.self, forKey: .dirExists) ?? true
+    }
+
+    /// The summary as `agent-mail agents` shows it: a borrowed one says
+    /// where it comes from.
+    public var shownSummary: String? {
+        guard let summary else { return nil }
+        return borrowed.map { "\(summary) (from \($0))" } ?? summary
+    }
+}
+
+/// The session serve handed a thread to, as it last saw it
+/// (core/thread-session).
+public struct ThreadSession: Sendable, Equatable, Hashable, Decodable {
+    /// The short id `claude attach` takes.
+    public var id: String
+    /// Its name in `claude agents`, e.g. `📫 infra #12`.
+    public var name: String?
+    /// `background` or `interactive`.
+    public var kind: String?
+    /// `starting`, `live`, `stopped` or `gone`.
+    public var state: String?
+    /// Since when it has waited on the user (a permission prompt or another
+    /// dialog), what for, and what it needs; nil unless it waits.
+    public var waitingSince: Date?
+    public var waitingFor: String?
+    public var needs: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, kind, state, needs
+        case waitingSince = "waiting-since"
+        case waitingFor = "waiting-for"
+    }
+
+    public init(id: String, name: String? = nil, kind: String? = nil, state: String? = nil, waitingSince: Date? = nil,
+                waitingFor: String? = nil, needs: String? = nil) {
+        self.id = id
+        self.name = name
+        self.kind = kind
+        self.state = state
+        self.waitingSince = waitingSince
+        self.waitingFor = waitingFor
+        self.needs = needs
+    }
+
+    public var isWaitingOnUser: Bool { waitingSince != nil }
+
+    /// The name SendMessage and `claude agents` know it by, else its id.
+    public var shownName: String { name?.nonBlank ?? id }
+
+    /// What it waits on the user for (core/needs-you): its need, else what
+    /// it waits for, else input.
+    public var need: String { needs?.nonBlank ?? waitingFor?.nonBlank ?? "input" }
+
+    /// Opens it in a terminal.
+    public var attachCommand: String { "claude attach \(id)" }
 }
 
 /// The on-call daemon, `agent-mail serve`.
@@ -127,9 +304,14 @@ public struct ThreadSummary: Sendable, Equatable, Hashable, Identifiable, Decoda
     /// The thread this one forwards (`agent-mail forward`), nil for any
     /// other thread and from a CLI that predates forwarding.
     public var forwardedFrom: String?
+    /// The session serve handed the thread to, as serve last saw it; nil
+    /// when serve delivered none of it, and from a CLI that predates serve's
+    /// sessions.
+    public var session: ThreadSession?
 
     enum CodingKeys: String, CodingKey {
         case id, number, subject, from, created, owner, status, count, updated, unread, participants, flow, listener
+        case session
         case lastFrom = "last-from"
         case unreadToMe = "unread-to-me"
         case unreadBy = "unread-by"
@@ -141,7 +323,7 @@ public struct ThreadSummary: Sendable, Equatable, Hashable, Identifiable, Decoda
                 created: Date? = nil, owner: String? = nil, status: String = "open", count: Int = 1,
                 updated: Date? = nil, unread: Int = 0, unreadToMe: Int? = nil, unreadBy: [String: Int] = [:],
                 participants: [String] = [], flow: [String] = [], waitingSeconds: Int? = nil, listener: String? = nil,
-                forwardedFrom: String? = nil) {
+                forwardedFrom: String? = nil, session: ThreadSession? = nil) {
         self.id = id
         self.number = number
         self.subject = subject
@@ -160,6 +342,7 @@ public struct ThreadSummary: Sendable, Equatable, Hashable, Identifiable, Decoda
         self.waitingSeconds = waitingSeconds
         self.listener = listener
         self.forwardedFrom = forwardedFrom
+        self.session = session
     }
 
     public init(from decoder: any Decoder) throws {
@@ -182,6 +365,7 @@ public struct ThreadSummary: Sendable, Equatable, Hashable, Identifiable, Decoda
         waitingSeconds = try c.decodeIfPresent(Int.self, forKey: .waitingSeconds)
         listener = try c.decodeIfPresent(String.self, forKey: .listener)
         forwardedFrom = try c.decodeIfPresent(String.self, forKey: .forwardedFrom)
+        session = try c.decodeIfPresent(ThreadSession.self, forKey: .session)
     }
 
     public var isOpen: Bool { status == "open" }
@@ -395,4 +579,9 @@ public struct Message: Sendable, Equatable, Hashable, Decodable, Identifiable {
         body = try c.decodeIfPresent(String.self, forKey: .body) ?? ""
         inReplyTo = try c.decodeIfPresent(String.self, forKey: .inReplyTo)
     }
+}
+
+extension String {
+    /// The string, or nil when it is empty or only whitespace.
+    var nonBlank: String? { trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : self }
 }

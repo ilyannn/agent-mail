@@ -1,0 +1,211 @@
+{
+  "schema" : 1,
+  "oncall" : [ {
+    "repo" : "docs",
+    "dir" : "/x/docs",
+    "state" : "on-call",
+    "pane" : null,
+    "text" : "on call"
+  }, {
+    "repo" : "gone",
+    "dir" : "/x/gone",
+    "state" : "on-call",
+    "pane" : null,
+    "text" : "on call"
+  }, {
+    "repo" : "infra",
+    "dir" : "/x/infra",
+    "state" : "on-call",
+    "pane" : null,
+    "text" : "on call; can't land: main checkout 2 behind origin/main: uncommitted changes; serve's sessions: \"📫 infra #0\" (background, stopped, thread #0) unlanded: branch worktree-agent-9c0d, 2 commits, \"📫 infra #1\" (background, busy, thread #1)",
+    "cannot-land" : "main checkout 2 behind origin/main: uncommitted changes",
+    "unlanded" : [ {
+      "id" : "9c0d1e2f",
+      "name" : "📫 infra #0",
+      "branch" : "worktree-agent-9c0d",
+      "commits" : 2
+    } ]
+  }, {
+    "repo" : "website",
+    "dir" : "/x/website",
+    "state" : "on-call",
+    "pane" : null,
+    "text" : "on call; serve's sessions: \"📫 website #2\" (background, waiting, thread #2) needs you since 00:39 (approve Bash: npm run deploy; `claude attach 5e6f7a8b`)"
+  } ],
+  "now" : "2026-11-09T22:44:10.629Z",
+  "threads" : [ {
+    "unread" : 2,
+    "number" : 5,
+    "participants" : [ "infra", "website" ],
+    "updated" : "2026-11-09T22:44:04.314Z",
+    "unread-by" : {
+      "infra" : 0,
+      "website" : 1
+    },
+    "flow" : [ "website", "infra" ],
+    "created" : "2026-11-09T22:44:04.209Z",
+    "listener" : null,
+    "status" : "done",
+    "from" : "website",
+    "id" : "2026-11-09-dns-for-docs",
+    "count" : 2,
+    "last-from" : "infra",
+    "unread-to-me" : 0,
+    "waiting-s" : null,
+    "subject" : "DNS for docs",
+    "owner" : "website"
+  }, {
+    "unread" : 0,
+    "number" : 4,
+    "participants" : [ "old-repo", "user" ],
+    "updated" : "2026-11-09T22:44:04.102Z",
+    "unread-by" : {
+      "old-repo" : 1,
+      "user" : 0
+    },
+    "flow" : [ "user", "old-repo" ],
+    "created" : "2026-11-09T22:44:04.102Z",
+    "listener" : "none",
+    "status" : "open",
+    "from" : "user",
+    "id" : "2026-11-09-archive-the-old-repo",
+    "count" : 1,
+    "last-from" : "user",
+    "unread-to-me" : 0,
+    "waiting-s" : 6,
+    "subject" : "Archive the old repo",
+    "owner" : "old-repo"
+  }, {
+    "unread" : 1,
+    "number" : 3,
+    "participants" : [ "infra", "user" ],
+    "updated" : "2026-11-09T22:44:03.994Z",
+    "unread-by" : {
+      "infra" : 0,
+      "user" : 1
+    },
+    "flow" : [ "infra", "user" ],
+    "created" : "2026-11-09T22:44:03.994Z",
+    "listener" : "user",
+    "status" : "open",
+    "from" : "infra",
+    "id" : "2026-11-09-which-domain-for-the-docs",
+    "count" : 1,
+    "last-from" : "infra",
+    "unread-to-me" : 1,
+    "waiting-s" : 7,
+    "subject" : "Which domain for the docs?",
+    "owner" : "user"
+  }, {
+    "unread" : 0,
+    "number" : 2,
+    "participants" : [ "user", "website" ],
+    "updated" : "2026-11-09T22:44:03.891Z",
+    "unread-by" : {
+      "user" : 0,
+      "website" : 1
+    },
+    "flow" : [ "user", "website" ],
+    "created" : "2026-11-09T22:44:03.891Z",
+    "listener" : "on-call",
+    "status" : "open",
+    "from" : "user",
+    "id" : "2026-11-09-deploy-the-new-site",
+    "count" : 1,
+    "last-from" : "user",
+    "unread-to-me" : 0,
+    "waiting-s" : 7,
+    "subject" : "Deploy the new site",
+    "owner" : "website",
+    "session" : {
+      "id" : "5e6f7a8b",
+      "name" : "📫 website #2",
+      "kind" : "background",
+      "state" : "live",
+      "waiting-since" : "2026-11-09T22:39:04.453Z",
+      "waiting-for" : "permission",
+      "needs" : "approve Bash: npm run deploy"
+    }
+  }, {
+    "unread" : 0,
+    "number" : 1,
+    "participants" : [ "infra", "user" ],
+    "updated" : "2026-11-09T22:44:03.787Z",
+    "unread-by" : {
+      "infra" : 1,
+      "user" : 0
+    },
+    "flow" : [ "user", "infra" ],
+    "created" : "2026-11-09T22:44:03.787Z",
+    "listener" : "on-call",
+    "status" : "open",
+    "from" : "user",
+    "id" : "2026-11-09-rotate-the-staging-key",
+    "count" : 1,
+    "last-from" : "user",
+    "unread-to-me" : 0,
+    "waiting-s" : 7,
+    "subject" : "Rotate the staging key",
+    "owner" : "infra",
+    "session" : {
+      "id" : "1a2b3c4d",
+      "name" : "📫 infra #1",
+      "kind" : "background",
+      "state" : "live"
+    }
+  } ],
+  "duty" : [ ],
+  "me" : "user",
+  "agents" : [ {
+    "name" : "docs",
+    "dir" : "/x/docs",
+    "oncall" : true,
+    "kind" : "claude",
+    "summary" : "Owns the documentation site.",
+    "borrowed" : null,
+    "trusted" : false,
+    "dir-exists" : true
+  }, {
+    "name" : "gone",
+    "dir" : "/x/gone",
+    "oncall" : true,
+    "kind" : "claude",
+    "summary" : "A folder that was removed.",
+    "borrowed" : null,
+    "trusted" : null,
+    "dir-exists" : false
+  }, {
+    "name" : "infra",
+    "dir" : "/x/infra",
+    "oncall" : true,
+    "kind" : "claude",
+    "summary" : "Owns the servers, DNS and deploys.",
+    "borrowed" : null,
+    "trusted" : true,
+    "dir-exists" : true
+  }, {
+    "name" : "notes",
+    "dir" : "/x/notes",
+    "oncall" : false,
+    "kind" : "claude",
+    "summary" : "Keeps meeting notes.",
+    "borrowed" : null,
+    "trusted" : false,
+    "dir-exists" : true
+  }, {
+    "name" : "website",
+    "dir" : "/x/website",
+    "oncall" : true,
+    "kind" : "claude",
+    "summary" : "The public website: its pages, build and hosting.",
+    "borrowed" : "README.md",
+    "trusted" : true,
+    "dir-exists" : true
+  } ],
+  "postmaster" : [ ],
+  "serve" : {
+    "alive" : true,
+    "pid" : 1
+  },
+  "undelivered" : [ "2026-11-09-archive-the-old-repo" ]
+}
