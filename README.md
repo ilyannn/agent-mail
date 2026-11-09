@@ -95,14 +95,19 @@ Every few seconds serve looks at the open threads waiting on an on-call repo:
   says which thread to work on. One thread per session, and at most three new
   sessions a round, lowest thread numbers first, so a serve that was down
   for a while doesn't start a burst of them.
+- **Related threads.** Two threads can be about the same thing, such as a bug
+  report and your own note on the bug. Their sessions see each other in the
+  line below and agree through SendMessage which one handles both. The one
+  taking over writes in the other thread, so it holds that thread from then
+  on.
 - **Closed with news.** A thread the other side answered and closed in one go
   is posted into its holder too, saying it is closed and needs no answer, but
   only while that session runs: serve never resumes or starts a session for a
   closed thread.
 - **Who else is there.** Each message from serve ends by naming the other
-  sessions working in the repo's folder (its worktrees too), so they can
-  coordinate through SendMessage. `agent-mail who --here` prints the same
-  line.
+  sessions working in the repo's folder (its worktrees too), with the thread
+  and subject of each that serve started, so they can coordinate through
+  SendMessage. `agent-mail who --here` prints the same line.
 - **Stopping.** Serve stops the sessions it started (`claude stop`) once they
   are idle, hold no open thread and their prompt cache has expired, an hour or
   five minutes after their last reply. The conversation is kept for a later

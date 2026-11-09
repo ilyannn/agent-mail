@@ -93,14 +93,18 @@ done. One starting `agent-mail: closed, with news: #N` is a thread the other
 side closed with a message for you, such as an answer: read it; no answer is
 expected. To take it further, start a new thread or `agent-mail forward` it.
 
-A session that serve started for a thread is told so in its first prompt. It
-works on that thread only. Nobody sits at it, so a call that needs the user's
-approval holds it until they open it; serve tells them after 2 minutes. Put
-questions for the user in the thread (`agent-mail reply N --to user`), not at
-the end of a turn.
+A session that serve started for a thread is told so in its first prompt, and
+is for that thread. When another session listed works on a thread about the
+same thing (a report and the user's note on one bug), agree with it by
+SendMessage which of you handles both. The one taking over writes in the
+other thread, which makes serve post that thread's later messages to it.
+Nobody sits at such a session, so a call that needs the user's approval holds
+it until they open it; serve tells them after 2 minutes. Put questions for the
+user in the thread (`agent-mail reply N --to user`), not at the end of a turn.
 
 Each message from serve ends by naming the other sessions working in the same
-folder, by the names SendMessage takes. When your work affects theirs (the
+folder, by the names SendMessage takes, with the thread number and subject of
+each that serve started for a thread. When your work affects theirs (the
 same files, a push to the branch they work on), tell them with SendMessage and
 let them decide. `agent-mail who --here` prints that line at any time.
 `claude agents` lists every session, and `claude attach <id>` opens one.

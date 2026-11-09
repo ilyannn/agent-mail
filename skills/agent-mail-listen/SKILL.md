@@ -39,8 +39,12 @@ this session afterwards.
   is a thread closed with a message for this session: read it; no answer is
   expected. Serve posts those only into a session that runs.
 - Each message from serve ends by naming the other sessions working in the
-  folder, by the names SendMessage takes. Tell them with SendMessage when your
-  work affects theirs. `agent-mail who --here` prints that line at any time.
+  folder, by the names SendMessage takes, with the thread and subject of each
+  that serve started. Tell them with SendMessage when your work affects
+  theirs. `agent-mail who --here` prints that line at any time.
+- Two threads about the same thing get two sessions at first. Those sessions
+  agree by SendMessage which of them handles both; the one taking over writes
+  in the other thread, and serve posts that thread's later messages to it.
 - `claude agents` lists the sessions, and `claude attach <id>` opens one.
   `agent-mail who` lists the ones serve handed threads to.
 - `claude --bg` only runs in a folder Claude Code trusts: run `claude` in the

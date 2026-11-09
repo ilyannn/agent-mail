@@ -1057,12 +1057,14 @@
 (defn who-here
   "The also-line for the caller's folder (its repo's main worktree, else
    the current directory): the other Claude Code sessions working there,
-   as serve names them to the sessions it posts to."
+   as serve names them to the sessions it posts to, with the subject of
+   the thread serve started each for."
   []
   (let [dir (real-dir (or (some-> (repo-root) str) (str (fs/absolutize "."))))
         {:keys [sessions error]} (claude-agents false)]
     (when error (fail error))
-    (println (core/also-line dir (live-sessions sessions) (serve-memory) (System/getenv "CLAUDE_CODE_SESSION_ID")))))
+    (println (core/also-line dir (live-sessions sessions) (serve-memory) (System/getenv "CLAUDE_CODE_SESSION_ID")
+                             (into {} (map (juxt :id :subject)) (all-threads))))))
 
 (defn cmd-who
   "The duty records, the repos on call with what serve is doing about each,

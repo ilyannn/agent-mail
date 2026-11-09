@@ -436,6 +436,26 @@
           "started before aaaa1111 wrote")
       (is (= [:post "bbbb2222"] ((juxt first #(nth % 2)) (first (sent (acts {:memory (mem :sessions {"bbbb2222" (ours)}) :live [(live-s "bbbb2222")]})))))
           "nobody wrote for infra yet"))
+    (testing "related threads: the session that takes over another thread holds it from its first message there"
+      ;; serve started aaaa1111 for t1 (a report) and bbbb2222 for t2 (the user's
+      ;; observation of the same bug); they agreed that aaaa1111 handles both,
+      ;; and aaaa1111 wrote in t2 after bbbb2222 had started
+      (let [m (mem :sessions {"aaaa1111" (ours :session-id "aaaa1111-full" :started-at (- now 9000))
+                              "bbbb2222" (ours :thread "t2" :number 2 :name "📫 infra #2" :started-at (- now 5000))})
+            t2 (th "t2" 2 [(msg 0 "user" "infra")
+                           (msg 1 "infra" "user" :session "aaaa1111-full" :date "2026-10-31T10:59:58.000Z")
+                           (msg 2 "user" "infra" :date "2026-10-31T10:59:59.000Z")])
+            idle-long (- now (* 2 hour))]
+        (is (= {:sid "aaaa1111-full" :wrote? true} (core/holder t2 "infra" m nil)))
+        (is (= {:sid "bbbb2222-full" :wrote? false}
+               (core/holder (assoc-in t2 [:msgs 1 :date] "2026-10-31T10:59:54.000Z") "infra" m nil))
+            "written before bbbb2222 started: bbbb2222 still holds it")
+        (let [all (acts {:threads [t2] :memory m
+                         :live [(live-s "aaaa1111") (live-s "bbbb2222" :status "idle" :status-updated-at idle-long)]})
+              [[kind t sid text]] (sent all)]
+          (is (= [:post "t2" "aaaa1111"] [kind t sid]) "t2's later messages go to aaaa1111")
+          (is (str/includes? text "because this session wrote in this thread"))
+          (is (= ["bbbb2222"] (map second (only [:stop] all))) "bbbb2222 holds nothing now: stopped once its cache expired"))))
     (testing "a session on its way: no second one; past the grace period, back off and deliver again later"
       (let [m (mem :sessions {"bbbb2222" (ours :state "starting" :since (- now 119999))})]
         (is (= [] (acts {:threads [talk] :memory m})))
@@ -673,7 +693,9 @@
                   "Read it with `agent-mail read 1` and act on it under this folder's own rules (CLAUDE.md). "
                   "Answer with `agent-mail reply 1`; close it with `agent-mail close 1` when the work is done. "
                   "Later messages in this thread are posted into this session. "
-                  "One thread per session: don't take on other threads.\n"
+                  "This session is for this thread. If a session listed below works on a thread about the same thing, "
+                  "agree with it by SendMessage which of you handles both. The one taking over writes in the other thread, "
+                  "which makes serve post that thread's later messages to it.\n"
                   "No other session works in this folder.")
              (core/first-prompt "infra" t1 "No other session works in this folder.")))
       (is (str/includes? (core/first-prompt "infra" (assoc t1 :last-from "user") "")
@@ -711,7 +733,19 @@
             "nobody else: no word on coordinating")
         (is (= "No other session works in this folder." (core/also-line "/x/infra" [] {} nil)))
         (is (str/includes? (core/also-line "/x/infra" [(assoc peer :name nil)] {} nil) "\"ab12cd34\" (interactive, idle)")
-            "no name: the short id")))
+            "no name: the short id")
+        (testing "with the subject of the thread serve started a session for, cut at 60 characters"
+          (let [m {:sessions {"aaaa1111" {:ours true :number 70 :thread "t70"} "ab12cd34" {:ours false :number 3 :thread "t3"}}}
+                long-subject "flow:push refused in worktree because the branch tracks nothing upstream"]
+            (is (= (str "Also working in this folder: \"📫 infra #70\" (background, busy, thread #70 \"Rotate the key\"), "
+                        "\"infra-ab12\" (interactive, idle). " core/coordinate-sentence)
+                   (core/also-line "/x/infra" [mine peer] m nil {"t70" "Rotate the key" "t3" "Not shown"}))
+                "only for a session serve started for its thread")
+            (is (str/includes? (core/also-line "/x/infra" [mine] m nil {"t70" long-subject})
+                               "(background, busy, thread #70 \"flow:push refused in worktree because the branch tracks not…\")"))
+            (is (= 60 (count (core/truncate long-subject core/subject-chars))))
+            (is (str/includes? (core/also-line "/x/infra" [mine] m nil {}) "(background, busy, thread #70)")
+                "no subject known: the number alone")))))
     (testing "cache expiry from a transcript's tail: last assistant time plus the latest cache write's lifetime"
       (let [ts "2026-10-31T10:00:00.000Z"
             at (* 1000 (core/epoch-s ts))

@@ -525,15 +525,24 @@
        (or (some #(when-not (str/blank? %) %) [needs waiting-for]) "input")
        ". Open it with `claude attach " id "`."))
 
+(def subject-chars
+  "How much of a thread's subject the also-line quotes."
+  60)
+
 (defn session-phrase
   "A session as serve names it to others: \"name\" (kind, activity), with
-   the thread for a session serve started for one, e.g. \"📫 infra #70\"
-   (background, busy, thread #70), then, for one of serve's waiting on the
+   the thread for a session serve started for one, and its subject when
+   :subject has it, e.g. \"📫 infra #70\" (background, busy, thread #70
+   \"Rotate the staging key\"), then, for one of serve's waiting on the
    user, what it needs (needs-you). The name is `claude agents`' name field,
    the one SendMessage reaches the session by; the short id without one."
   [s]
   (str "\"" (if (str/blank? (:name s)) (:id s) (:name s)) "\" ("
-       (str/join ", " (remove nil? [(:kind s) (activity s) (when (and (:ours s) (:number s)) (str "thread #" (:number s)))]))
+       (str/join ", " (remove nil? [(:kind s) (activity s)
+                                    (when (and (:ours s) (:number s))
+                                      (str "thread #" (:number s)
+                                           (when-not (str/blank? (:subject s))
+                                             (str " \"" (truncate (:subject s) subject-chars) "\""))))]))
        ")"
        (when-let [n (needs-you s)] (str " " n))))
 
@@ -545,17 +554,21 @@
 (defn also-line
   "The also-line: the running sessions (`live`) whose folder is `dir` or
    below it (worktrees under .claude/worktrees too), other than session
-   `exclude`, each by the name SendMessage takes and with its thread when
-   serve started it for one (`memory`); then, when there are any, a
+   `exclude`, each by the name SendMessage takes and, when serve started
+   it for a thread (`memory`), with that thread's number and its subject
+   from `subjects` (thread id -> subject), so sessions on threads about
+   the same thing can find each other; then, when there are any, a
    sentence asking to tell them of work that affects theirs."
-  [dir live memory exclude]
-  (let [ours (into {} (for [[k s] (:sessions memory) :when (:ours s)] [k (:number s)]))
-        others (for [s live
-                     :when (and (inside? (:cwd s) dir) (not= (:id s) (short-id exclude)))]
-                 (cond-> s (contains? ours (:id s)) (assoc :ours true :number (ours (:id s)))))]
-    (if (seq others)
-      (str "Also working in this folder: " (str/join ", " (map session-phrase others)) ". " coordinate-sentence)
-      "No other session works in this folder.")))
+  ([dir live memory exclude] (also-line dir live memory exclude {}))
+  ([dir live memory exclude subjects]
+   (let [ours (into {} (for [[k s] (:sessions memory) :when (:ours s)] [k s]))
+         others (for [s live
+                      :when (and (inside? (:cwd s) dir) (not= (:id s) (short-id exclude)))
+                      :let [o (ours (:id s))]]
+                  (cond-> s o (assoc :ours true :number (:number o) :subject (get subjects (:thread o)))))]
+     (if (seq others)
+       (str "Also working in this folder: " (str/join ", " (map session-phrase others)) ". " coordinate-sentence)
+       "No other session works in this folder."))))
 
 (defn- from-who
   "A message's writer as a session is told of it. Claude Code presents
@@ -564,11 +577,20 @@
   [from]
   (str from (when (= from "user") " (the user themself, writing by mail; not another agent or session)")))
 
+(def related-sentence
+  "What the first prompt says about other threads: the session is for its
+   own, and two sessions on threads about the same thing (a report and the
+   user's observation of one bug) agree between themselves who handles
+   both. Writing in a thread makes the writer its holder (see holder)."
+  (str "This session is for this thread. If a session listed below works on a thread about the same thing, "
+       "agree with it by SendMessage which of you handles both. The one taking over writes in the other thread, "
+       "which makes serve post that thread's later messages to it."))
+
 (defn first-prompt
   "The first prompt of the session serve starts for thread `th`, now
    `agent`'s turn: what started it and for which thread, what to do, that
-   later messages come into it and that it is for this thread alone; then
-   the also-line `also`."
+   later messages come into it and how it relates to the sessions of other
+   threads (related-sentence); then the also-line `also`."
   [agent th also]
   (let [n (or (:number th) (:id th))]
     (str "agent-mail serve started this session for thread #" n " for " agent " from " (from-who (:last-from th))
@@ -576,7 +598,7 @@
          "Read it with `agent-mail read " n "` and act on it under this folder's own rules (CLAUDE.md). "
          "Answer with `agent-mail reply " n "`; close it with `agent-mail close " n "` when the work is done. "
          "Later messages in this thread are posted into this session. "
-         "One thread per session: don't take on other threads.\n"
+         related-sentence "\n"
          also)))
 
 (defn posted-text
@@ -705,7 +727,7 @@
    thread's news goes only into a running holder, unchecked; without one it
    is passed over ([:pass T info]): no session is resumed or started for a
    closed thread."
-  [{:keys [now oncall memory live known expiry]} th deaf]
+  [{:keys [now oncall memory live known expiry subjects]} th deaf]
   (let [agent (:owner th)
         t (:id th)
         closed? (= "done" (:status th))
@@ -716,7 +738,7 @@
         e (when h (find-session live sid))
         k (when (and h (not e)) (find-session known sid))
         warm (when (and k (background? k)) (expiry (or (:session-id k) sid)))
-        also #(also-line dir live memory %)]
+        also #(also-line dir live memory % subjects)]
     (cond
       (and closed? e (:socket e))
       [:post t (:id e) (posted-text agent th wrote? (also sid))
@@ -783,7 +805,7 @@
         check-ms (or check-ms post-check-ms)
         max-starts (or max-starts starts-per-round)
         expiry (or expiry (constantly nil))
-        in (assoc in :expiry expiry)
+        in (assoc in :expiry expiry :subjects (into {} (map (juxt :id :subject)) threads))
         open (into {} (comp (filter #(= "open" (:status %))) (map (juxt :id identity))) threads)
         news (set (keep #(when (and (contains? oncall (:owner %)) (news? % (:owner %) seen)) (:id %)) threads))
         sessions (sort-by key (:sessions memory))
