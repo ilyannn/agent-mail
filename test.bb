@@ -43,6 +43,12 @@
    "AGENT_MAIL_WEZTERM" (str (fs/path (fs/parent *store*) "no-wezterm"))
    "AGENT_MAIL_CLAUDE" (str (fs/path (fs/parent *store*) "no-claude"))
    "CLAUDE_CONFIG_DIR" (str (fs/path (fs/parent *store*) "no-claude-config"))})
+;; Nor may git reach the repo the tests run from: git exports GIT_DIR and
+;; its kin to hooks and to `git rebase --exec`, and every git a test runs
+;; (the store's, the test repos') would then commit into that repo.
+(def git-redirects #{"GIT_DIR" "GIT_WORK_TREE" "GIT_INDEX_FILE" "GIT_COMMON_DIR" "GIT_OBJECT_DIRECTORY"
+                     "GIT_ALTERNATE_OBJECT_DIRECTORIES" "GIT_NAMESPACE" "GIT_PREFIX"})
+(defn clean-env [] (into {} (remove (comp git-redirects key)) (System/getenv)))
 (defn env-for [{:keys [who env]}]
   (cond-> (merge {"AGENT_MAIL_DIR" (str *store*) "AGENT_MAIL_NO_NOTIFY" "1"} no-session (sandbox-env) agent-shell env)
     who (assoc "AGENT_MAIL_AS" who)))
@@ -51,7 +57,7 @@
   "Starts agent-mail as `who` (nil = detect from cwd) in `dir` without waiting;
    deref the result for {:exit :out :err}."
   [{:keys [dir in] :as o} & args]
-  (apply p/process (cond-> {:out :string :err :string :dir (or dir (str *store*)) :extra-env (env-for o)}
+  (apply p/process (cond-> {:out :string :err :string :dir (or dir (str *store*)) :env (merge (clean-env) (env-for o))}
                      ;; :open leaves stdin a pipe nobody writes to or closes, as an
                      ;; agent's shell does; anything else is the whole of stdin.
                      (not= in :open) (assoc :in (or in "")))
@@ -71,7 +77,7 @@
 (defn thread-json [id] (json/parse-string (out {} "read" id "--json") true))
 (defn list-json [& args] (json/parse-string (apply out {} "list" "--json" args) true))
 (defn store-git [& args]
-  (str/trim (:out (apply p/shell {:out :string :err :string :continue true :dir (str *store*)} "git" args))))
+  (str/trim (:out (apply p/shell {:out :string :err :string :continue true :dir (str *store*) :env (clean-env)} "git" args))))
 (defn commits [] (parse-long (store-git "rev-list" "--count" "HEAD")))
 (defn script!
   "An executable shell script in `dir` running `body` with the file as $1."
@@ -81,7 +87,7 @@
     (fs/set-posix-file-permissions f "rwxr-xr-x")
     f))
 (defn git-in [dir & args]
-  (apply p/shell {:out :string :err :string :dir dir} "git" "-c" "user.name=test" "-c" "user.email=test@example.com" args))
+  (apply p/shell {:out :string :err :string :dir dir :env (clean-env)} "git" "-c" "user.name=test" "-c" "user.email=test@example.com" args))
 
 (defmacro with-bare-store
   "Runs `body` with *store* a new, empty store in a temporary folder: no
@@ -2640,6 +2646,26 @@
       (is (= 3 (count (str/split-lines (store-git "ls-files" (str "threads/" id "/msgs")))))
           "every message file is tracked")
       (is (not (fs/exists? (fs/path *store* ".lock"))) "the lock is released"))))
+
+(deftest git-redirects-from-a-hook-are-ignored
+  ;; Run from a git hook or `git rebase --exec`, agent-mail inherits GIT_DIR
+  ;; and its kin: the store's commits must still go to the store, and the
+  ;; caller's folder is still the folder.
+  (with-store
+    (with-dir [d]
+      (let [decoy (str (fs/path d "decoy"))
+            plain (str (fs/create-dirs (fs/path d "plain")))
+            hook-env {"GIT_DIR" (str (fs/path decoy ".git"))}
+            decoy-head #(str/trim (:out (git-in decoy "rev-parse" "HEAD")))]
+        (git-in d "init" "-q" decoy)
+        (git-in decoy "commit" "-q" "--allow-empty" "-m" "decoy")
+        (let [head (decoy-head)
+              id (out {:who "a" :env hook-env} "@b" "From a hook")]
+          (is (= "📨 a → b: From a hook" (store-git "log" "-1" "--format=%s")) "the store has the commit")
+          (is (= id (:id (thread-json id))))
+          (is (= head (decoy-head)) "the hook's repo has nothing new")
+          (is (= "false" (str/trim (:out (git-in decoy "config" "--get" "core.bare")))) "nor a changed config"))
+        (is (= "plain" (out {:dir plain :env hook-env} "whoami")) "the folder is the caller's, not the hook's repo")))))
 
 (deftest concurrent-sends
   (with-store

@@ -35,8 +35,20 @@
   [& msg]
   (throw (apply core/usage-error msg)))
 
+(def git-redirects
+  "The variables that point git at another repository than the folder it
+   runs in. Git exports them to hooks and to `git rebase --exec`, so a
+   command run from one would otherwise commit the store's mail there."
+  #{"GIT_DIR" "GIT_WORK_TREE" "GIT_INDEX_FILE" "GIT_COMMON_DIR" "GIT_OBJECT_DIRECTORY"
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES" "GIT_NAMESPACE" "GIT_PREFIX"})
+
+(defn git-env
+  "This process's environment without git-redirects."
+  []
+  (into {} (remove (comp git-redirects key)) (System/getenv)))
+
 (defn git [& args]
-  (apply p/shell {:dir (str store) :out :string :err :string :continue true} "git" args))
+  (apply p/shell {:dir (str store) :env (git-env) :out :string :err :string :continue true} "git" args))
 
 (defn- lock-age-ms []
   (try (- (System/currentTimeMillis) (.toMillis (fs/last-modified-time lock-dir)))
@@ -562,7 +574,7 @@
    worktree and of the main worktree (a linked worktree's main is the
    parent of the common git dir; a submodule is its own); nil outside git."
   [dir]
-  (let [r (try (p/shell {:dir (str dir) :out :string :err :string :continue true}
+  (let [r (try (p/shell {:dir (str dir) :env (git-env) :out :string :err :string :continue true}
                         "git" "rev-parse" "--path-format=absolute" "--show-toplevel" "--git-dir" "--git-common-dir")
                (catch Exception _ nil))]
     (when (and r (zero? (:exit r)))

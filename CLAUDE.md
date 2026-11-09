@@ -45,7 +45,9 @@ tool, sent by mail from other repos, are this repo's to answer.
   `AGENT_MAIL_WEZTERM`, `AGENT_MAIL_CLAUDE` and `CLAUDE_CONFIG_DIR` at fakes,
   so a test run inside Claude Code or WezTerm can't post into a real session,
   start or stop a real one, or retitle a real tab. Never run the real
-  `claude` from a test.
+  `claude` from a test. They drop `GIT_DIR` and the other variables that
+  point git elsewhere, which git exports to hooks and to `git rebase
+  --exec`: with them, the tests' git commands commit into this repo.
 - **Mac app testing:** use a scratch store, and don't send mail from the
   installed app.
 - **Keep docs in step.** A change agents rely on (a command, a flag, an output
