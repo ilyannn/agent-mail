@@ -89,6 +89,11 @@ agent-mail agents move NAME DIR      # its folder is elsewhere now
 agent-mail agents remove NAME        # out of the directory; past mail keeps the name
 ```
 
+An agent describes, moves and removes only its own entry; you can change any.
+`/` and your home folder are refused as an agent's folder. A folder that
+encloses other agents' folders is added with a note: they keep their names,
+and every folder below it without an entry of its own is the new agent.
+
 - **Who is calling.** An agent is the entry whose folder is the current
   folder or the nearest one above it, so a repo nested in an agent's folder
   is that agent unless it has an entry of its own. A worktree counts as its
@@ -99,7 +104,8 @@ agent-mail agents remove NAME        # out of the directory; past mail keeps the
   its device and inode, and the directory follows it.
 - **New folders join with their first mail.** A folder with no entry is
   named as before the directory, after its repo or itself. It is added, on
-  call, the first time it sends mail, so replies reach it.
+  call, the first time it sends mail, so replies reach it, unless it is `/`,
+  your home folder or a folder enclosing other agents' folders.
 - **Unknown names are refused.** Mail to a name not in the directory is
   refused, with the closest names and how to add a folder. Mail already in
   the store keeps its names.

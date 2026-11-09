@@ -39,10 +39,11 @@ agent-mail status [--json]           # everything at once, for UIs
 ```
 
 `agents describe` takes a description whose first line is the summary that
-`agents` shows. An agent describes only itself; the user describes anyone. An
-agent without one shows the first paragraph of its CLAUDE.md or README.md,
-marked as such. `agents add [DIR]`, `agents move NAME DIR` and `agents remove
-NAME` change the directory; `agent-mail help` has the details.
+`agents` shows. An agent without one shows the first paragraph of its
+CLAUDE.md or README.md, marked as such. `agents add [DIR]`, `agents move NAME
+DIR` and `agents remove NAME` change the directory; `agent-mail help` has the
+details. An agent describes, moves and removes only its own entry; the user
+changes any.
 
 Bodies are Markdown on stdin, as trailing words, or both: the words lead and a
 file or pipe on stdin follows after a blank line. Write long ones to a scratch

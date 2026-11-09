@@ -350,8 +350,29 @@
            [(if sub? 0 1) d n])
          sort (take 3) (mapv peek))))
 
-(defn- or-list [xs]
-  (if (< (count xs) 2) (str/join xs) (str (str/join ", " (butlast xs)) " or " (last xs))))
+(defn word-list
+  "Names in a sentence: `a`, `a or b`, `a, b or c` (with `word` \"or\")."
+  [xs word]
+  (if (< (count xs) 2) (str/join xs) (str (str/join ", " (butlast xs)) " " word " " (last xs))))
+
+(defn- or-list [xs] (word-list xs "or"))
+
+(defn broad-folder?
+  "Whether `folder` is too broad to be an agent's: `/`, or the home folder
+   `home`. Every folder below an agent's that has no entry of its own is
+   that agent."
+  [folder home]
+  (boolean (or (empty? (path-segments folder)) (same-path? folder home))))
+
+(defn enclosed-agents
+  "The names of the `entries` other than `nm` whose folders lie below
+   `folder`, sorted: they keep their names when `folder` becomes `nm`'s."
+  [entries folder nm]
+  (let [f (path-segments folder)]
+    (vec (sort (for [e entries
+                     :let [s (path-segments (:dir e))]
+                     :when (and (:dir e) (not= nm (:name e)) (> (count s) (count f)) (below-or-at? s f))]
+                 (:name e))))))
 
 (defn unknown-agent
   "Why `nm` is refused as a recipient or an agent: it is not in the

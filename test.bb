@@ -957,6 +957,18 @@
       (is (trusted? "/t/repo/own") "a repo with its own")
       (is (not (trusted? "/t/plain/nested/x")))
       (is (not (trusted? "/u")))))
+  (testing "folders too broad for an agent, and the agents a folder encloses"
+    (is (core/broad-folder? "/" "/h/me"))
+    (is (core/broad-folder? "/h/me/" "/h/me"))
+    (is (not (core/broad-folder? "/h/me/code" "/h/me")))
+    (is (not (core/broad-folder? "/h" "/h/me")) "a folder above home is not refused outright")
+    (let [es [{:name "a" :dir "/x/app"} {:name "b" :dir "/x/app/docs"} {:name "c" :dir "/x/app-old"} {:name "self" :dir "/x/new"}
+              {:name "d" :dir "/x"} {:name "e"}]]
+      (is (= ["a" "b" "c"] (core/enclosed-agents es "/x" "self")) "below it, not itself nor the folder")
+      (is (= ["b"] (core/enclosed-agents es "/x/app" "a")) "segment by segment: not app-old")
+      (is (= [] (core/enclosed-agents es "/x/app/docs" "b"))))
+    (is (= "a, b and c" (core/word-list ["a" "b" "c"] "and")))
+    (is (= "a" (core/word-list ["a"] "and"))))
   (testing "a linked worktree's folders count as the main worktree's"
     (is (= "/x/app/src" (core/worktree-path "/x/app/.claude/worktrees/w/src" "/x/app/.claude/worktrees/w" "/x/app")))
     (is (= "/x/app" (core/worktree-path "/x/app-wt" "/x/app-wt" "/x/app")))
@@ -1825,7 +1837,7 @@
         (spit (str (serve-file "state.edn"))
               (pr-str {:pid 1 :heartbeat "2020-01-01T00:00:00.000Z" :interval 5
                        :repos {"infra" {:pane 42 :failures 3 :until 99999999999999 :reason "old"}}}))
-        (out {} "oncall" "add" "infra" infra)
+        (out {:env user-shell} "oncall" "add" "infra" infra)
         (try
           (testing "an older serve's memory (its tabs) is dropped; nothing waits, so Claude Code is not asked"
             (serve)
@@ -2012,7 +2024,7 @@
               (is (= [] (calls)) "backing off: nothing tried")))
           (testing "a listener on duty (an older wait) keeps its repo's threads"
             (let [docs (str (fs/create-dirs (fs/path d "docs")))]
-              (out {} "oncall" "add" "docs" docs)
+              (out {:env user-shell} "oncall" "add" "docs" docs)
               (spit (str (fs/path *store* "duty" "docs__l.edn"))
                     (pr-str {:repo "docs" :session "l" :state "waiting" :heartbeat (core/now-utc) :pid 1}))
               (out {:who "website"} "@docs" "Docs please")
@@ -2084,7 +2096,7 @@
             (is (= (real repo) (real (:dir e))))))
         (testing "add NAME DIR: docs, in the directory off call elsewhere, moves there and is on call"
           (let [dd (str (fs/create-dirs (fs/path d "docs-folder")))]
-            (is (zero? (:exit (am {} "oncall" "add" "docs" dd))))
+            (is (zero? (:exit (am {:env user-shell} "oncall" "add" "docs" dd))))
             (is (= [["docs" (real dd)] ["repo-x" "on call"]] (map (juxt :repo #(if (= "docs" (:repo %)) (:dir %) (:text %))) (listed))))
             (is (= "agent-mail: /x is already in the agent directory, as docs"
                    (str/replace (err {} "oncall" "add" "web" dd) (real dd) "/x"))
@@ -2101,6 +2113,12 @@
           (is (= "agent-mail: this folder's name makes no address (/); give NAME DIR" (err {:dir "/"} "oncall" "add")))
           (is (= "agent-mail: this folder's name makes no address (/); give NAME" (err {:dir "/"} "oncall" "remove")))
           (is (= "agent-mail: unknown oncall command list (add or remove)" (err {} "oncall" "list"))))
+        (testing "add NAME DIR that moves an entry: only the agent itself or the user"
+          (let [hub-dir (str (fs/create-dirs (fs/path d "hub-folder")))]
+            (is (= "agent-mail: an agent moves only itself: you are infra, not hub (the user may move any agent)"
+                   (err {:who "infra"} "oncall" "add" "hub" hub-dir)))
+            (is (str/starts-with? (out {:who "hub"} "oncall" "add" "hub" hub-dir) (str "hub is on call (" (real hub-dir) ")")))
+            (out {:who "hub"} "oncall" "remove" "hub")))
         (testing "the list: repo, directory, state; then whether serve runs"
           (let [lines (str/split-lines (out {} "oncall"))]
             (is (= 3 (count lines)))
@@ -2149,7 +2167,7 @@
                      (spit (str (serve-file "pid")) (str pid "\n"))
                      (spit (str (serve-file "state.edn")) (pr-str {:pid pid :heartbeat (core/now-utc) :interval 5 :agents agents})))
             note #(str/trim (err {:who "website"} "@infra" %))]
-        (out {} "oncall" "add" "infra" d)
+        (out {:env user-shell} "oncall" "add" "infra" d)
         (testing "serve alive, infra on call, nobody on duty: serve hands it to a session"
           (serve! me {})
           (is (= "→ infra: on call; agent-mail serve hands it to a Claude Code session shortly (the one that wrote in the thread for infra, or a new one); nothing more to do"
@@ -2299,19 +2317,29 @@
           (is (str/starts-with? (refused {:env user-shell :in "x"} "agents" "describe" "nobody") "agent-mail: no agent named nobody")))
         (testing "move: the agent's folder is elsewhere now"
           (let [new (mk "documentation")]
-            (is (str/starts-with? (text {} "agents" "move" "site" new) (str "site is now at " (real new))))
+            (is (str/starts-with? (text {:env user-shell} "agents" "move" "site" new) (str "site is now at " (real new))))
             (is (= (real new) (:dir (agent "site"))))
-            (is (= (str "agent-mail: " (real infra) " is already in the agent directory, as infra") (refused {} "agents" "move" "site" infra)))
+            (is (= (str "agent-mail: " (real infra) " is already in the agent directory, as infra") (refused {:env user-shell} "agents" "move" "site" infra)))
             (is (= "agent-mail: agents move takes NAME and DIR" (refused {} "agents" "move" "site")))))
+        (testing "move and remove: an agent changes only its own entry; the user any"
+          (is (= "agent-mail: an agent moves only itself: you are infra, not site (the user may move any agent)"
+                 (refused {:dir infra} "agents" "move" "site" (mk "elsewhere"))))
+          (is (= "agent-mail: an agent removes only itself: you are infra, not site (the user may remove any agent)"
+                 (refused {:dir infra} "agents" "remove" "site")))
+          (let [own (mk "own") own2 (mk "own2")]
+            (text {:env user-shell} "agents" "add" own)
+            (is (str/starts-with? (text {:dir own} "agents" "move" "own" own2) (str "own is now at " (real own2))) "its own entry")
+            (is (= "own is no longer in the agent directory; its past mail keeps the name" (text {:dir own2} "agents" "remove" "own"))))
+          (is (= ["infra" "site" "web-app"] (map :name (listed)))))
         (testing "remove: out of the directory; its past mail keeps the name, new mail to it is refused"
           (let [id (text {:env user-shell} "@web-app" "Before it goes")]
-            (is (= "web-app is no longer in the agent directory; its past mail keeps the name" (text {} "agents" "remove" "web-app")))
+            (is (= "web-app is no longer in the agent directory; its past mail keeps the name" (text {:env user-shell} "agents" "remove" "web-app")))
             (is (= ["infra" "site"] (map :name (listed))))
             (is (= "📇 agents: remove web-app" (store-git "log" "-1" "--format=%s")))
             (is (= "web-app" (:to (first (:msgs (thread-json id))))))
             (is (= id (text {:env user-shell} "reply" id "One more thing.")) "a reply to past mail still goes to it")
             (is (str/starts-with? (refused {:env user-shell} "@web-app" "After") "agent-mail: no agent named web-app in the directory"))
-            (is (str/starts-with? (refused {} "agents" "remove" "web-app") "agent-mail: no agent named web-app"))))
+            (is (str/starts-with? (refused {:env user-shell} "agents" "remove" "web-app") "agent-mail: no agent named web-app"))))
         (testing "on call is the directory's field"
           (is (= ["infra" "site"] (map :repo (json/parse-string (text {} "oncall" "--json") true)))))
         (testing "trust reaches a plain folder below a trusted one, not a git repo there"
@@ -2319,7 +2347,24 @@
             (git-in repo "init" "-q")
             (is (not (str/includes? (text {} "agents" "add" plain) "hasn't trusted")))
             (is (str/includes? (text {} "agents" "add" repo) (str "Claude Code hasn't trusted " (real repo))))
-            (is (= [true false] (map (comp :trusted agent) ["plain" "repo"])))))))))
+            (is (= [true false] (map (comp :trusted agent) ["plain" "repo"])))))
+        (testing "/ and the home folder are refused; a folder enclosing others' is added, with a note"
+          (is (= "agent-mail: refusing / for an agent: / is too broad, as every folder below it without an entry of its own would be that agent"
+                 (refused {:env user-shell} "agents" "add" "/" "--name" "root")))
+          (is (str/starts-with? (refused {:env user-shell} "agents" "add" (str (fs/home)) "--name" "home")
+                                (str "agent-mail: refusing " (real (fs/home)) " for an agent: the home folder is too broad")))
+          (is (str/starts-with? (refused {:env user-shell} "agents" "move" "infra" "/") "agent-mail: refusing / for an agent"))
+          (is (str/starts-with? (refused {:env user-shell} "oncall" "add" "infra" "/") "agent-mail: refusing / for an agent"))
+          (is (= ["infra" "plain" "repo" "site"] (map :name (listed))) "nothing added or moved")
+          (let [r (run {:env user-shell} "agents" "add" d "--name" "outer")]
+            (is (zero? (:exit r)) (:err r))
+            (is (= (str "agent-mail: " (real d) " encloses the folders of infra, plain, repo and site; they keep their names,"
+                        " and every folder below it without an entry of its own is now outer's")
+                   (str/trim (:err r)))))
+          (is (= "infra" (first (str/split-lines (:out (am {:dir infra} "whoami"))))) "an enclosed agent keeps its folder")
+          (let [r (run {:env user-shell} "agents" "move" "outer" (mk "parent"))]
+            (is (zero? (:exit r)) (:err r))
+            (is (str/includes? (:err r) (str (real (fs/path d "parent")) " encloses the folders of plain and repo;")))))))))
 
 (deftest identity-from-the-directory
   (with-bare-store
@@ -2422,7 +2467,13 @@
                 (is (zero? (:exit r)))
                 (is (str/includes? (:err r) (str "agent-mail: the agent directory has fresh for " (real fresh) ", not " (real twin)
                                                  "; `agent-mail agents add --name NAME` gives this folder a name of its own")))
-                (is (= (real fresh) (:dir (agent "fresh"))))))
+                (is (= (real fresh) (:dir (agent "fresh")))))
+              (let [r (am {:dir d} "@user" "From above them all")
+                    above (first (str/split-lines (:out (am {:dir d} "whoami"))))]
+                (is (zero? (:exit r)) (:err r))
+                (is (str/includes? (:err r) (str "agent-mail: did not add " (real d) " to the agent directory: it encloses the folders of "))
+                    "nor a folder enclosing other agents' folders")
+                (is (nil? (agent above)))))
             (testing "mail to a name the directory doesn't have is refused, with the closest names"
               (let [before (commits)
                     r (am {:dir fresh} "@tool" "x")]

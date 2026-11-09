@@ -502,6 +502,31 @@
   [d folder but]
   (some #(when (and (not= but (:name %)) (core/same-path? (:dir %) folder)) %) (vals d)))
 
+(defn home-dir "The user's home folder, its real path." [] (real-dir (fs/home)))
+
+(defn refuse-broad!
+  "Refuses `folder` as an agent's when it is `/` or the home folder (see
+   core/broad-folder?)."
+  [folder]
+  (when (core/broad-folder? folder (home-dir))
+    (fail (str "refusing " folder " for an agent: " (if (core/same-path? folder "/") "/" "the home folder")
+               " is too broad, as every folder below it without an entry of its own would be that agent"))))
+
+(defn enclosure-note
+  "The stderr line for `folder`, now agent `nm`'s, when it encloses folders
+   other entries of `d` have; nil when it encloses none."
+  [d folder nm]
+  (when-let [ns (seq (core/enclosed-agents (vals d) folder nm))]
+    (str folder " encloses the folders of " (core/word-list ns "and") "; they keep their names,"
+         " and every folder below it without an entry of its own is now " nm "'s")))
+
+(defn own-or-user!
+  "Refuses a change by agent `me` to another agent's entry: an agent
+   `verbs` only itself; `user` may `verb` any agent."
+  [me [verbs verb] nm]
+  (when-not (or (= "user" me) (= nm me))
+    (fail (str "an agent " verbs " only itself: you are " me ", not " nm " (the user may " verb " any agent)"))))
+
 (defn oncall-agents
   "The agents serve delivers for: those on call in the directory, kind
    claude, name -> {:dir :described}."
@@ -698,24 +723,33 @@
   "Puts the folder of `w` (whoami's), an agent the directory doesn't know
    yet, into the directory, on call, so mail to it can be delivered: one
    line on stderr says so unless `quiet`. A name the directory has for
-   another folder is left as it is, and stderr says so. Returns the entry
-   added, if any."
+   another folder is left as it is, and so is a folder too broad to add
+   unasked: `/`, the home folder, or one enclosing other agents' folders.
+   stderr says why. Returns the entry added, if any."
   [{:keys [name how folder]} quiet]
   (when (and (= :derived how) folder (core/agent-name? name) (fs/directory? folder))
-    (let [taken (atom nil)
+    (let [why (atom nil)
           added (get (directory! (fn [d]
-                                   (if-let [o (or (d name) (entry-at d folder nil))]
-                                     (do (reset! taken o) nil)
-                                     [(str "📇 agents: add " name ", on call, on its first mail")
-                                      {name (new-entry name folder true nil)}])))
+                                   (let [o (or (d name) (entry-at d folder nil))
+                                         inside (core/enclosed-agents (vals d) folder name)
+                                         no (cond
+                                              o (str "the agent directory has " (:name o) " for " (:dir o) ", not " folder
+                                                     "; `agent-mail agents add --name NAME` gives this folder a name of its own")
+                                              (core/broad-folder? folder (home-dir))
+                                              (str "did not add " folder " to the agent directory: it is too broad")
+                                              (seq inside)
+                                              (str "did not add " folder " to the agent directory: it encloses the folders of "
+                                                   (core/word-list inside "and") "; `agent-mail agents add` adds it if that is meant"))]
+                                     (if no
+                                       (do (reset! why no) nil)
+                                       [(str "📇 agents: add " name ", on call, on its first mail")
+                                        {name (new-entry name folder true nil)}]))))
                      name)]
       (when-not quiet
         (if added
           (note "added " name " to the agent directory, on call, for " folder
                 ", so replies reach it; `agent-mail agents describe` says what it owns")
-          (when-let [o @taken]
-            (note "the agent directory has " (:name o) " for " (:dir o) ", not " folder
-                  "; `agent-mail agents add --name NAME` gives this folder a name of its own"))))
+          (when-let [w @why] (note w))))
       added)))
 
 (defn known!
@@ -1416,20 +1450,30 @@
 
 (defn put-agent!
   "Puts agent `nm` into the directory at folder `folder`, on call or not: a
-   new entry, or `nm`'s own moved there. Refuses a folder another agent
-   has. Returns the entry."
-  [nm folder oncall]
-  (get (directory! (fn [d]
-                     (when-let [o (entry-at d folder nm)]
-                       (fail (str folder " is already in the agent directory, as " (:name o))))
-                     (let [e (d nm)
-                           moved? (and e (not (core/same-path? (:dir e) folder)))]
-                       [(str "📇 agents: " (if e nm (str "add " nm)) (if oncall ", on call" ", off call")
-                             (when moved? (str ", at " folder)))
-                        {nm (if e
-                              (assoc e :dir (str folder) :file-id (file-id folder) :oncall oncall)
-                              (new-entry nm folder oncall nil))}])))
-       nm))
+   new entry, or `nm`'s own moved there, which only `nm` itself or the user
+   may do (the caller, from `opts`). Refuses a folder another agent has and
+   one too broad (refuse-broad!); says on stderr which agents' folders the
+   folder encloses. Returns the entry."
+  [opts nm folder oncall]
+  (refuse-broad! folder)
+  (when-let [e ((directory) nm)]
+    (when-not (core/same-path? (:dir e) folder)
+      (own-or-user! (caller (assoc opts :quiet true)) ["moves" "move"] nm)))
+  (let [said (atom nil)
+        e (get (directory! (fn [d]
+                             (when-let [o (entry-at d folder nm)]
+                               (fail (str folder " is already in the agent directory, as " (:name o))))
+                             (let [e (d nm)
+                                   moved? (and e (not (core/same-path? (:dir e) folder)))]
+                               (when (or moved? (not e)) (reset! said (enclosure-note d folder nm)))
+                               [(str "📇 agents: " (if e nm (str "add " nm)) (if oncall ", on call" ", off call")
+                                     (when moved? (str ", at " folder)))
+                                {nm (if e
+                                      (assoc e :dir (str folder) :file-id (file-id folder) :oncall oncall)
+                                      (new-entry nm folder oncall nil))}])))
+               nm)]
+    (when-let [s @said] (note s))
+    e))
 
 (defn set-oncall!
   "Sets whether agent `nm` is on call: [its entry before, after]. Refuses a
@@ -1473,10 +1517,11 @@
 (defn cmd-oncall
   "Lists the agents on call (--json: oncall-view's entries). `add` and
    `remove` set the directory's oncall field: `add [NAME [DIR]]` puts NAME
-   on call, at DIR when given (adding it, or moving it there); no
-   arguments, the folder it runs in (its entry, else a new one, see
-   here-oncall). `remove [NAME]` takes one off and keeps it off, since wait
-   would otherwise put it back."
+   on call, at DIR when given (adding it, or moving it there, which only
+   NAME itself or the user may do, see put-agent!); no arguments, the
+   folder it runs in (its entry, else a new one, see here-oncall). `remove
+   [NAME]` takes one off and keeps it off, since wait would otherwise put it
+   back."
   [opts [sub & args]]
   (case sub
     "add" (let [[nm dir] args
@@ -1484,11 +1529,11 @@
                     dir (let [d (fs/normalize (fs/absolutize dir))]
                           (when-not (core/agent-name? nm) (fail "bad name:" (pr-str nm)))
                           (when-not (fs/directory? d) (fail "no such directory:" (str d)))
-                          (put-agent! nm (:folder (folder-place d)) true))
+                          (put-agent! opts nm (:folder (folder-place d)) true))
                     nm (second (set-oncall! nm true))
                     :else (if-let [e (folder-agent)]
                             (second (set-oncall! (:name e) true))
-                            (let [[nm dir] (here-oncall "add" "NAME DIR")] (put-agent! nm dir true))))]
+                            (let [[nm dir] (here-oncall "add" "NAME DIR")] (put-agent! opts nm dir true))))]
             (println (str (:name e) " is on call (" (:dir e) ")"))
             (oncall-said e))
     "remove" (let [nm (first args)
@@ -1496,7 +1541,7 @@
                                         :else (if-let [e (folder-agent)]
                                                 (set-oncall! (:name e) false)
                                                 (let [[nm dir] (here-oncall "remove" "NAME")]
-                                                  [nil (put-agent! nm dir false)])))]
+                                                  [nil (put-agent! opts nm dir false)])))]
                (println (if (:oncall before)
                           (str (:name after) " is no longer on call; wait won't put it back (`oncall add` does)")
                           (str (:name after) " was not on call; wait won't put it on call either"))))
@@ -1540,7 +1585,9 @@
   "`agents add [DIR] [--name NAME] [description…]`: DIR when the first
    argument names a folder (an existing directory, or a path with a `/`),
    else the caller's repo at its main worktree, else the current folder.
-   NAME defaults to the folder's (core/name-from-dir). On call."
+   NAME defaults to the folder's (core/name-from-dir). On call. Refuses `/`
+   and the home folder (refuse-broad!), and says on stderr which agents'
+   folders the new one encloses."
   [opts args]
   (let [a (first args)
         dir? (and a (or (str/includes? a "/") (#{"." ".."} a) (fs/directory? a)))
@@ -1554,15 +1601,19 @@
                (fail (str "no name can be made from " folder "; give --name NAME")))
         _ (when-not (core/agent-name? nm)
             (fail "bad name:" (pr-str nm) "(letters, digits, `.`, `_` and `-`; not `user`)"))
+        _ (refuse-broad! folder)
         desc (optional-text words)
+        said (atom nil)
         e (get (directory! (fn [d]
                              (when-let [o (entry-at d folder nil)]
                                (fail (str folder " is already in the agent directory, as " (:name o))))
                              (when-let [o (d nm)]
                                (fail (str nm " is already in the agent directory, for " (:dir o)
                                           "; `agent-mail agents move " nm " DIR` moves it")))
+                             (reset! said (enclosure-note d folder nm))
                              [(str "📇 agents: add " nm) {nm (new-entry nm folder true desc)}]))
                nm)]
+    (when-let [s @said] (note s))
     (println (str nm " is in the agent directory, on call (" folder ")"))
     (when-not desc
       (println (str "Say what it owns and what to ask it for: `agent-mail agents describe " nm " < about.md`")))
@@ -1574,8 +1625,7 @@
   [opts [nm & words]]
   (let [me (caller opts)
         nm (or nm (if (= "user" me) (fail "agents describe takes the agent's NAME") me))
-        _ (when-not (or (= "user" me) (= nm me))
-            (fail (str "an agent describes only itself: you are " me ", not " nm " (the user may describe any agent)")))
+        _ (own-or-user! me ["describes" "describe"] nm)
         desc (or (optional-text words)
                  (when (System/console)
                    (note "reading the description from stdin, end with Ctrl-D")
@@ -1588,7 +1638,10 @@
 
 (defn cmd-agents
   "The agent directory: list it (--json for UIs), add a folder, describe,
-   move or remove an agent. Past mail keeps a removed agent's name."
+   move or remove an agent. An agent describes, moves and removes only its
+   own entry; the user any. A move refuses `/` and the home folder and says
+   which agents' folders the new one encloses, as add does. Past mail keeps
+   a removed agent's name."
   [opts [sub & args]]
   (case sub
     nil (agents-list opts)
@@ -1596,19 +1649,25 @@
     "describe" (agents-describe opts args)
     "move" (let [[nm dir] args
                  _ (when-not (and nm dir) (fail "agents move takes NAME and DIR"))
+                 _ (own-or-user! (caller opts) ["moves" "move"] nm)
                  d (fs/normalize (fs/absolutize dir))
                  _ (when-not (fs/directory? d) (fail "no such directory:" (str d)))
                  folder (:folder (folder-place d))
+                 _ (refuse-broad! folder)
+                 said (atom nil)
                  e (get (directory! (fn [dm]
                                       (let [e (or (dm nm) (fail (core/unknown-agent nm (keys dm))))]
                                         (when-let [o (entry-at dm folder nm)]
                                           (fail (str folder " is already in the agent directory, as " (:name o))))
+                                        (reset! said (enclosure-note dm folder nm))
                                         [(str "📇 agents: move " nm " to " folder)
                                          {nm (assoc e :dir folder :file-id (file-id folder))}])))
                         nm)]
+             (when-let [s @said] (note s))
              (println (str nm " is now at " folder))
              (when-let [l (trust-line e (trust-of))] (println l)))
-    "remove" (let [nm (or (first args) (fail "agents remove takes NAME"))]
+    "remove" (let [nm (or (first args) (fail "agents remove takes NAME"))
+                   _ (own-or-user! (caller opts) ["removes" "remove"] nm)]
                (directory! (fn [d]
                              (when-not (d nm) (fail (core/unknown-agent nm (keys d))))
                              [(str "📇 agents: remove " nm) {nm nil}]))
@@ -1859,13 +1918,19 @@
                                               add a folder, on call: by default this repo at
                                               its main worktree, else this folder; NAME
                                               defaults to the folder's name (letters, digits,
-                                              `.`, `_` and `-`)
+                                              `.`, `_` and `-`). Not `/` or your home folder;
+                                              a folder enclosing other agents' is added, with
+                                              a note: folders below it without an entry of
+                                              their own are now this agent
   agent-mail agents describe [NAME] [< about.md]
                                               what the agent owns and what to ask it for, the
                                               first line its summary. An agent describes only
                                               itself; the user describes anyone
-  agent-mail agents move NAME DIR             the agent's folder is now DIR
-  agent-mail agents remove NAME               out of the directory; past mail keeps the name
+  agent-mail agents move NAME DIR             the agent's folder is now DIR (as for add)
+  agent-mail agents remove NAME               out of the directory; past mail keeps the name.
+                                              An agent moves or removes only itself; the user
+                                              any agent (so for `oncall add NAME DIR` moving
+                                              one)
   agent-mail oncall [--json]                  agents on call: serve hands each of their threads
                                               to a Claude Code session
   agent-mail oncall add [NAME [DIR]]          put an agent on call: NAME (at DIR: added, or
