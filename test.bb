@@ -506,10 +506,13 @@
             "and nothing else for infra this round"))
       (let [m (mem :sessions {"bbbb2222" (ours :state "starting")} :agents {"infra" {:failures 2 :until 0 :reason "x"}}
                    :threads {"t1" {:delivered "000.md"}})]
-        (is (= [[:observe "bbbb2222" {:state "live" :status "idle" :kind "background" :name "📫 infra #1" :session-id "bbbb2222-full"}]
-                [:reset "infra"]]
+        (is (= [[:observe "bbbb2222" {:state "live" :status "idle" :kind "background" :name "📫 infra #1" :session-id "bbbb2222-full"
+                                      :cwd "/x/infra"}]
+                [:reset "infra"]
+                [:land "infra" {:dir "/x/infra" :sessions [{:id "bbbb2222" :name "📫 infra #1" :cwd "/x/infra" :handed-on false}]
+                                :working ["📫 infra #1"]}]]
                (acts {:memory m :live [(live-s "bbbb2222" :status "idle" :name "📫 infra #1" :status-updated-at (- now 1000))]}))
-            "it showed up: the back-off is over")))
+            "it showed up: the back-off is over; up already idle, it may have pushed")))
     (testing "a post into an idle session that stays idle 30 s was held: another session takes the thread"
       (let [check {:session "aaaa1111" :file "002.md" :at (- now 30000) :status-updated-at 5}
             m (mem :threads (assoc-in (delivered "002.md") ["t1" :check] check))
@@ -608,9 +611,10 @@
         (is (= {:live true :known true} (core/serve-wants (merge base {:threads [closed]}))))))
     (testing "bookkeeping: closed threads forgotten, sessions seen ending, dropped once their thread is closed"
       (is (= [[:forget "t1"]] (acts {:threads [] :memory (mem :threads (delivered "000.md"))})))
-      (let [m (mem :sessions {"bbbb2222" (ours)})]
-        (is (= [[:observe "bbbb2222" {:state "stopped"}]] (acts {:threads [] :memory m :live [] :known nil})))
-        (is (= [[:observe "bbbb2222" {:state "gone"}]] (acts {:threads [] :memory m :live [] :known []}))
+      (let [m (mem :sessions {"bbbb2222" (ours)})
+            land [:land "infra" {:dir "/x/infra" :sessions [{:id "bbbb2222" :name "📫 infra #1" :cwd nil :handed-on true}] :working []}]]
+        (is (= [[:observe "bbbb2222" {:state "stopped"}] land] (acts {:threads [] :memory m :live [] :known nil})))
+        (is (= [[:observe "bbbb2222" {:state "gone"}] land] (acts {:threads [] :memory m :live [] :known []}))
             "not even `--all` lists it")
         (is (= [[:drop "bbbb2222"]] (acts {:threads [] :memory (assoc-in m [:sessions "bbbb2222" :state] "stopped") :live nil})))
         (is (= [] (acts {:threads [ask] :memory (-> m (assoc-in [:sessions "bbbb2222" :state] "stopped") (assoc :threads (delivered "000.md")))
@@ -638,7 +642,7 @@
         (is (= {:threads {"t1" {:agent "infra" :number 1 :delivered "002.md" :holder "aaaa1111"}}
                 :sessions {"aaaa1111" {:agent "infra" :thread "t1" :number 1 :ours false :session-id "aaaa1111-full"
                                        :name "s-aaaa1111" :kind "interactive" :state "live"}}
-                :agents {}}
+                :agents {} :land {}}
                (r (mem) [:posted "t1" "aaaa1111" info])))
         (is (= {:session "aaaa1111" :file "002.md" :at now :status-updated-at 5}
                (get-in (r (mem) [:posted "t1" "aaaa1111" (assoc info :idle true :status-updated-at 5)]) [:threads "t1" :check]))
@@ -691,8 +695,8 @@
               "an interactive session has someone at it, and `claude attach` does not open it")
           (is (= now (get-in (r w [:needs-input "k" {}]) [:sessions "k" :alerted])) "the user was told"))))
     (testing "serve-memory: an older serve's state (its tabs under :repos) is nothing remembered"
-      (is (= {:threads {} :sessions {} :agents {}} (core/serve-memory {:pid 1 :repos {"infra" {:pane 42}}})))
-      (is (= {:threads {} :sessions {} :agents {}} (core/serve-memory {:threads [1] :sessions "x"}))))
+      (is (= {:threads {} :sessions {} :agents {} :land {}} (core/serve-memory {:pid 1 :repos {"infra" {:pane 42}}})))
+      (is (= {:threads {} :sessions {} :agents {} :land {}} (core/serve-memory {:threads [1] :sessions "x"}))))
     (testing "oncall-view and thread-session: each agent's state and serve's sessions, in words"
       (let [v (fn [m & {:as more}] (first (core/oncall-view (merge {:now now :oncall {"infra" {:dir "/x/infra"}} :memory m :duty []} more))))
             later (+ now 60000)
@@ -734,6 +738,103 @@
                  (core/needs-input-note {:id "deadbeef" :name "📫 infra #1" :number 1 :since since
                                          :waiting-for "permission prompt" :needs "approve Read: /etc/hosts"}))
               "what serve's log and the user are told"))))))
+
+(deftest serve-landing
+  (testing "land-plan with an upstream: fast-forward when strictly behind, on a branch, clean, nobody working there"
+    (let [ok {:main? true :branch "main" :dirty? false :working [] :upstream "origin/main" :behind 2 :ahead 0}
+          plan core/land-plan]
+      (is (= {:ff "@{u}" :commits 2 :via "upstream"} (plan ok)))
+      (is (nil? (plan (assoc ok :behind 0))) "up to date: nothing to land")
+      (is (nil? (plan (assoc ok :behind nil))) "git could not tell")
+      (is (nil? (plan (assoc ok :main? false))) "not a repo's main worktree")
+      (is (nil? (plan (assoc ok :branch nil))) "a detached HEAD")
+      (is (= {:blocked "main checkout 2 behind origin/main: uncommitted changes"} (plan (assoc ok :dirty? true))))
+      (is (= {:blocked "main checkout 2 behind origin/main and 1 ahead: diverged"} (plan (assoc ok :ahead 1))))
+      (is (= {:blocked "main checkout 2 behind origin/main: \"infra-ab12\" works there"} (plan (assoc ok :working ["infra-ab12"]))))
+      (is (= {:blocked "main checkout 2 behind origin/main and 1 ahead: diverged, uncommitted changes, \"a\" and \"b\" work there"}
+             (plan (assoc ok :ahead 1 :dirty? true :working ["a" "b"])))
+          "every reason")
+      (is (= {:blocked "fetching origin/main failed: fatal: unable to access remote"}
+             (plan (assoc ok :fetch-error "fatal: unable to access remote" :behind 0))))
+      (is (nil? (plan (assoc ok :dirty? true :behind 0))) "dirty, but nothing to land: nothing to say")
+      (is (= {:ff "@{u}" :commits 2 :via "upstream"} (plan (assoc ok :candidate {:branch "worktree-w" :behind 5 :handed-on true})))
+          "with an upstream, a worktree branch does not count")))
+  (testing "land-plan without an upstream: the session's worktree branch, once it handed its thread on"
+    (let [c {:branch "worktree-w" :behind 2 :ahead 0 :handed-on true}
+          ok {:main? true :branch "main" :dirty? false :working [] :candidate c}
+          plan core/land-plan]
+      (is (= {:ff "refs/heads/worktree-w" :commits 2 :via "branch worktree-w"} (plan ok)))
+      (is (nil? (plan (assoc-in ok [:candidate :handed-on] false))) "its thread is still its agent's turn")
+      (is (nil? (plan (dissoc ok :candidate))) "no worktree of its own")
+      (is (nil? (plan (assoc-in ok [:candidate :behind] 0))) "nothing ahead of HEAD")
+      (is (nil? (plan (assoc ok :branch nil))) "a detached HEAD")
+      (is (= {:blocked "main checkout 2 behind worktree-w and 3 ahead: diverged"} (plan (assoc-in ok [:candidate :ahead] 3)))
+          "HEAD is not its ancestor")
+      (is (= {:blocked "main checkout 2 behind worktree-w: uncommitted changes"} (plan (assoc ok :dirty? true))))
+      (is (= {:blocked "main checkout 2 behind worktree-w: \"site-1\" works there"} (plan (assoc ok :working ["site-1"]))))))
+  (testing "worktrees: git's list parsed, the one a folder is in, and who works in the checkout itself"
+    (let [out (str "worktree /x/infra\nHEAD 1111\nbranch refs/heads/main\n\n"
+                   "worktree /x/infra/.claude/worktrees/w\nHEAD 2222\nbranch refs/heads/worktree-w\n\n"
+                   "worktree /x/infra-old\nHEAD 3333\ndetached\nprunable gitdir file points to non-existent location\n\n")
+          wts (core/parse-worktrees out)]
+      (is (= [{:path "/x/infra" :head "1111" :branch "main"}
+              {:path "/x/infra/.claude/worktrees/w" :head "2222" :branch "worktree-w"}
+              {:path "/x/infra-old" :head "3333" :branch nil}]
+             wts))
+      (is (= "worktree-w" (:branch (core/worktree-of wts "/x/infra/.claude/worktrees/w/src"))))
+      (is (nil? (core/worktree-of wts "/x/infra/src")) "the main worktree is no session's own")
+      (is (nil? (core/worktree-of wts "/x/infra-older")) "segment by segment")
+      (is (= [] (core/parse-worktrees nil))))
+    (is (= ["here" "deeper" "cccc3333"]
+           (core/working-in "/x/infra" [(live-s "aaaa1111" :name "here" :cwd "/x/infra")
+                                        (live-s "bbbb2222" :name "deeper" :cwd "/x/infra/src")
+                                        (live-s "cccc3333" :name "" :cwd "/x/infra/lib")
+                                        (live-s "dddd4444" :cwd "/x/infra/.claude/worktrees/w")
+                                        (live-s "eeee5555" :cwd "/x/infra-old")])))
+    (is (= "1 commit" (core/commits-phrase 1)))
+    (is (= "3 commits" (core/commits-phrase 3))))
+  (let [now t0
+        ask (th "t1" 1 [(msg 0 "web" "infra")])
+        answered (th "t1" 1 [(msg 0 "web" "infra") (msg 1 "infra" "web" :session "bbbb2222-full")])
+        wt "/x/infra/.claude/worktrees/w"
+        ours {:ours true :agent "infra" :thread "t1" :number 1 :name "📫 infra #1" :session-id "bbbb2222-full" :kind "background"
+              :state "live" :status "busy" :cwd wt :started-at (- now 60000)}
+        base {:now now :oncall {"infra" {:dir "/x/infra"}} :threads [answered] :memory (core/serve-memory {:sessions {"bbbb2222" ours}})
+              :on-duty #{} :known [] :grace-ms 120000 :check-ms 30000}
+        idle (live-s "bbbb2222" :status "idle" :status-updated-at (- now 1000) :cwd wt :name "📫 infra #1")
+        lands #(filterv (comp #{:land} first) (core/serve-actions (merge base %)))
+        land (fn [& {:as s}] [:land "infra" {:dir "/x/infra" :sessions [(merge {:id "bbbb2222" :name "📫 infra #1" :cwd wt :handed-on true} s)]
+                                             :working []}])]
+    (testing "serve asks for a landing when one of its sessions goes idle, ends or is stopped"
+      (is (= [(land)] (lands {:live [idle]})) "busy to idle, its thread handed back to web")
+      (is (= [(land)] (lands {:live [(assoc idle :status "shell")]})) "shell: its turn ended with a background task running")
+      (is (= [(land :handed-on false)] (lands {:threads [ask] :live [idle]})) "it holds a thread whose turn is infra's")
+      (is (= [] (lands {:live [(assoc idle :status "busy")]})) "still busy")
+      (is (= [] (lands {:live [idle] :memory (assoc-in (:memory base) [:sessions "bbbb2222" :status] "idle")})) "idle already")
+      (is (= [] (lands {:live [idle] :memory (assoc-in (:memory base) [:sessions "bbbb2222" :ours] false)})) "not serve's own")
+      (is (= [] (lands {:live [idle] :oncall {}})) "infra is not on call")
+      (is (= [(land)] (lands {:live []})) "ended: its folder is remembered")
+      (is (= [(land)]
+             (lands {:live [(assoc idle :status-updated-at (- now core/idle-stop-ms))]
+                     :memory (assoc-in (:memory base) [:sessions "bbbb2222" :status] "idle")}))
+          "stopped this round")
+      (let [all (core/serve-actions (merge base {:live [(assoc idle :status-updated-at (- now core/idle-stop-ms))]}))]
+        (is (= [:observe :stop :land] (mapv first all)) "after the stop"))
+      (is (= [[:land "infra" {:dir "/x/infra" :sessions [{:id "bbbb2222" :name "📫 infra #1" :cwd wt :handed-on true}]
+                              :working ["infra-ab12"]}]]
+             (lands {:live [idle (live-s "ab12cd34" :name "infra-ab12" :kind "interactive" :cwd "/x/infra")]}))
+          "with the sessions working in the main checkout"))
+    (testing "remember and show why a checkout stays behind"
+      (let [m (core/remember (:memory base) [:land-checked "infra" "main checkout 2 behind origin/main: uncommitted changes"] now)
+            v (first (core/oncall-view {:now now :oncall {"infra" {:dir "/x/infra"}} :memory m :duty []}))]
+        (is (= {"infra" {:blocked "main checkout 2 behind origin/main: uncommitted changes"}} (:land m)))
+        (is (= {} (:land (core/remember m [:land-checked "infra" nil] now))) "landed, or nothing to land: forgotten")
+        (is (= (:memory base) (core/remember (:memory base) [:land "infra" {}] now)) "a landing ends as :land-checked")
+        (is (= "main checkout 2 behind origin/main: uncommitted changes" (:cannot-land v)))
+        (is (str/starts-with? (:text v) "on call; can't land: main checkout 2 behind origin/main: uncommitted changes; serve's sessions: "))
+        (is (not (contains? (first (core/oncall-view {:now now :oncall {"infra" {:dir "/x/infra"}} :memory (:memory base) :duty []}))
+                            :cannot-land))
+            "nothing blocked: no field")))))
 
 (deftest serve-texts
   (let [t1 (th "t1" 1 [(msg 0 "web" "infra")])
@@ -1851,7 +1952,7 @@
             (serve)
             (is (= [] (calls)))
             (is (not (contains? (serve-state) :repos)))
-            (is (= {:threads {} :sessions {} :agents {}} (memory)))
+            (is (= {:threads {} :sessions {} :agents {} :land {}} (memory)))
             (is (= "on call" (oncall-text)) "not backing off"))
           (let [id (out {:who "website"} "@infra" "Rotate the key")]
             (testing "a new thread: a background session of its own, in the repo, named for the thread"
@@ -2013,7 +2114,7 @@
               (is (= [id] (keys (:threads (memory)))) "the thread is kept while its close is news for infra")
               (out as-session "read" id)
               (serve)
-              (is (= {:threads {} :sessions {} :agents {}} (memory)) "read: forgotten")))
+              (is (= {:threads {} :sessions {} :agents {} :land {}} (memory)) "read: forgotten")))
           (testing "`claude --bg` fails (an untrusted folder): back off, and say why"
             (spit (str (fs/path d "bg.fail")) (str "Starting background service…\nWorkspace not trusted. Run `claude` in " infra-real " once…\n"))
             (let [id (out {:who "website"} "@infra" "Anyone?")
@@ -2083,6 +2184,145 @@
         (is (not (fs/exists? (serve-file "pid"))))
         (is (<= (core/age-s (:heartbeat (serve-state))) 5) "a heartbeat every round")
         (is (= {:alive false :pid nil} (:serve (status-json {}))))))))
+
+(defn commit-file!
+  "Writes `text` to `file` in work tree `dir` and commits it."
+  [dir file text]
+  (spit (str (fs/path dir file)) text)
+  (git-in dir "add" file)
+  (git-in dir "commit" "-q" "-m" (str "Add " file)))
+
+(defn head-of [dir] (str/trim (:out (git-in dir "rev-parse" "HEAD"))))
+
+(defn serve-rig
+  "What the tests of serve's landing share, in temporary folder `d`: a
+   fake claude (fake-claude!), :serve (one round, its log returned), and
+   :turn!, which shows serve's session deadbeef in folder `cwd` with
+   `status` (in `claude agents`, and in the registry since `since`, else
+   now), next to `others`, and runs a round."
+  [d]
+  (let [claude (fake-claude! d)
+        cfg (str (fs/path d "claude-config"))
+        me (.pid (java.lang.ProcessHandle/current))
+        env {"AGENT_MAIL_CLAUDE" claude "CLAUDE_CONFIG_DIR" cfg}
+        full "deadbeef-1111-4222-8333-444455556666"
+        json! (fn [file x] (spit (str (fs/path d file)) (json/generate-string x)))
+        serve (fn [] (let [r (am {:env env} "serve" "--once")] (is (zero? (:exit r)) (:err r)) (:err r)))]
+    (json! "agents.json" [])
+    (json! "all.json" [])
+    {:env env :full full :serve serve :json! json!
+     :turn! (fn [{:keys [cwd status since others]}]
+              (json! "agents.json" (into [{:id "deadbeef" :sessionId full :pid me :cwd cwd :name "📫 #1" :kind "background"
+                                            :status status :state "running"}]
+                                         others))
+              (registry! cfg me {:pid me :sessionId full :status status :kind "bg"
+                                 :statusUpdatedAt (or since (System/currentTimeMillis))})
+              (serve))}))
+
+(deftest serve-lands-what-its-sessions-push
+  (with-store
+    (with-dir [d]
+      (let [{:keys [env serve turn!]} (serve-rig d)
+            remote (str (fs/path d "remote.git"))
+            infra (str (fs/path d "infra"))
+            wt (str (fs/path infra ".claude" "worktrees" "w"))
+            elsewhere (str (fs/path d "elsewhere"))
+            other (p/process ["sleep" "600"])
+            here {:id "ab12cd34" :sessionId "ab12cd34-5555-4666-8777-888899990000" :pid (.pid ^Process (:proc other))
+                  :name "infra-ab12" :kind "interactive" :status "idle" :state "running"}
+            session (fn [status & {:as more}] (turn! (merge {:cwd (str (fs/real-path wt)) :status status} more)))
+            oncall #(first (json/parse-string (out {:env env} "oncall" "--json") true))
+            blocked "main checkout 1 behind origin/main: uncommitted changes"]
+        (git-in d "init" "-q" "--bare" "-b" "main" remote)
+        (git-in d "clone" "-q" remote infra)
+        (git-in infra "symbolic-ref" "HEAD" "refs/heads/main")
+        (commit-file! infra "README.md" "infra\n")
+        (git-in infra "push" "-q" "-u" "origin" "main")
+        (git-in infra "worktree" "add" "-q" wt "-b" "worktree-w")
+        (out {:env user-shell} "oncall" "add" "infra" infra)
+        (out {:who "website"} "@infra" "Fix the config")
+        (try
+          (serve)
+          (session "busy")
+          (commit-file! wt "config" "fixed\n")
+          (git-in wt "push" "-q" "origin" "HEAD:main")
+          (testing "the session pushed from its worktree and went idle: a dirty main checkout is left, and why is shown"
+            (spit (str (fs/path infra "README.md")) "a local edit\n")
+            (is (str/includes? (session "idle") (str "can't land infra: " blocked)))
+            (is (not= (head-of wt) (head-of infra)))
+            (is (= "a local edit\n" (slurp (str (fs/path infra "README.md")))))
+            (is (= blocked (:cannot-land (oncall))))
+            (is (str/starts-with? (:text (oncall)) (str "on call; can't land: " blocked "; serve's sessions: ")))
+            (is (re-find (re-pattern (str "(?m)^infra\\s+\\(on call\\)\\s+on call; can't land: " blocked)) (out {:env env} "who")))
+            (is (= blocked (:cannot-land (first (:oncall (status-json {:env env})))))))
+          (testing "said once: the same reason again is not logged"
+            (session "busy")
+            (is (not (str/includes? (session "idle") "can't land"))))
+          (testing "another session works in the main checkout: left"
+            (git-in infra "checkout" "--" "README.md")
+            (session "busy")
+            (is (str/includes? (session "idle" :others [(assoc here :cwd (str (fs/real-path infra)))])
+                               "can't land infra: main checkout 1 behind origin/main: \"infra-ab12\" works there")))
+          (testing "clean, and the other session in a worktree: fast-forwarded to origin/main, untracked files untouched"
+            (spit (str (fs/path infra "notes.txt")) "mine\n")
+            (session "busy")
+            (is (re-find #"land infra: main 1 commit to [0-9a-f]{7,} \(upstream\)"
+                         (session "idle" :others [(assoc here :cwd (str (fs/real-path infra) "/.claude/worktrees/x"))])))
+            (is (= (head-of wt) (head-of infra)))
+            (is (= "fixed\n" (slurp (str (fs/path infra "config")))))
+            (is (= "mine\n" (slurp (str (fs/path infra "notes.txt")))))
+            (is (nil? (:cannot-land (oncall))))
+            (is (= "on call; serve's sessions: \"📫 #1\" (background, idle, thread #1)" (:text (oncall)))))
+          (testing "pushed from another clone: fetched first"
+            (git-in d "clone" "-q" remote elsewhere)
+            (commit-file! elsewhere "more" "more\n")
+            (git-in elsewhere "push" "-q" "origin" "main")
+            (session "busy")
+            (is (re-find #"land infra: main 1 commit to [0-9a-f]{7,} \(upstream\)" (session "idle")))
+            (is (= (head-of elsewhere) (head-of infra))))
+          (testing "nothing new: nothing logged"
+            (session "busy")
+            (is (not (str/includes? (session "idle") "land"))))
+          (testing "the fetch fails: said"
+            (fs/move remote (str remote ".away"))
+            (session "busy")
+            (is (str/includes? (session "idle") "can't land infra: fetching origin/main failed: "))
+            (is (str/starts-with? (:cannot-land (oncall)) "fetching origin/main failed: ")))
+          (finally (p/destroy other)))))))
+
+(deftest serve-lands-a-worktree-branch-without-a-remote
+  (with-store
+    (with-dir [d]
+      (let [{:keys [env full serve turn!]} (serve-rig d)
+            site (str (fs/path d "site"))
+            wt (str (fs/path site ".claude" "worktrees" "w"))
+            session (fn [status] (turn! {:cwd (str (fs/real-path wt)) :status status}))
+            main-head #(head-of site)]
+        (git-in d "init" "-q" "-b" "main" site)
+        (commit-file! site "README.md" "site\n")
+        (git-in site "worktree" "add" "-q" wt "-b" "worktree-w")
+        (out {:env user-shell} "oncall" "add" "site" site)
+        (let [id (out {:who "website"} "@site" "Add a page")
+              before (main-head)]
+          (serve)
+          (session "busy")
+          (commit-file! wt "page.md" "A page.\n")
+          (commit-file! wt "index.md" "Its link.\n")
+          (testing "while the thread is still site's turn, nothing lands"
+            (is (not (str/includes? (session "idle") "land")))
+            (is (= before (main-head)))
+            (is (nil? (:cannot-land (first (json/parse-string (out {:env env} "oncall" "--json") true))))))
+          (testing "once the session has handed the thread on, main is fast-forwarded to its branch"
+            (out {:who "site" :env {"CLAUDE_CODE_SESSION_ID" full}} "reply" id "Added the page.")
+            (session "busy")
+            (is (re-find #"land site: main 2 commits to [0-9a-f]{7,} \(branch worktree-w\)" (session "idle")))
+            (is (= (head-of wt) (main-head)))
+            (is (= "A page.\n" (slurp (str (fs/path site "page.md"))))))
+          (testing "a branch that diverged from main is left, and said"
+            (commit-file! site "local.md" "On main.\n")
+            (commit-file! wt "more.md" "More.\n")
+            (session "busy")
+            (is (str/includes? (session "idle") "can't land site: main checkout 1 behind worktree-w and 1 ahead: diverged"))))))))
 
 (deftest oncall-registration
   (with-store

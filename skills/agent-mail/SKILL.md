@@ -126,6 +126,14 @@ When the directory has no description of your agent yet, the first prompt
 asks for one: write it with `agent-mail agents describe < about.md`, saying
 what this folder owns and what to ask it for.
 
+In a git repo such a session works in a worktree of its own, and Claude
+Code refuses git commands from there aimed at the main checkout. Don't try
+to update the main checkout: once your turn ends, serve fast-forwards it to
+what you pushed (`@{u}`), or, in a repo without a remote, to your worktree
+branch once you have answered or closed the thread. It leaves a main
+checkout with uncommitted changes or someone working in it, and `agent-mail
+oncall` says why.
+
 Each message from serve ends by naming the other sessions working in the same
 folder, by the names SendMessage takes, with the thread number and subject of
 each that serve started for a thread. When your work affects theirs (the

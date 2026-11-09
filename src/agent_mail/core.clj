@@ -564,10 +564,12 @@
 ;;                   :check {:session :file :at :status-updated-at}}}
 ;;    :sessions {short-id {:session-id :agent :thread :number :name :kind
 ;;                         :ours (serve started it) :state :status :since
-;;                         :started-at
+;;                         :started-at :cwd
 ;;                         :waiting-since :waiting-for :needs :alerted
 ;;                         (while it waits on the user, see needs-input-ms)}}
-;;    :agents   {agent {:failures :until :reason}}}
+;;    :agents   {agent {:failures :until :reason}}
+;;    :land     {agent {:blocked (why its main checkout can't be brought
+;;                                up to date, see land-plan)}}}
 ;; :state is "starting" (started or resumed, not listed by `claude agents`
 ;; yet), "live", "stopped" or "gone" (not even `claude agents --all` lists
 ;; it). The functions here decide; serve gathers and carries out.
@@ -864,6 +866,90 @@
            " and answer once the current step is done.\n")
          also)))
 
+;; ---- landing
+;; In a git repo a background session works in a worktree of its own under
+;; <repo>/.claude/worktrees, and Claude Code's worktree guard refuses any
+;; git command from there that targets the main checkout. What a session
+;; pushes would leave the main checkout behind, with nothing to bring it
+;; up to date; so serve fast-forwards it (see land-plan).
+
+(defn commits-phrase "`1 commit`, `3 commits`." [n] (str n (if (= 1 n) " commit" " commits")))
+
+(defn parse-worktrees
+  "`git worktree list --porcelain` as [{:path :head :branch}], the main
+   worktree first; :branch is the short name, nil for a detached HEAD."
+  [out]
+  (vec (for [block (str/split (str out) #"\n\s*\n")
+             :let [kv (into {} (for [l (str/split-lines block)
+                                     :let [[k v] (str/split l #" " 2)]
+                                     :when (not (str/blank? k))]
+                                 [k (or v true)]))
+                   branch (get kv "branch")]
+             :when (string? (get kv "worktree"))]
+         {:path (get kv "worktree") :head (let [h (get kv "HEAD")] (when (string? h) h))
+          :branch (when (string? branch) (str/replace branch #"^refs/heads/" ""))})))
+
+(defn worktree-of
+  "The linked worktree of `worktrees` (parse-worktrees', the main one
+   first) that folder `cwd` is in, the deepest; nil when none, as for the
+   main worktree itself."
+  [worktrees cwd]
+  (->> (rest worktrees) (filter #(inside? cwd (:path %))) (sort-by #(count (:path %))) last))
+
+(defn working-in
+  "The names of the running sessions (`live`, as agents-items gives them)
+   that work in folder `dir`'s checkout itself: their folder is `dir` or
+   below it, but not under its .claude/worktrees, where Claude Code puts a
+   session's own worktree. Someone works there, so serve leaves the
+   checkout alone."
+  [dir live]
+  (let [wts (str (str/replace (str dir) #"/+$" "") "/.claude/worktrees")]
+    (vec (for [s live :when (and (inside? (:cwd s) dir) (not (inside? (:cwd s) wts)))]
+           (if (str/blank? (:name s)) (:id s) (:name s))))))
+
+(defn land-plan
+  "What serve does with an agent's main checkout once one of its sessions
+   went idle or stopped ([:land], see serve-actions), from what git and
+   Claude Code say of it:
+     :main?       the agent's folder is its repo's main worktree
+     :branch      the branch checked out there; nil when detached
+     :dirty?      tracked files have changes (untracked ones never count)
+     :working     names of the sessions working in it (working-in)
+     :upstream    its branch's upstream, e.g. origin/main; nil without
+     :fetch-error why `git fetch` failed
+     :behind :ahead  commits HEAD lacks and has against the upstream
+     :candidate   without an upstream, the session's worktree branch:
+                  {:branch :behind :ahead (HEAD against it) :handed-on
+                   (the session holds no open thread whose turn is the
+                   agent's: it closed it or handed it on)}
+   With an upstream, fetched: a fast-forward to it when HEAD is strictly
+   behind. Without, the session's worktree branch counts, once it has
+   handed its thread on and HEAD is its ancestor. Either only on a branch,
+   with clean tracked files and nobody working there. Returns {:ff target
+   :commits n :via label} for `git merge --ff-only target`, {:blocked
+   text} when there is something to land but serve can't, e.g. `main
+   checkout 2 behind origin/main: uncommitted changes`, or nil when there
+   is nothing to land."
+  [{:keys [main? branch dirty? working upstream fetch-error behind ahead candidate]}]
+  (let [blocked (fn [n label ahead]
+                  (let [ahead (or ahead 0)
+                        why (cond-> []
+                              (pos? ahead) (conj "diverged")
+                              dirty? (conj "uncommitted changes")
+                              (seq working) (conj (str (word-list (map pr-str working) "and")
+                                                       (if (= 1 (count working)) " works" " work") " there")))]
+                    (when (seq why)
+                      {:blocked (str "main checkout " n " behind " label (when (pos? ahead) (str " and " ahead " ahead"))
+                                     ": " (str/join ", " why))})))]
+    (cond
+      (not (and main? branch)) nil
+      upstream (cond fetch-error {:blocked (str "fetching " upstream " failed: " fetch-error)}
+                     (not (pos? (or behind 0))) nil
+                     :else (or (blocked behind upstream ahead) {:ff "@{u}" :commits behind :via "upstream"}))
+      :else (let [{b :branch n :behind a :ahead :keys [handed-on]} candidate]
+              (when (and b handed-on (pos? (or n 0)))
+                (or (blocked n b a) {:ff (str "refs/heads/" b) :commits n :via (str "branch " b)}))))))
+
 ;; ---- deciding
 
 (defn serve-memory
@@ -871,7 +957,7 @@
    missing or not a map, so an older serve's state (tabs, under :repos)
    reads as nothing remembered."
   [st]
-  (into {} (for [k [:threads :sessions :agents]] [k (let [v (get st k)] (if (map? v) v {}))])))
+  (into {} (for [k [:threads :sessions :agents :land]] [k (let [v (get st k)] (if (map? v) v {}))])))
 
 (defn- newest-file [th] (:file (peek (vec (:msgs th)))))
 
@@ -939,11 +1025,12 @@
 
 (defn- observed
   "What serve keeps of a running session's entry, nils left out: what it
-   waits on only while it waits (status \"waiting\")."
+   waits on only while it waits (status \"waiting\"); its folder, which
+   tells its worktree once it has stopped (see land-plan)."
   [e]
   (let [waiting? (= "waiting" (:status e))]
     (into {} (remove (comp nil? val)) {:state "live" :status (:status e) :kind (:kind e) :name (:name e)
-                                       :session-id (:session-id e)
+                                       :session-id (:session-id e) :cwd (:cwd e)
                                        :waiting-for (when waiting? (:waiting-for e))
                                        :needs (when waiting? (:needs e))})))
 
@@ -1041,6 +1128,12 @@
                             not; never while it runs a background task
                             (shell), waits on the user or is busy, nor with
                             a post into it checked or made this round
+   [:land A info]           bring A's main checkout up to date (land-plan):
+                            one of serve's sessions for A went idle (from
+                            busy, waiting or starting), ended, or is being
+                            stopped this round. info: {:dir :sessions [{:id
+                            :name :cwd :handed-on}] :working}, :working the
+                            sessions working in the checkout (working-in)
    [:needs-input S info]    tell the user: background session S has waited
                             on them (a permission prompt) `needs-input-ms`
                             (see needs-input); serve's own are looked at
@@ -1113,9 +1206,35 @@
                       :when (and (:ours s) e (resting? e) (number? since) (>= (- now since) idle-stop-ms)
                                  (not (checking k)) (not (targeted k)))]
                   [:stop k {:id (:id e) :name (or (:name e) (:name s)) :agent (:agent s) :idle-since since}]))
+        ;; serve's own sessions that went idle, ended or are being stopped:
+        ;; what they pushed is to land in their agent's main checkout
+        settled (distinct
+                 (concat (for [[k s] sessions
+                               :let [e (find-session live k)]
+                               :when (and (:ours s) e (contains? idle-statuses (:status e))
+                                          (not (contains? idle-statuses (:status s))))]
+                           k)
+                         (for [[kind k changes] observe
+                               :when (and (= :observe kind) (contains? #{"stopped" "gone"} (:state changes))
+                                          (get-in memory [:sessions k :ours]) (= "live" (get-in memory [:sessions k :state])))]
+                           k)
+                         (map second stops)))
+        held (set (for [th (vals open)
+                        :let [h (holder th (:owner th) memory (get-in memory [:threads (:id th) :deaf]))]
+                        :when h]
+                    (short-id (:sid h))))
+        lands (for [[agent ks] (sort-by key (group-by #(get-in memory [:sessions % :agent]) settled))
+                    :let [dir (get-in oncall [agent :dir])]
+                    :when dir]
+                [:land agent {:dir dir
+                              :sessions (vec (for [k (sort ks)
+                                                   :let [s (get-in memory [:sessions k]) e (find-session live k)]]
+                                               {:id k :name (or (:name e) (:name s)) :cwd (or (:cwd e) (:cwd s))
+                                                :handed-on (not (held k))}))
+                              :working (working-in dir live)}])
         alerts (when live
                  (keep (fn [[k s]] (when-let [e (find-session live k)] (needs-input k s e now))) sessions))]
-    (vec (concat forget observe drops checks deliveries stops alerts))))
+    (vec (concat forget observe drops checks deliveries stops lands alerts))))
 
 (defn remember
   "serve's memory after `action` at `now`: one of serve-actions' bookkeeping
@@ -1124,8 +1243,10 @@
    stop gave: [:posted T S
    info], [:post-failed T S] (S counts as deaf for T), [:resumed T S info],
    [:started A T short-id session-id info] (session-id nil until `claude
-   agents` lists it), [:stopped S]. [:post], [:resume], [:start] and [:stop]
-   themselves change nothing: they end as one of those or a :back-off."
+   agents` lists it), [:stopped S], [:land-checked A blocked] (blocked:
+   land-plan's text, nil when nothing keeps A's main checkout behind).
+   [:post], [:resume], [:start], [:stop] and [:land] themselves change
+   nothing: they end as one of those or a :back-off."
   [memory [kind & args] now]
   (let [known-thread (fn [m t f & xs] (if (get-in m [:threads t]) (apply update-in m [:threads t] f xs) m))
         known-session (fn [m k f & xs] (if (get-in m [:sessions k]) (apply update-in m [:sessions k] f xs) m))
@@ -1179,6 +1300,8 @@
                                                      :kind "background" :ours true :state "starting" :since now
                                                      :started-at now}))))
       :stopped (known-session memory (first args) assoc :state "stopped" :since now)
+      :land-checked (let [[a blocked] args]
+                      (if blocked (assoc-in memory [:land a] {:blocked blocked}) (update memory :land dissoc a)))
       memory)))
 
 ;; ---- views
@@ -1213,12 +1336,14 @@
 (defn oncall-view
   "Each registered agent with what serve is doing about it, for `oncall`,
    `who` and `status`: {:repo :dir :state :pane :text}, plus :sessions on
-   duty, and :until (a UTC stamp) with :reason while backing off. :state is
-   \"on-duty\" (a listener's duty record covers it, so serve leaves its
-   threads alone), \"backing-off\" or \"on-call\"; :pane is always nil
-   (serve opened WezTerm tabs until 9 Nov 2026). The text ends with the
-   sessions serve holds for it. `memory` is serve's; `duty` the duty records
-   with :on-duty decided."
+   duty, :until (a UTC stamp) with :reason while backing off, and
+   :cannot-land while its main checkout stays behind what a session of
+   serve's pushed (land-plan's text). :state is \"on-duty\" (a listener's
+   duty record covers it, so serve leaves its threads alone),
+   \"backing-off\" or \"on-call\"; :pane is always nil (serve opened
+   WezTerm tabs until 9 Nov 2026). The text says why it can't land, then
+   ends with the sessions serve holds for it. `memory` is serve's; `duty`
+   the duty records with :on-duty decided."
   [{:keys [now oncall memory duty]}]
   (vec
    (for [[repo {:keys [dir]}] (sort-by key oncall)
@@ -1226,6 +1351,7 @@
                names (vec (distinct (keep :session (filter #(and (= repo (:repo %)) (:on-duty %)) duty))))
                until (when (and (:until m) (< now (:until m))) (:until m))
                state (cond (seq names) "on-duty" until "backing-off" :else "on-call")
+               blocked (get-in memory [:land repo :blocked])
                held (filter #(= repo (:agent %)) (serve-sessions memory))
                tail (when (seq held) (str "; serve's sessions: " (str/join ", " (map session-phrase held))))]]
      (cond-> {:repo repo :dir dir :state state :pane nil
@@ -1233,9 +1359,11 @@
                            "on-duty" (str "on duty (session " (str/join ", " names) ")")
                            "backing-off" (str "backing off until " (clock until) ": " (:reason m))
                            "on call")
+                         (when blocked (str "; can't land: " blocked))
                          tail)}
        (seq names) (assoc :sessions names)
-       until (assoc :until (fmt-utc (java.time.Instant/ofEpochMilli until)) :reason (:reason m))))))
+       until (assoc :until (fmt-utc (java.time.Instant/ofEpochMilli until)) :reason (:reason m))
+       blocked (assoc :cannot-land blocked)))))
 ;; ---------------------------------------------------------------- drafts
 
 (def reply-marker "<!-- agent-mail: the thread above is quoted with `>`; answer inline under any line, or write below this marker. Quoted text is kept only next to what you write. Sent when you close the editor; nothing is sent if you write nothing. -->")

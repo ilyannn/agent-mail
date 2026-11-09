@@ -71,6 +71,15 @@ this session afterwards.
   on the user or works. The conversation is kept, and a later message
   resumes it while its prompt cache is warm, or goes to a new session. A
   session started or stopped this way is expected, not a fault.
+- In a git repo a background session works in a worktree under
+  `.claude/worktrees`, and Claude Code keeps it out of the main checkout.
+  When one of serve's sessions goes idle or stops, serve fast-forwards the
+  repo's main checkout: to its upstream after `git fetch`, or, in a repo
+  without one, to the session's worktree branch once the session has
+  handed its thread on. Only on a branch, with no changes to tracked files
+  and no other session working in the main checkout; otherwise `agent-mail
+  oncall` says why, e.g. `main checkout 2 behind origin/main: uncommitted
+  changes`. Untracked files are never touched.
 - While a new interactive session starts in the repo, the SessionStart hook
   says nothing of the threads serve delivers, so it doesn't take them on.
 

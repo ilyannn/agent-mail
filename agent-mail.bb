@@ -1691,12 +1691,105 @@
 
 (defn- gone-dir [dir] {:exit 1 :out "" :err (str "its directory is gone (" dir ")")})
 
+;; ---- landing: what serve's sessions pushed reaches the main checkout (see core)
+
+(def fetch-timeout-ms "How long serve gives `git fetch` in a main checkout." 30000)
+
+(defn git-at
+  "Runs git ARGS… in folder `dir`, {:exit :out :err}: without
+   git-redirects (git-env), never asking for credentials, and killed past
+   `timeout-ms` (exit 124). Never throws."
+  [dir timeout-ms & args]
+  (try
+    (let [proc (apply p/process {:dir (str dir) :env (assoc (git-env) "GIT_TERMINAL_PROMPT" "0") :in ""
+                                 :out :string :err :string}
+                      "git" (map str args))
+          r (deref proc timeout-ms nil)]
+      (if r
+        {:exit (:exit r) :out (str (:out r)) :err (str (:err r))}
+        (do (p/destroy proc) {:exit 124 :out "" :err (str "timed out after " (quot timeout-ms 1000) "s")})))
+    (catch Exception e {:exit 127 :out "" :err (str (ex-message e))})))
+
+(defn- git-out
+  "What git ARGS… print in `dir`, trimmed; nil when it fails or prints
+   nothing."
+  [dir & args]
+  (let [r (apply git-at dir 30000 args)]
+    (when (zero? (:exit r)) (not-empty (str/trim (:out r))))))
+
+(defn- git-count [dir range] (some-> (git-out dir "rev-list" "--count" range) parse-long))
+
+(defn- git-why
+  "The first line git printed on failing, else its exit code."
+  [r]
+  (or (not-empty (core/first-line (str (:err r) "\n" (:out r)))) (str "exit " (:exit r))))
+
+(defn land-facts
+  "What git says of agent folder `dir` for core/land-plan, all but
+   :working and the candidate's :handed-on: whether it is its repo's main
+   worktree, its branch and upstream (fetched first when `fetch?`), its
+   tracked files' changes, how far HEAD is behind and ahead; without an
+   upstream, the same against the worktree branch of the session whose
+   folder is `cwd`. Only reads, but the fetch."
+  [dir cwd fetch?]
+  (let [{:keys [top main]} (git-roots dir)]
+    (if-not (and top (core/same-path? top dir) (core/same-path? main dir))
+      {:main? false}
+      (let [branch (git-out dir "symbolic-ref" "-q" "--short" "HEAD")
+            upstream (when branch (git-out dir "rev-parse" "--abbrev-ref" "--symbolic-full-name" "@{u}"))
+            fetch (when (and upstream fetch?) (git-at dir fetch-timeout-ms "fetch" "-q"))
+            status (git-at dir 30000 "--no-optional-locks" "status" "--porcelain" "--untracked-files=no")
+            wt (when (and branch (not upstream) cwd)
+                 (core/worktree-of (map #(update % :path real-dir)
+                                        (core/parse-worktrees (git-out dir "worktree" "list" "--porcelain")))
+                                   cwd))
+            ref (some->> (:branch wt) (str "refs/heads/"))]
+        (cond-> {:main? true :branch branch :upstream upstream
+                 :dirty? (or (pos? (:exit status)) (not (str/blank? (:out status))))}
+          (and fetch (pos? (:exit fetch))) (assoc :fetch-error (git-why fetch))
+          upstream (assoc :behind (git-count dir "HEAD..@{u}") :ahead (git-count dir "@{u}..HEAD"))
+          ref (assoc :candidate {:branch (:branch wt) :behind (git-count dir (str "HEAD.." ref))
+                                 :ahead (git-count dir (str ref "..HEAD"))}))))))
+
+(defn land!
+  "Carries out [:land A info] (core/serve-actions): fast-forwards agent
+   `agent`'s main checkout `dir` as core/land-plan says, once with an
+   upstream, else for each of `sessions` in turn, logging each
+   fast-forward, e.g. `land infra: main 3 commits to abc1234 (upstream)`.
+   Nothing but `git fetch` and `git merge --ff-only` changes anything
+   there, and untracked files are never touched. Returns why it can't
+   land (the last reason), nil when nothing keeps the checkout behind;
+   never throws."
+  [agent dir sessions working]
+  (try
+    (let [step (fn [f]
+                 (let [plan (core/land-plan (assoc f :working working))]
+                   (if-let [target (:ff plan)]
+                     (let [r (git-at dir 60000 "merge" "--ff-only" "-q" target)]
+                       (if (zero? (:exit r))
+                         (do (log! (str "land " agent ": " (:branch f) " " (core/commits-phrase (:commits plan)) " to "
+                                        (git-out dir "rev-parse" "--short" "HEAD") " (" (:via plan) ")"))
+                             nil)
+                         (str "main checkout " (:commits plan) " behind " (or (:upstream f) (get-in f [:candidate :branch]))
+                              ": `git merge --ff-only` failed: " (git-why r))))
+                     (:blocked plan))))
+          f (land-facts dir nil true)]
+      (cond (not (:main? f)) nil
+            (:upstream f) (step f)
+            :else (reduce (fn [blocked s]
+                            (or (step (update (land-facts dir (:cwd s) false) :candidate
+                                              #(some-> % (assoc :handed-on (:handed-on s)))))
+                                blocked))
+                          nil sessions)))
+    (catch Exception e (str "landing failed: " (ex-message e)))))
+
 (defn carry-out!
   "Carries out one of core/serve-actions, logs it, and returns serve's
    memory after it. A start or resume that fails backs its agent off with
    what claude said (an untrusted folder, a missing claude); a post that
    fails leaves the thread to go out again next round, past that session;
-   a stop that fails is tried again next round."
+   a stop that fails is tried again next round. A landing that can't be
+   done is logged when its reason changes, and remembered for `oncall`."
   [memory [kind & args :as action] now]
   (let [remember #(core/remember memory % now)
         agent-m #(get-in memory [:agents %])
@@ -1735,6 +1828,11 @@
                     (remember [:stopped sid]))
                 (do (log! (str "stop " (named name sid) ": " (core/claude-failure "`claude stop`" r)))
                     memory)))
+      :land (let [[agent {:keys [dir sessions working]}] args
+                  blocked (land! agent dir sessions working)]
+              (when (and blocked (not= blocked (get-in memory [:land agent :blocked])))
+                (log! (str "can't land " agent ": " blocked)))
+              (remember [:land-checked agent blocked]))
       :back-off (backed-off action)
       :observe (let [[sid changes] args
                      s (get-in memory [:sessions sid])]
@@ -1771,7 +1869,7 @@
   [memory {:keys [grace-ms check-ms]}]
   (when (fs/exists? (fs/path store ".git")) (migrate-directory!))
   (let [oncall (oncall-agents)]
-    (if (and (empty? oncall) (every? empty? (vals memory)))
+    (if (and (empty? oncall) (every? empty? (vals (dissoc memory :land))))
       memory
       (let [now (System/currentTimeMillis)
             in {:now now :memory memory :grace-ms grace-ms :check-ms check-ms :max-starts core/starts-per-round
@@ -1932,7 +2030,8 @@
                                               any agent (so for `oncall add NAME DIR` moving
                                               one)
   agent-mail oncall [--json]                  agents on call: serve hands each of their threads
-                                              to a Claude Code session
+                                              to a Claude Code session; also why serve can't
+                                              land what one pushed in the main checkout
   agent-mail oncall add [NAME [DIR]]          put an agent on call: NAME (at DIR: added, or
                                               moved there); no arguments: this folder's agent,
                                               else this repo at its main worktree, or outside
@@ -1957,7 +2056,15 @@
                                               stopped once idle for 5 min, holding a thread or
                                               not (never while busy, running a background task
                                               or waiting on you): a later message resumes them
-                                              while their cache is warm. A background session of its
+                                              while their cache is warm. When one of them goes
+                                              idle or stops, the repo's main checkout is
+                                              fast-forwarded to what it pushed: `git fetch`
+                                              and `git merge --ff-only @{u}`; without an
+                                              upstream, to its worktree branch once it handed
+                                              its thread on. Only on a branch, with clean
+                                              tracked files and no other session working
+                                              there; `oncall` and `who` say why not
+                                              (status --json: cannot-land). A background session of its
                                               that waits on you (a permission prompt) for 2 min
                                               is reported once: a notification, serve's log,
                                               and `who`/`oncall` while it waits. `claude agents`
