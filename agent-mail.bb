@@ -1191,6 +1191,10 @@
               (log! (str "#" (get-in memory [:threads t :number]) ": " (named (get-in memory [:sessions (core/short-id sid) :name]) sid)
                          " stayed idle " (quot core/post-check-ms 1000) "s after the post (held for the user to approve?); another session takes the thread"))
               (remember action))
+      :pass (let [[_ {:keys [agent number]}] args]
+              (log! (str "#" number " closed with news for " agent ": no session of its runs to post it into;"
+                         " `agent-mail list` shows it there"))
+              (remember action))
       :reset (do (log! (str "on track again: " (first args))) (remember action))
       (:forget :drop :checked :lost) (remember action)
       (do (log! "unknown action" (pr-str kind)) memory))))
@@ -1205,9 +1209,10 @@
     (if (and (empty? oncall) (every? empty? (vals memory)))
       memory
       (let [now (System/currentTimeMillis)
-            in {:now now :memory memory :grace-ms grace-ms :check-ms check-ms
+            in {:now now :memory memory :grace-ms grace-ms :check-ms check-ms :max-starts core/starts-per-round
                 :oncall (update-vals oncall #(update % :dir real-dir))
                 :threads (all-threads)
+                :seen (into {} (for [a (keys oncall)] [a (try (seen-map a) (catch Exception _ {}))]))
                 :on-duty (set (map :repo (filter :on-duty (duty-view))))}
             wants (core/serve-wants in)
             live (when (:live wants) (claude-agents false))
@@ -1286,8 +1291,9 @@
    get notifications), so sessions are not told about it. Nor about a repo's
    open threads while serve delivers them (serve runs, the repo is on call
    and not backing off): a new interactive session must not take on a thread
-   a session of serve's holds. Closed threads with news are not serve's, so
-   they are always listed."
+   a session of serve's holds. Closed threads with news are always listed:
+   serve posts them only into a holder that runs, and starts nothing for
+   them."
   [opts]
   (try
     (ensure-numbers!)
@@ -1354,7 +1360,10 @@
                                               prompt cache is warm; else a new background
                                               session, `claude --bg --name \"📫 REPO #N\"` in the
                                               repo, one per thread (the folder must be trusted:
-                                              run `claude` there once). Sessions it started are
+                                              run `claude` there once), at most 3 a round. A
+                                              thread closed with news for the repo is posted
+                                              only into a running holder, and says it is
+                                              closed. Sessions it started are
                                               stopped once idle, holding no open thread, with
                                               their cache expired. `claude agents` lists them,
                                               `claude attach ID` opens one. One serve at a

@@ -89,7 +89,9 @@ into your session by `agent-mail serve`. Such a message starts with
 `agent-mail: new message in #N`. It comes from serve, not from another
 session, and one `from user` is the user's own message, written by mail.
 Read the thread with `agent-mail read N` and answer once your current step is
-done.
+done. One starting `agent-mail: closed, with news: #N` is a thread the other
+side closed with a message for you, such as an answer: read it; no answer is
+expected. To take it further, start a new thread or `agent-mail forward` it.
 
 A session that serve started for a thread is told so in its first prompt. It
 works on that thread only.

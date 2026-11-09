@@ -369,6 +369,13 @@
    stays idle with an unchanged statusUpdatedAt."
   30000)
 
+(def starts-per-round
+  "How many sessions serve starts in one round at most, for the lowest
+   thread numbers; the others go out in later rounds. A serve that was down
+   for a while would otherwise start a burst of sessions at once. Posts and
+   resumes are not capped."
+  3)
+
 (def default-ttl-ms
   "A prompt cache's lifetime when nothing says otherwise: one hour."
   3600000)
@@ -539,15 +546,21 @@
   "What serve posts into the session holding thread `th` for `agent` (or
    resumes it with) for its newest message, and why there: `wrote?`, the
    session wrote in the thread, else serve started it for the thread; then
-   the also-line `also`. It names the message's position, so a later post
-   never repeats an earlier one word for word (Claude Code drops identical
-   posts arriving close together)."
+   the also-line `also`. A closed thread (news for the session, see
+   closed-news?) says so, and that no answer is expected. It names the
+   message's position, so a later post never repeats an earlier one word for
+   word (Claude Code drops identical posts arriving close together)."
   [_agent th wrote? also]
-  (let [n (or (:number th) (:id th))]
-    (str "agent-mail: new message in #" n " \"" (:subject th) "\" from " (from-who (:last-from th))
+  (let [n (or (:number th) (:id th))
+        closed? (= "done" (:status th))]
+    (str "agent-mail: " (if closed? "closed, with news: #" "new message in #") n " \"" (:subject th) "\" "
+         (if closed? "closed by " "from ") (from-who (:last-from th))
          " (" (:id th) ", message " (count (:msgs th)) "), posted by agent-mail serve because "
          (if wrote? "this session wrote in this thread" "it started this session for this thread")
-         " (not another agent). Read it with `agent-mail read " n "` and answer once the current step is done.\n"
+         " (not another agent). Read it with `agent-mail read " n "`"
+         (if closed?
+           "; no answer is expected. To take it further, start a new thread or `agent-mail forward` it.\n"
+           " and answer once the current step is done.\n")
          also)))
 
 ;; ---- deciding
@@ -582,18 +595,25 @@
 (defn- backing-off? [memory agent now]
   (let [u (get-in memory [:agents agent :until])] (boolean (and u (< now u)))))
 
+(defn- news?
+  "Whether closed thread `th` has news for `agent` (see closed-news?), by
+   the seen markers in `seen` (reader -> thread id -> last file read)."
+  [th agent seen]
+  (and (= "done" (:status th)) (closed-news? th agent (get-in seen [agent (:id th)]))))
+
 (defn- deliverable
-  "The open threads with something for serve to deliver: whose turn is an
-   on-call agent's (not `user`), with no listener on duty for it and not
-   backing off, and a newest message serve has not handed on (or is to hand
-   on again: ids in `redo`). By number."
-  [{:keys [now oncall threads memory on-duty]} redo]
+  "The threads with something for serve to deliver: open, or closed with
+   news (see news?), whose turn is an on-call agent's (not `user`), with no
+   listener on duty for it and not backing off, and a newest message serve
+   has not handed on (or is to hand on again: ids in `redo`). By number."
+  [{:keys [now oncall threads memory on-duty seen]} redo]
   (let [on-duty (set on-duty)]
     (->> threads
          (filter (fn [th]
                    (let [a (:owner th)]
-                     (and (= "open" (:status th)) a (not= "user" a) (contains? oncall a) (not (on-duty a))
+                     (and a (not= "user" a) (contains? oncall a) (not (on-duty a))
                           (not (backing-off? memory a now)) (seq (:msgs th))
+                          (or (= "open" (:status th)) (news? th a seen))
                           (or (contains? redo (:id th))
                               (not= (newest-file th) (get-in memory [:threads (:id th) :delivered])))))))
          (sort-by :number))))
@@ -625,10 +645,14 @@
 (defn- route
   "The delivery of thread `th`'s newest message: into its holder, by
    resuming it, or to a new session (see serve-actions); nil while the
-   session serve started or resumed for it is still on its way."
+   session serve started or resumed for it is still on its way. A closed
+   thread's news goes only into a running holder, unchecked; without one it
+   is passed over ([:pass T info]): no session is resumed or started for a
+   closed thread."
   [{:keys [now oncall memory live known expiry]} th deaf]
   (let [agent (:owner th)
         t (:id th)
+        closed? (= "done" (:status th))
         dir (get-in oncall [agent :dir])
         info {:agent agent :number (:number th) :file (newest-file th) :dir dir}
         {:keys [sid wrote?] :as h} (holder th agent memory deaf)
@@ -638,6 +662,10 @@
         warm (when (and k (background? k)) (expiry (or (:session-id k) sid)))
         also #(also-line dir live memory %)]
     (cond
+      (and closed? e (:socket e))
+      [:post t (:id e) (posted-text agent th wrote? (also sid))
+       (merge info {:socket (:socket e) :name (:name e) :kind (:kind e) :session-id (:session-id e) :idle false})]
+      closed? [:pass t info]
       (and s (= "starting" (:state s)) (not e)) nil
       (and e (:socket e))
       [:post t (:id e) (posted-text agent th wrote? (also sid))
@@ -660,35 +688,47 @@
    :status-updated-at), nil when not asked or Claude Code could not tell
    (`agents-error` says why); `known` every session Claude Code keeps
    (`--all`), nil when not asked; `expiry` a session id's cache expiry from
-   its transcript (see cache-expiry), nil when unknown. In this order:
-   [:forget T]              thread T is closed or gone
+   its transcript (see cache-expiry), nil when unknown; `seen` the on-call
+   agents' seen markers (reader -> thread id -> last file read), for closed
+   threads with news; `max-starts` the cap on starts (starts-per-round). In
+   this order:
+   [:forget T]              thread T is gone, or closed without news for an
+                            owner on call (one with news is kept until read)
    [:observe S changes]     session S as `claude agents` now shows it
    [:reset A]               a session for A showed up: its back-off is over
    [:back-off A until why]  a session serve started or resumed for A did not
                             show up in `grace-ms` (then [:lost S T]: T is to
                             go out again), or the sessions could not be listed
    [:drop S]                S is down and its thread closed: forget it
-   [:checked T]             the post into T's holder was taken up (or it ended)
+   [:checked T]             the post into T's holder was taken up (or it ended,
+                            or T has closed)
    [:deaf T S]              it was not: S stayed idle `check-ms` after it, so
                             T goes to another session this round
-   [:post T S text info]    post into S, T's running holder
+   [:post T S text info]    post into S, T's running holder; for a closed
+                            thread with news too, then unchecked
+   [:pass T info]           a closed thread's news has no running holder:
+                            marked handed on, nothing resumed or started
    [:resume T S text info]  `claude --bg --resume S text`: the holder is a
                             stopped background session with a warm cache
-   [:start A T text info]   `claude --bg --name …` in A's folder
+   [:start A T text info]   `claude --bg --name …` in A's folder, for the
+                            `max-starts` lowest thread numbers this round;
+                            the others go out in later rounds
    [:stop S info]           `claude stop`: a session serve started, idle,
                             holding no open thread and its cache expired
                             (the registry's statusUpdatedAt + 1 h without a
                             transcript)
    Sessions serve did not start are never stopped."
-  [{:keys [now threads memory live known expiry agents-error grace-ms check-ms] :as in}]
+  [{:keys [now oncall threads memory live known expiry agents-error grace-ms check-ms max-starts seen] :as in}]
   (let [grace-ms (or grace-ms start-grace-ms)
         check-ms (or check-ms post-check-ms)
+        max-starts (or max-starts starts-per-round)
         expiry (or expiry (constantly nil))
         in (assoc in :expiry expiry)
         open (into {} (comp (filter #(= "open" (:status %))) (map (juxt :id identity))) threads)
+        news (set (keep #(when (and (contains? oncall (:owner %)) (news? % (:owner %) seen)) (:id %)) threads))
         sessions (sort-by key (:sessions memory))
         agent-m #(get-in memory [:agents %])
-        forget (for [t (sort (keys (:threads memory))) :when (not (open t))] [:forget t])
+        forget (for [t (sort (keys (:threads memory))) :when (not (or (open t) (news t)))] [:forget t])
         observe (when live
                   (mapcat
                    (fn [[k s]]
@@ -715,9 +755,9 @@
                 [:drop k])
         backing (into #{} (keep #(when (= :back-off (first %)) (second %))) observe)
         checks (when live
-                 (for [[t c] (due-checks memory now check-ms) :when (open t)]
+                 (for [[t c] (due-checks memory now check-ms)]
                    (let [e (find-session live (:session c))]
-                     (if (and e (contains? idle-statuses (:status e)) (= (:status-updated-at c) (:status-updated-at e)))
+                     (if (and (open t) e (contains? idle-statuses (:status e)) (= (:status-updated-at c) (:status-updated-at e)))
                        [:deaf t (:session c)]
                        [:checked t]))))
         redo (into {} (for [[kind t s] checks :when (= :deaf kind)] [t s]))
@@ -727,9 +767,15 @@
                      (nil? live) (for [a (distinct (map :owner cands))]
                                    (back-off a (agent-m a) now (str "cannot list Claude Code sessions: "
                                                                     (or agents-error "`claude agents` said nothing"))))
-                     :else (keep #(route in % (cond-> (set (get-in memory [:threads (:id %) :deaf]))
-                                                (redo (:id %)) (conj (short-id (redo (:id %))))))
-                                 cands))
+                     :else (->> cands
+                                (keep #(route in % (cond-> (set (get-in memory [:threads (:id %) :deaf]))
+                                                     (redo (:id %)) (conj (short-id (redo (:id %)))))))
+                                (reduce (fn [[acc n] a]
+                                          (cond (not= :start (first a)) [(conj acc a) n]
+                                                (< n max-starts) [(conj acc a) (inc n)]
+                                                :else [acc n]))
+                                        [[] 0])
+                                first))
         held (set (for [th (vals open)
                         :let [h (holder th (:owner th) memory (get-in memory [:threads (:id th) :deaf]))]
                         :when h]
@@ -749,7 +795,8 @@
 
 (defn remember
   "serve's memory after `action` at `now`: one of serve-actions' bookkeeping
-   actions, or what carrying out a delivery or a stop gave: [:posted T S
+   actions ([:pass T info] included), or what carrying out a delivery or a
+   stop gave: [:posted T S
    info], [:post-failed T S] (S counts as deaf for T), [:resumed T S info],
    [:started A T short-id session-id info] (session-id nil until `claude
    agents` lists it), [:stopped S]. [:post], [:resume], [:start] and [:stop]
@@ -775,8 +822,12 @@
               (-> memory (known-session k assoc :state "gone" :since now)
                   (known-thread t dissoc :delivered :check)))
       :deaf (let [[t sid] args]
-              (known-thread memory t #(-> % (update :deaf (fnil conj #{}) (short-id sid)) (dissoc :check))))
+              ;; :delivered goes too: should no start follow this round (the
+              ;; cap, a failure), the message goes out again in a later one
+              (known-thread memory t #(-> % (update :deaf (fnil conj #{}) (short-id sid)) (dissoc :check :delivered))))
       :checked (known-thread memory (first args) dissoc :check)
+      :pass (let [[t {:keys [agent number file]}] args]
+              (update-in memory [:threads t] assoc :agent agent :number number :delivered file))
       :post-failed (let [[t sid] args] (update-in memory [:threads t :deaf] (fnil conj #{}) (short-id sid)))
       :posted (let [[t sid {:keys [agent number file idle status-updated-at name kind session-id] :as info}] args
                     k (short-id sid)]

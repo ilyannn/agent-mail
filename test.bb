@@ -470,6 +470,37 @@
             "a post into it is being checked")
         (is (= [stop] (stops {:threads [(th "t9" 9 [(msg 0 "web" "infra") (msg 1 "infra" "user")])] :memory m :live [idle]}))
             "its thread waits on the user, not on it")))
+    (testing "at most 3 starts a round, lowest thread numbers first; posts and resumes are not capped"
+      (let [news (for [n [5 2 4 1 3]] (th (str "n" n) n [(msg 0 "web" "infra")]))
+            all (acts {:threads (cons talk news) :live [(live-s "aaaa1111")]})]
+        (is (= [[:post 1] [:start 1] [:start 2] [:start 3]] (map (fn [[kind :as a]] [kind (:number (peek a))]) all))
+            "t1's post, then n1 to n3; n4 and n5 wait")
+        (is (= [:start] (kinds (acts {:threads news :max-starts 1}))))
+        (is (= 3 (count (acts {:threads news :memory (mem :threads {"n1" {:delivered "000.md"}})}))) "n2 to n4 now")))
+    (testing "a thread closed with news for its owner goes into the holder only while that runs, unchecked"
+      (let [closed (th "t1" 1 [(msg 0 "infra" "web" :session "aaaa1111-full") (msg 1 "web" "infra") (msg 2 "web" "infra" :status "done")])
+            [[kind t sid text info] :as all] (acts {:threads [closed] :live [(live-s "aaaa1111" :status "idle")]})]
+        (is (= 1 (count all)))
+        (is (= [:post "t1" "aaaa1111"] [kind t sid]))
+        (is (str/starts-with? text "agent-mail: closed, with news: #1 \"About t1\" closed by web (t1, message 3), posted by agent-mail serve"))
+        (is (false? (:idle info)) "nothing to check: no other session would take it")
+        (is (= [[:pass "t1" {:agent "infra" :number 1 :file "002.md" :dir "/x/infra"}]]
+               (acts {:threads [closed] :known [(live-s "aaaa1111")] :expiry {"aaaa1111-full" (+ now 60000)}}))
+            "its holder stopped: no resume, no start, and not tried again")
+        (is (= [:pass] (kinds (acts {:threads [(th "t1" 1 [(msg 0 "web" "infra") (msg 1 "web" "infra" :status "done")])]}))) "nobody holds it")
+        (is (= [] (acts {:threads [closed] :memory (mem :threads {"t1" {:delivered "002.md"}}) :live [(live-s "aaaa1111")]}))
+            "posted once, and kept in mind while it is news")
+        (is (= [[:forget "t1"]] (acts {:threads [closed] :memory (mem :threads {"t1" {:delivered "002.md"}}) :seen {"infra" {"t1" "002.md"}}}))
+            "read: no news any more, forgotten")
+        (is (= [] (acts {:threads [closed] :seen {"infra" {"t1" "002.md"}} :live [(live-s "aaaa1111")]})) "read before serve got to it")
+        (is (= [[:forget "t1"]] (acts {:threads [(th "t1" 1 [(msg 0 "web" "infra") (msg 1 "infra" "web" :status "done")])]
+                                       :memory (mem :threads {"t1" {:delivered "000.md"}})}))
+            "closed by infra itself: news for web, which is not on call")
+        (is (= [] (acts {:threads [closed] :memory (mem :agents {"infra" {:until (inc now)}}) :live [(live-s "aaaa1111")]})) "backing off")
+        (is (= [[:checked "t1"]] (acts {:threads [closed] :memory (mem :threads {"t1" {:delivered "002.md" :check {:session "aaaa1111" :at 0}}})
+                                        :live [(live-s "aaaa1111" :status "idle")]}))
+            "a check left from before it closed is dropped")
+        (is (= {:live true :known true} (core/serve-wants (merge base {:threads [closed]}))))))
     (testing "bookkeeping: closed threads forgotten, sessions seen ending, dropped once their thread is closed"
       (is (= [[:forget "t1"]] (acts {:threads [] :memory (mem :threads (delivered "000.md"))})))
       (let [m (mem :sessions {"bbbb2222" (ours)})]
@@ -526,7 +557,10 @@
         (is (= {"infra" {:failures 2 :until 7 :reason "why"}} (:agents (r (mem :agents {"infra" {:failures 1}}) [:back-off "infra" 7 "why"]))))
         (is (= {} (:agents (r (mem :agents {"infra" {:failures 1}}) [:reset "infra"]))))
         (let [m (mem :threads {"t1" {:delivered "002.md" :check {:session "aaaa1111"}}} :sessions {"bbbb2222" (ours :state "starting")})]
-          (is (= {"t1" {:delivered "002.md" :deaf #{"aaaa1111"}}} (:threads (r m [:deaf "t1" "aaaa1111-full"]))))
+          (is (= {"t1" {:deaf #{"aaaa1111"}}} (:threads (r m [:deaf "t1" "aaaa1111-full"])))
+              "not delivered any more: if no start follows this round (the cap), a later one sends it")
+          (is (= {"t1" {:delivered "003.md" :agent "infra" :number 1 :check {:session "aaaa1111"}}}
+                 (:threads (r m [:pass "t1" {:agent "infra" :number 1 :file "003.md"}]))))
           (is (= {"t1" {:delivered "002.md"}} (:threads (r m [:checked "t1"]))))
           (is (= [{} "gone"] ((juxt #(get-in % [:threads "t1"]) #(get-in % [:sessions "bbbb2222" :state])) (r m [:lost "bbbb2222" "t1"]))))
           (is (= {} (:threads (r m [:forget "t1"]))))
@@ -582,7 +616,13 @@
       (is (str/includes? (core/posted-text "infra" t1' false "") "because it started this session for this thread (not another agent)"))
       (is (str/includes? (core/posted-text "infra" (assoc t1' :last-from "user") true "")
                          "from user (the user themself, writing by mail; not another agent or session) (t1, message 3)"))
-      (is (not= (core/posted-text "infra" t1 true "") (core/posted-text "infra" t1' true "")) "each post names its message"))
+      (is (not= (core/posted-text "infra" t1 true "") (core/posted-text "infra" t1' true "")) "each post names its message")
+      (is (= (str "agent-mail: closed, with news: #1 \"About t1\" closed by web (t1, message 3), posted by agent-mail serve because "
+                  "this session wrote in this thread (not another agent). Read it with `agent-mail read 1`; no answer is expected. "
+                  "To take it further, start a new thread or `agent-mail forward` it.\n"
+                  "No other session works in this folder.")
+             (core/posted-text "infra" (assoc t1' :status "done") true "No other session works in this folder."))
+          "a closed thread says so: no answer expected"))
     (testing "the also-line: other sessions in the folder or below, by the name SendMessage takes, then a word on coordinating"
       (let [mine (live-s "aaaa1111" :name "📫 infra #70")
             peer (live-s "ab12cd34" :name "infra-ab12" :kind "interactive" :status "shell" :cwd "/x/infra/.claude/worktrees/w")
@@ -1572,6 +1612,23 @@
                      (out {:dir infra :env (assoc env "CLAUDE_CODE_SESSION_ID" full)} "who" "--here")))
               (is (str/starts-with? (err {:dir infra} "who" "--here") "agent-mail: `claude agents` failed (exit 127): Cannot run program")
                   "no claude: says why"))
+            (testing "a thread answered and closed in one go is posted into the session that asked, once"
+              (let [q (out as-session "@website" "Which port?")]
+                (out {:who "website"} "reply" q "8443.")
+                (out {:who "website"} "close" q)
+                (clear!)
+                (is (str/includes? (:err (serve)) "post #2 into \"📫 infra #1\" (deadbeef)"))
+                (is (eventually 3000 #(= 2 (count (posts)))))
+                (is (str/starts-with? (text-of (last (posts)))
+                                      (str "agent-mail: closed, with news: #2 \"Which port?\" closed by website (" q ", message 3)")))
+                (is (str/includes? (text-of (last (posts))) "no answer is expected"))
+                (is (not-any? #(= "--bg" (first %)) (calls)))
+                (serve)
+                (Thread/sleep 200)
+                (is (= 2 (count (posts))) "posted once")
+                (out as-session "read" q)
+                (serve)
+                (is (nil? (get-in (memory) [:threads q])) "read: no news any more, forgotten")))
             (testing "the session ended: resumed while its prompt cache is warm"
               (out as-session "reply" id "Staging rotated.")
               (out {:who "website"} "reply" id "And prod?")
@@ -1621,7 +1678,11 @@
               (clear!)
               (serve)
               (is (= [] (calls)) "nothing of its own runs: Claude Code is not asked")
-              (is (= {:threads {} :sessions {} :agents {}} (memory)) "its thread closed: forgotten")))
+              (is (= {} (:sessions (memory))) "their thread closed: forgotten")
+              (is (= [id] (keys (:threads (memory)))) "the thread is kept while its close is news for infra")
+              (out as-session "read" id)
+              (serve)
+              (is (= {:threads {} :sessions {} :agents {}} (memory)) "read: forgotten")))
           (testing "`claude --bg` fails (an untrusted folder): back off, and say why"
             (spit (str (fs/path d "bg.fail")) (str "Starting background service…\nWorkspace not trusted. Run `claude` in " infra-real " once…\n"))
             (let [id (out {:who "website"} "@infra" "Anyone?")

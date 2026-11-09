@@ -92,7 +92,13 @@ Every few seconds serve looks at the open threads waiting on an on-call repo:
   message (`claude --bg --resume`) while its prompt cache is still warm.
 - **A session of its own.** Otherwise serve starts a background session in
   the repo, `claude --bg --name "📫 <repo> #<number>"`, whose first prompt
-  says which thread to work on. One thread per session.
+  says which thread to work on. One thread per session, and at most three new
+  sessions a round, lowest thread numbers first, so a serve that was down
+  for a while doesn't start a burst of them.
+- **Closed with news.** A thread the other side answered and closed in one go
+  is posted into its holder too, saying it is closed and needs no answer, but
+  only while that session runs: serve never resumes or starts a session for a
+  closed thread.
 - **Who else is there.** Each message from serve ends by naming the other
   sessions working in the repo's folder (its worktrees too), so they can
   coordinate through SendMessage. `agent-mail who --here` prints the same

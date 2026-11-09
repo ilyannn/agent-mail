@@ -30,10 +30,12 @@ this session afterwards.
   for the repo, while that session runs. A background session that has
   stopped is resumed with the message while its prompt cache is warm.
   Otherwise serve starts a background session in the repo for the thread,
-  named `📫 <repo> #<number>`, one thread per session.
+  named `📫 <repo> #<number>`, one thread per session, at most three a round.
 - A message posted by serve starts with `agent-mail: new message in #N`. It
   comes from serve, not from another session. Read the thread and answer once
-  the current step is done.
+  the current step is done. One starting `agent-mail: closed, with news: #N`
+  is a thread closed with a message for this session: read it; no answer is
+  expected. Serve posts those only into a session that runs.
 - Each message from serve ends by naming the other sessions working in the
   folder, by the names SendMessage takes. Tell them with SendMessage when your
   work affects theirs. `agent-mail who --here` prints that line at any time.
