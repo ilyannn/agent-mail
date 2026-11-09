@@ -105,6 +105,13 @@ public struct AgentNotice: Hashable, Sendable {
         /// On call in a folder Claude Code hasn't trusted, where serve can't
         /// start a session either.
         case untrusted
+        /// Serve can't fast-forward the agent's main checkout to what its
+        /// sessions pushed (uncommitted changes, someone working there,
+        /// diverged history).
+        case cannotLand
+        /// A finished session of serve's is kept because its worktree
+        /// branch isn't merged.
+        case unlanded
     }
 
     public var kind: Kind
@@ -167,17 +174,28 @@ public struct AgentInfo: Hashable, Sendable {
 
     /// What is wrong with it, for its row's warning and its mailbox: a
     /// folder that is gone (`agent-mail agents` marks it), or one on call
-    /// that Claude Code hasn't trusted, where serve can't start sessions.
+    /// that Claude Code hasn't trusted, where serve can't start sessions;
+    /// a main checkout serve can't bring up to date with what its sessions
+    /// pushed, and finished sessions kept for their unlanded commits.
     public var notices: [AgentNotice] {
-        guard let entry, !isMe else { return [] }
+        guard !isMe else { return [] }
         var out = [AgentNotice]()
-        let dir = entry.dir ?? "its folder"
-        if !entry.dirExists {
-            out.append(AgentNotice(.folderGone, "Its folder \(dir) is gone, so serve can’t start a session there: "
-                + "`agent-mail agents move \(name) DIR` gives it the new one."))
-        } else if entry.onCall, entry.trusted == false {
-            out.append(AgentNotice(.untrusted, "Claude Code hasn’t trusted \(dir) yet, so serve can’t start a session "
-                + "there: run `claude` in it once and accept the question."))
+        if let entry {
+            let dir = entry.dir ?? "its folder"
+            if !entry.dirExists {
+                out.append(AgentNotice(.folderGone, "Its folder \(dir) is gone, so serve can’t start a session there: "
+                    + "`agent-mail agents move \(name) DIR` gives it the new one."))
+            } else if entry.onCall, entry.trusted == false {
+                out.append(AgentNotice(.untrusted, "Claude Code hasn’t trusted \(dir) yet, so serve can’t start a session "
+                    + "there: run `claude` in it once and accept the question."))
+            }
+        }
+        if let why = serve?.cannotLand {
+            out.append(AgentNotice(.cannotLand, "Serve can’t bring the main checkout up to date with what its sessions "
+                + "pushed: \(why)."))
+        }
+        for u in serve?.unlanded ?? [] {
+            out.append(AgentNotice(.unlanded, "Unlanded work of \(u.text); serve keeps the session until it is merged."))
         }
         return out
     }

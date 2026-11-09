@@ -329,8 +329,36 @@ import Testing
             + "`agent-mail agents move gone DIR` gives it the new one.")
         #expect(dir.participant("website")?.notices.isEmpty == true)
         #expect(dir.participant("old-repo")?.notices.isEmpty == true)
+        #expect(dir.participant("notes")?.notices.isEmpty == true)
         let offCallGone = AgentInfo(name: "x", entry: DirectoryEntry(name: "x", dir: "/x/x", onCall: false, dirExists: false))
         #expect(offCallGone.notices.map(\.kind) == [.folderGone], "a folder that is gone is flagged on call or off")
+    }
+
+    @Test func unlandedWorkIsFlagged() throws {
+        let dir = MailboxIndex(status: try AgentMailJSON.decodeStatus(Fixture.data("status-directory")))
+        let infra = try #require(dir.participant("infra"))
+        #expect(infra.notices == [
+            AgentNotice(.cannotLand, "Serve can’t bring the main checkout up to date with what its sessions pushed: "
+                + "main checkout 2 behind origin/main: uncommitted changes."),
+            AgentNotice(.unlanded, "Unlanded work of “📫 infra #0”: branch worktree-agent-9c0d, 2 commits; "
+                + "serve keeps the session until it is merged."),
+        ])
+        #expect(infra.accessibilityLabel == "infra, on call, 2 warnings, 1 thread waiting on infra")
+        #expect(infra.tooltip == """
+            infra: on call — serve starts a session for each thread
+            Owns the servers, DNS and deploys.
+            \(infra.notices[0].text)
+            \(infra.notices[1].text)
+            1 thread waiting on infra
+            """)
+
+        // From a CLI that predates the directory, too.
+        let older = MailboxIndex(status: MailStatus(now: .now, me: "user", threads: [], oncall: [
+            OnCallRepo(repo: "infra", cannotLand: "diverged", unlanded: [UnlandedSession(id: "ab12", branch: "w")]),
+        ]))
+        #expect(older.participant("infra")?.notices.map(\.kind) == [.cannotLand, .unlanded])
+        #expect(older.participant("infra")?.notices.last?.text
+            == "Unlanded work of “ab12”: branch w; serve keeps the session until it is merged.")
     }
 
     @Test func thePostmasterIsServesRole() {

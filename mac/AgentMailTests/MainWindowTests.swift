@@ -120,6 +120,34 @@ import Testing
         }
     }
 
+    @Test func anAgentsMailboxSaysWhatNeedsTheUser() async {
+        await withStore { store in
+            var st = Self.directoryStatus
+            st.oncall = [OnCallRepo(repo: "docs"),
+                         OnCallRepo(repo: "infra", cannotLand: "uncommitted changes",
+                                    unlanded: [UnlandedSession(id: "ab12", name: "📫 infra #0", branch: "w", commits: 2)])]
+            store.debugShow(st)
+            let list = ThreadListViewController(store: store)
+            let window = show(list, size: NSSize(width: 320, height: 400))
+            defer { window.close() }
+            #expect(list.debugRows()[1].hasPrefix("row  a | "), "the Inbox has none")
+
+            store.mailbox = .agent("infra")
+            await settle { list.debugRows()[1].hasPrefix("notices") }
+            #expect(list.debugRows()[1] == "notices: Serve can’t bring the main checkout up to date with what its "
+                + "sessions pushed: uncommitted changes. / Unlanded work of “📫 infra #0”: branch w, 2 commits; serve "
+                + "keeps the session until it is merged.")
+            #expect(rowIDs(list) == ["row  a", "row  b", "row  c"])
+
+            store.mailbox = .agent("docs")
+            await settle { list.debugRows()[1].contains("trusted") }
+            #expect(list.debugRows()[1].hasPrefix("notices: Claude Code hasn’t trusted /x/docs yet"))
+            store.mailbox = .agent("notes")
+            await settle { !list.debugRows()[1].hasPrefix("notices") }
+            #expect(list.debugRows()[1] == "emptyLabel: No threads with notes", "nothing wrong with notes")
+        }
+    }
+
     @Test func messageMenuHasForward() throws {
         let menu = MainMenu.messageMenu()
         #expect(menu.items.map(\.title) == ["Send", "", "Reply", "Forward", "Close Thread", "", "Copy Thread ID",

@@ -6,7 +6,9 @@
 // there is one, is a row pinned at the top of the mailboxes its thread will
 // be in once sent: All Mail, mine, and the recipient's. Above the list, a
 // participant's mailbox has a scope bar: All, Sent, Received, Waiting (the
-// participant filter).
+// participant filter), and under it what needs the user about the
+// participant, when anything does (a folder serve can't use, a checkout it
+// can't land in, unlanded sessions).
 import AgentMailKit
 import AppKit
 import Observation
@@ -21,10 +23,14 @@ final class ThreadListViewController: NSViewController, NSTableViewDelegate, NSM
     private let scopeBar = NSView()
     private let scopeControl = NSSegmentedControl(labels: ParticipantFilter.allCases.map(\.title),
                                                   trackingMode: .selectOne, target: nil, action: nil)
+    /// Below the scope bar: what needs the user about the participant (its
+    /// AgentNotices), when anything does.
+    private let noticeBar = NoticeBar()
     /// The list starts under the toolbar without the scope bar, below the
-    /// bar with it.
+    /// bar with it, and below the notices when they show.
     private var scrollTopToView: NSLayoutConstraint!
     private var scrollTopToScope: NSLayoutConstraint!
+    private var scrollTopToNotices: NSLayoutConstraint!
     private var dataSource: NSTableViewDiffableDataSource<Int, String>!
     private var applying = false
     /// What the last snapshot showed, to tell a re-sort from a mailbox switch.
@@ -67,11 +73,18 @@ final class ThreadListViewController: NSViewController, NSTableViewDelegate, NSM
         scroll.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(scroll)
         buildScopeBar(in: container)
+        noticeBar.translatesAutoresizingMaskIntoConstraints = false
+        noticeBar.isHidden = true
+        container.addSubview(noticeBar)
         emptyLabel.alignment = .center
         container.addSubview(emptyLabel)
         scrollTopToView = scroll.topAnchor.constraint(equalTo: container.topAnchor)
         scrollTopToScope = scroll.topAnchor.constraint(equalTo: scopeBar.bottomAnchor)
+        scrollTopToNotices = scroll.topAnchor.constraint(equalTo: noticeBar.bottomAnchor)
         NSLayoutConstraint.activate([
+            noticeBar.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            noticeBar.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            noticeBar.topAnchor.constraint(equalTo: scopeBar.bottomAnchor),
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             scrollTopToView,
@@ -120,27 +133,33 @@ final class ThreadListViewController: NSViewController, NSTableViewDelegate, NSM
 
     /// Shows the scope bar for a participant's mailbox only, with the
     /// current filter selected and each segment's tooltip naming the
-    /// participant and counting its threads.
+    /// participant and counting its threads; below it, the participant's
+    /// notices when it has any.
     private func updateScopeBar() {
         guard case let .agent(name) = store.mailbox else {
-            if !scopeBar.isHidden {
-                scopeBar.isHidden = true
-                scrollTopToScope.isActive = false
-                scrollTopToView.isActive = true
-            }
+            scopeBar.isHidden = true
+            noticeBar.isHidden = true
+            pinListTop(scrollTopToView)
             return
         }
-        if scopeBar.isHidden {
-            scopeBar.isHidden = false
-            scrollTopToView.isActive = false
-            scrollTopToScope.isActive = true
-        }
+        scopeBar.isHidden = false
+        let notices = store.index.participant(name)?.notices ?? []
+        noticeBar.show(notices)
+        noticeBar.isHidden = notices.isEmpty
+        pinListTop(notices.isEmpty ? scrollTopToScope : scrollTopToNotices)
         let isMe = name == store.index.me
         for (i, filter) in ParticipantFilter.allCases.enumerated() {
             let n = store.index.count(filter, for: name)
             scopeControl.setToolTip("\(filter.explanation(for: name, isMe: isMe)) (\(n))", forSegment: i)
         }
         scopeControl.selectedSegment = store.participantFilter.menuTag
+    }
+
+    /// The list's top follows `constraint` alone.
+    private func pinListTop(_ constraint: NSLayoutConstraint) {
+        guard !constraint.isActive else { return }
+        for c in [scrollTopToView, scrollTopToScope, scrollTopToNotices] where c !== constraint { c?.isActive = false }
+        constraint.isActive = true
     }
 
     @objc private func scopeChanged(_ sender: NSSegmentedControl) {
@@ -271,7 +290,8 @@ final class ThreadListViewController: NSViewController, NSTableViewDelegate, NSM
     }
 
     func debugRows() -> [String] {
-        [debugScopeBar()] + (0..<tableView.numberOfRows).map { row in
+        [debugScopeBar()] + (noticeBar.isHidden ? [] : ["notices: \(noticeBar.text.replacingOccurrences(of: "\n", with: " / "))"])
+            + (0..<tableView.numberOfRows).map { row in
             let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false)
             let selected = tableView.selectedRow == row ? "*" : " "
             return "row\(selected) \(dataSource.itemIdentifier(forRow: row) ?? "?") | \(cell?.accessibilityLabel() ?? "?")"
@@ -368,6 +388,74 @@ final class ThreadListViewController: NSViewController, NSTableViewDelegate, NSM
     @objc private func contextReveal(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
         NSWorkspace.shared.activateFileViewerSelecting([store.threadDirectory(id)])
+    }
+}
+
+/// What needs the user about a participant, above its threads: a warning
+/// sign and one line per notice (selectable, so a branch or a folder can be
+/// copied) on a light orange band, with a separator under it.
+final class NoticeBar: NSView {
+    private let icon = NSImageView()
+    private let label = NSTextField(wrappingLabelWithString: "")
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        icon.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Warning")?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .regular).applying(.preferringMulticolor()))
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        label.textColor = .labelColor
+        label.isSelectable = true
+        label.setAccessibilityLabel("Warnings")
+        let separator = NSBox()
+        separator.boxType = .separator
+        for v in [icon, label, separator] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(v)
+        }
+        NSLayoutConstraint.activate([
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            icon.firstBaselineAnchor.constraint(equalTo: label.firstBaselineAnchor),
+            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            label.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            label.bottomAnchor.constraint(equalTo: separator.topAnchor, constant: -8),
+            separator.leadingAnchor.constraint(equalTo: leadingAnchor),
+            separator.trailingAnchor.constraint(equalTo: trailingAnchor),
+            separator.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    var text: String { label.stringValue }
+
+    /// One paragraph per notice, a little apart.
+    func show(_ notices: [AgentNotice]) {
+        let text = notices.map(\.text).joined(separator: "\n")
+        guard label.stringValue != text else { return }
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.paragraphSpacing = 4
+        label.attributedStringValue = NSAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize), .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: paragraph,
+        ])
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        layer?.backgroundColor = NSColor.systemOrange.withAlphaComponent(0.1).cgColor
+    }
+
+    /// Wraps at the width it was given.
+    override func layout() {
+        super.layout()
+        if label.preferredMaxLayoutWidth != label.frame.width {
+            label.preferredMaxLayoutWidth = label.frame.width
+            needsLayout = true
+        }
     }
 }
 
