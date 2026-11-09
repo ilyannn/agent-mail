@@ -508,17 +508,19 @@
 
 (defn trust-of
   "A function telling whether Claude Code trusts a folder, which `claude
-   --bg` needs: its projects entry's hasTrustDialogAccepted in .claude.json
-   (claude-json-file). Trust is per folder, not inherited. nil when that
-   can't be read; never throws."
+   --bg` needs, from the projects entries' hasTrustDialogAccepted in
+   .claude.json (claude-json-file): the folder's own, else a folder above
+   it, short of a git repo's root (see core/trusted?). nil when that can't
+   be read; never throws."
   []
   (let [projects (try (let [f (claude-json-file)]
                         (when (fs/regular-file? f) (get (json/parse-string (slurp (str f))) "projects")))
-                      (catch Exception _ nil))]
+                      (catch Exception _ nil))
+        accepted? (fn [d] (let [e (get projects d)] (true? (and (map? e) (get e "hasTrustDialogAccepted")))))]
     (fn [dir]
       (when (and (map? projects) dir)
-        (let [e (or (get projects (str dir)) (get projects (real-dir dir)))]
-          (true? (and (map? e) (get e "hasTrustDialogAccepted"))))))))
+        (or (accepted? (str dir))
+            (core/trusted? (core/folder-chain (real-dir dir)) accepted? #(fs/exists? (fs/path % ".git"))))))))
 
 (defn trust-line
   "Why serve can't start sessions for on-call entry `e`, when Claude Code

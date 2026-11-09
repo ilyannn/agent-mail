@@ -288,6 +288,20 @@
       (str "/" (str/join "/" (concat m (drop (count t) p))))
       path)))
 
+(defn trusted?
+  "Whether Claude Code trusts the first folder of `chain` (folder-chain's):
+   its own trust, else that of the nearest folder above it that has any,
+   as trust reaches plain folders below a trusted one. A git repo's root
+   (`repo-root?`) is not reached from above: without its own trust, it and
+   what lies below it are untrusted. `accepted?` tells whether a folder's
+   trust dialog was accepted."
+  [chain accepted? repo-root?]
+  (loop [[f & more] chain]
+    (cond (nil? f) false
+          (accepted? f) true
+          (repo-root? f) false
+          :else (recur more))))
+
 (defn- preferred
   "The entry to take when several share a folder: one on call, then by name."
   [entries]

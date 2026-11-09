@@ -940,6 +940,17 @@
     (is (= ["/x/app/src" "/x/app" "/x" "/"] (core/folder-chain "/x/app/src")) "up to /, nearest first")
     (is (= ["/x/app" "/x" "/"] (core/folder-chain "/x//app/")))
     (is (= ["/"] (core/folder-chain "/"))))
+  (testing "trust: a folder's own, else the nearest above it with any, never from above into a git repo"
+    (let [accepted #{"/t" "/t/repo/own"}
+          repo-root #{"/t/repo" "/t/repo/own" "/t/plain/nested"}
+          trusted? #(core/trusted? (core/folder-chain %) accepted repo-root)]
+      (is (trusted? "/t"))
+      (is (trusted? "/t/plain/deep") "a plain folder below a trusted one")
+      (is (not (trusted? "/t/repo")) "a repo below a trusted folder needs its own trust")
+      (is (not (trusted? "/t/repo/src")) "and so does what lies inside it")
+      (is (trusted? "/t/repo/own") "a repo with its own")
+      (is (not (trusted? "/t/plain/nested/x")))
+      (is (not (trusted? "/u")))))
   (testing "a linked worktree's folders count as the main worktree's"
     (is (= "/x/app/src" (core/worktree-path "/x/app/.claude/worktrees/w/src" "/x/app/.claude/worktrees/w" "/x/app")))
     (is (= "/x/app" (core/worktree-path "/x/app-wt" "/x/app-wt" "/x/app")))
@@ -2215,7 +2226,8 @@
         (spit (str (fs/path infra "CLAUDE.md")) "# infra\n\nNot this: infra has a description.\n")
         (spit (str (fs/path docs "README.md")) "# Docs\n\n[![ci](x)](y)\n\nThe documentation site.\nAsk it for pages.\n\nMore.\n")
         (spit (str (fs/path cfg ".claude.json"))
-              (json/generate-string {:projects {(real infra) {:hasTrustDialogAccepted true} (real docs) {:hasTrustDialogAccepted false}}}))
+              (json/generate-string {:projects {(real infra) {:hasTrustDialogAccepted true} (real docs) {:hasTrustDialogAccepted false}
+                                                (real (mk "parent")) {:hasTrustDialogAccepted true}}}))
         (testing "an empty directory"
           (is (= [] (listed)))
           (is (= "the agent directory is empty; `agent-mail agents add [DIR]` adds a folder" (text {} "agents"))))
@@ -2295,7 +2307,13 @@
             (is (str/starts-with? (refused {:env user-shell} "@web-app" "After") "agent-mail: no agent named web-app in the directory"))
             (is (str/starts-with? (refused {} "agents" "remove" "web-app") "agent-mail: no agent named web-app"))))
         (testing "on call is the directory's field"
-          (is (= ["infra" "site"] (map :repo (json/parse-string (text {} "oncall" "--json") true)))))))))
+          (is (= ["infra" "site"] (map :repo (json/parse-string (text {} "oncall" "--json") true)))))
+        (testing "trust reaches a plain folder below a trusted one, not a git repo there"
+          (let [plain (mk "parent/plain") repo (mk "parent/repo")]
+            (git-in repo "init" "-q")
+            (is (not (str/includes? (text {} "agents" "add" plain) "hasn't trusted")))
+            (is (str/includes? (text {} "agents" "add" repo) (str "Claude Code hasn't trusted " (real repo))))
+            (is (= [true false] (map (comp :trusted agent) ["plain" "repo"])))))))))
 
 (deftest identity-from-the-directory
   (with-bare-store
