@@ -20,16 +20,17 @@ it. There is no server and no network.
   `CLAUDE_CODE_CHILD_SESSION`) the caller is the repo. In your own shell it is
   `user`. `--as NAME` or `AGENT_MAIL_AS` override either.
 - **Agents find their mail** in three ways:
+  - While their repo is **on call**, `agent-mail serve` hands each thread to
+    a Claude Code session of its own (see below).
   - At session start, through a hook.
-  - Right away while a session is **on duty** (`/agent-mail-listen`).
-  - Through a tab that opens for them while their repo is **on call** (see
-    below).
+  - Right away while a script or Codex waits for it with `agent-mail wait`
+    (**on duty**).
 
 ## Install
 
 You need git and [mise](https://mise.jdx.dev), which installs the pinned
-babashka and just. The CLI also runs on Linux; notifications, on-call tabs and
-the app are macOS only.
+babashka and just, and Claude Code for mail on call. The CLI also runs on
+Linux; notifications, `just install-serve` and the app are macOS only.
 
 ```sh
 git clone https://github.com/ilyannn/agent-mail.git
@@ -44,7 +45,7 @@ just install-hook   # a SessionStart hook: each session hears about its mail
 mail to you comes with a clickable notification.
 
 The two skills teach agents the tool: `/agent-mail` covers sending, reading
-and answering, and `/agent-mail-listen` puts a session on duty. To have agents
+and answering, and `/agent-mail-listen` puts a repo on call. To have agents
 use it without being asked, add a few lines to your global `CLAUDE.md`, for
 example: "To ask another repo for something it owns, send mail with
 `agent-mail`; answer threads that are your turn."
@@ -58,45 +59,63 @@ agent-mail read 3                  # a thread, by number, id or unique fragment
 agent-mail reply 3 "Done."         # answer; --to NAME hands the turn to someone else
 agent-mail close 3                 # finished
 agent-mail forward 3 --to docs     # a new thread carrying thread 3 (--msg N: one message)
-agent-mail who                     # who is on duty
+agent-mail who                     # who is on duty, who is on call, serve's sessions
+agent-mail who --here              # the other Claude Code sessions in this folder
 agent-mail help                    # everything else
 ```
 
 Bodies are Markdown, given as trailing text, on stdin, or both. `--attach FILE`
 copies a file into the thread.
 
-## Listening for mail
+## Delivering mail
 
-**On duty.** A session started with
-`claude --name "📫 <repo>" "/agent-mail-listen"` stays open with
-`agent-mail wait` running in the background. New mail is posted into the
-session as it arrives, and the session answers it under the repo's own rules.
-An idle session still holds a few hundred MB.
-
-**On call.** Use this instead when you don't want idle sessions:
+**On call.** `agent-mail serve` delivers the mail of the repos on call, one
+Claude Code session per thread:
 
 ```sh
 just install-serve      # runs `agent-mail serve` at login (launchd), log in ~/Library/Logs/agent-mail-serve.log
 agent-mail oncall add   # inside a repo: put it on call (running /agent-mail-listen there does it too)
-agent-mail oncall       # the on-call repos and their state
+agent-mail oncall       # the on-call repos, their state and serve's sessions
 ```
 
-How serve handles on-call repos:
+Every few seconds serve looks at the open threads waiting on an on-call repo:
 
-- **Opening.** When mail waits on an on-call repo and no session is on duty,
-  serve opens a [WezTerm](https://wezterm.org) tab in the repo running
-  `claude --name "📫 <repo>" "/agent-mail-listen"`. The tab goes in the window
-  you're using, and your focus stays where it was.
-- **Closing.** Serve closes the tabs it opened once their session has been idle
-  for an hour with nothing waiting. That hour is how long the prompt cache
-  lives, so a fresh session afterwards costs no more than the old one would. It
-  never closes sessions you started.
-- **Testing.** To watch a tab close sooner, run `just uninstall-serve`, then
-  `agent-mail serve --idle-minutes 2` in a terminal.
+- **A message records its session.** A message written from a Claude Code
+  session names that session. The session that last wrote in a thread for
+  the repo holds the thread.
+- **Posted into the holder.** While the holding session runs, a new message
+  in the thread is posted into it, as interactive sessions and background ones
+  alike take posts from other processes. A post that an idle session hasn't
+  taken up after 30 seconds was held for your approval (sessions that bypass
+  permission prompts do that); the thread then goes to a new session.
+- **Resumed.** A background session that has stopped is resumed with the
+  message (`claude --bg --resume`) while its prompt cache is still warm.
+- **A session of its own.** Otherwise serve starts a background session in
+  the repo, `claude --bg --name "📫 <repo> #<number>"`, whose first prompt
+  says which thread to work on. One thread per session.
+- **Who else is there.** Each message from serve ends by naming the other
+  sessions working in the repo's folder (its worktrees too), so they can
+  coordinate through SendMessage. `agent-mail who --here` prints the same
+  line.
+- **Stopping.** Serve stops the sessions it started (`claude stop`) once they
+  are idle, hold no open thread and their prompt cache has expired, an hour or
+  five minutes after their last reply. The conversation is kept for a later
+  message. Serve never stops sessions you started.
 
-Requirements: WezTerm running, and `claude` on your login shell's PATH. A repo
-Claude has never opened stops at its "trust this folder" question until you
-answer it.
+`claude agents` lists the sessions and `claude attach <id>` opens one;
+`agent-mail who` lists those serve handed threads to. A new interactive session
+in an on-call repo hears nothing of the threads serve delivers, so it doesn't
+take them on.
+
+Requirements: `claude` on PATH or on your login shell's PATH
+(`AGENT_MAIL_CLAUDE` names another), and every on-call repo trusted by Claude
+Code: run `claude` in it once and accept the "trust this folder" question.
+Until then `claude --bg` fails there, serve backs off, and `agent-mail oncall`
+shows why.
+
+**On duty.** A script or Codex can wait for mail with
+`agent-mail wait --timeout S`, which prints the ids of the threads waiting on
+the repo and exits. While it waits, serve leaves the repo's threads to it.
 
 ## Mac app
 

@@ -23,7 +23,8 @@ agent-mail @infra "subject line" < body.md             # same, subject from the 
 agent-mail reply 3 [--to X] < body.md                            # hands the turn to X
 agent-mail close 3 [< note.md]       # marks the thread done
 agent-mail forward 3 --to infra [note]  # new thread to infra: the note, then thread 3's messages
-agent-mail who                       # who is on duty right now, and who is on call
+agent-mail who                       # who is on duty, who is on call, and serve's sessions
+agent-mail who --here                # the other Claude Code sessions working in this folder
 agent-mail status [--json]           # everything at once, for UIs
 ```
 
@@ -73,8 +74,28 @@ message, `--msg N`) and its files into a new thread that names its source.
 
 ## After sending
 
-The delivery note says whether the recipient is on duty. If it names a session,
-nudge it with SendMessage carrying just the thread id (nothing else; the thread
-holds the content). If it says the recipient is on call, a listener tab opens
-for it shortly and nothing more is needed. If nobody is on duty, the recipient
-sees the thread at its next session start, and you can tell the user so.
+The delivery note says how the recipient gets the thread. If it says the
+recipient is on call, `agent-mail serve` hands the thread to a Claude Code
+session in that repo, and nothing more is needed. If it names a session on
+duty, nudge it with SendMessage carrying just the thread id (nothing else; the
+thread holds the content). If nobody is on duty, the recipient sees the thread
+at its next session start, and you can tell the user so.
+
+## Mail that serve posts
+
+A message written from a Claude Code session records that session. While your
+repo is on call, later messages in a thread you wrote in for it are posted
+into your session by `agent-mail serve`. Such a message starts with
+`agent-mail: new message in #N`. It comes from serve, not from another
+session, and one `from user` is the user's own message, written by mail.
+Read the thread with `agent-mail read N` and answer once your current step is
+done.
+
+A session that serve started for a thread is told so in its first prompt. It
+works on that thread only.
+
+Each message from serve ends by naming the other sessions working in the same
+folder, by the names SendMessage takes. When your work affects theirs (the
+same files, a push to the branch they work on), tell them with SendMessage and
+let them decide. `agent-mail who --here` prints that line at any time.
+`claude agents` lists every session, and `claude attach <id>` opens one.

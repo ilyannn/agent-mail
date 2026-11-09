@@ -53,7 +53,7 @@ install-hook:
             (spit f (str (json/generate-string (update-in d ["hooks" "SessionStart"] (fnil conj []) hook) {:pretty true}) "\n"))
             (println "added"))))
 
-# Run `agent-mail serve` (on-call listener tabs) under launchd, logging to ~/Library/Logs; replaces a loaded one
+# Run `agent-mail serve` (a Claude Code session per on-call thread) under launchd, logging to ~/Library/Logs; replaces a loaded one
 install-serve:
     #!/usr/bin/env bb
     (require '[babashka.fs :as fs] '[babashka.process :as p] '[clojure.string :as str])

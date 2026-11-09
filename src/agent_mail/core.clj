@@ -1,5 +1,5 @@
 ;; agent-mail.core: the pure half of agent-mail. Text, time, frontmatter,
-;; thread state, the status view, on-call decisions, wait announcements,
+;; thread state, the status view, serve's decisions and the texts it posts,
 ;; draft extraction and argv parsing; nothing
 ;; here touches the store, the environment or a process. Loaded by
 ;; agent-mail.bb (and test.bb) from the repo's src/ directory; refusals are
@@ -272,8 +272,8 @@
 (defn listener
   "Who picks up an open thread: \"user\" when it waits on the user, \"on-duty\"
    when `on-duty?` (e.g. the set of repos with an on-duty record) holds for its
-   owner, \"on-call\" when `on-call?` does (a listener tab opens for it
-   shortly, see oncall-actions), else \"none\". nil for a closed thread, or one
+   owner, \"on-call\" when `on-call?` does (serve hands it to a Claude Code
+   session, see serve-actions), else \"none\". nil for a closed thread, or one
    without messages yet."
   ([th on-duty?] (listener th on-duty? #{}))
   ([th on-duty? on-call?]
@@ -284,9 +284,9 @@
            :else "none"))))
 
 (defn undelivered
-  "Ids of the threads nobody is listening for (listener \"none\"; an on-call
-   owner's tab is on its way), longest waiting first, then by number. No
-   threshold: that is the reader's call."
+  "Ids of the threads nobody is listening for (listener \"none\": not on
+   call, serve not running, or backing off), longest waiting first, then by
+   number. No threshold: that is the reader's call."
   [threads]
   (->> threads
        (filter #(= "none" (:listener %)))
@@ -297,166 +297,93 @@
 ;; is compatible. UIs refuse a schema they don't know.
 (def status-schema 1)
 
+(declare thread-session)
+
 (defn status
   "Everything at once, for a UI that must not re-derive anything: every thread
    (closed ones too), newest-updated first, as a summary (flow included) with
    the caller's unread count, unread counts per participant, how long it has
    waited and who will pick it up; the duty records as given; and the
-   undelivered thread ids; the on-call repos and whether serve runs.
+   undelivered thread ids; the on-call repos and whether serve runs; and,
+   for a thread serve delivered, the session holding it (thread-session).
    `seen` maps each reader (the caller and every participant) to their seen
    markers; `duty` is the duty records with :on-duty already decided;
-   `oncall` is oncall-view's list and `serve` is {:alive :pid}. A repo counts
-   as on call only while serve is alive and the repo is not backing off."
-  [{:keys [now me threads seen duty oncall serve]}]
+   `oncall` is oncall-view's list, `serve` is {:alive :pid} and `memory`
+   serve's. A repo counts as on call only while serve is alive and the repo
+   is not backing off."
+  [{:keys [now me threads seen duty oncall serve memory]}]
   (let [on-duty-repos (set (map :repo (filter :on-duty duty)))
         on-call-repos (if (:alive serve) (set (map :repo (remove #(= "backing-off" (:state %)) oncall))) #{})
         ths (->> threads
                  (map (fn [th]
-                        (assoc (summary th)
-                               :unread (count (unread (:msgs th) me (get-in seen [me (:id th)])))
-                               :unread-by (unread-by th seen)
-                               :participants (participants th)
-                               :waiting-s (waiting-s th now)
-                               :listener (listener th on-duty-repos on-call-repos))))
+                        (cond-> (assoc (summary th)
+                                       :unread (count (unread (:msgs th) me (get-in seen [me (:id th)])))
+                                       :unread-by (unread-by th seen)
+                                       :participants (participants th)
+                                       :waiting-s (waiting-s th now)
+                                       :listener (listener th on-duty-repos on-call-repos))
+                          (thread-session memory (:id th)) (assoc :session (thread-session memory (:id th))))))
                  (sort-by :updated #(compare %2 %1))
                  vec)]
     {:schema status-schema :now now :me me :threads ths :duty (vec duty) :undelivered (undelivered ths)
      :oncall (vec oncall) :serve (or serve {:alive false :pid nil})}))
 
-;; ---------------------------------------------------------------- on call
-;; A repo on call gets a listener tab when mail waits on it and nobody is on
-;; duty: `agent-mail serve` opens a WezTerm tab running Claude Code with the
-;; listen skill, and closes it again once its session has idled with nothing
-;; waiting. serve's memory is repo -> {:pane :gui-pid :spawned-at :failures
-;; :until :reason}, times in epoch milliseconds (as Claude Code's registry has
-;; them); the functions here decide, serve gathers and carries out.
+;; ---------------------------------------------------------------- serve: a session per thread
+;; `agent-mail serve` hands the mail of on-call agents to Claude Code
+;; sessions itself, one session per thread. An open thread whose turn is an
+;; on-call agent's goes to the session holding it: the one that last wrote
+;; in it as that agent (a message records its writer's session), or the one
+;; serve started for it since. A running holder gets the message posted into
+;; its inbox; a stopped background one whose prompt cache is still warm is
+;; resumed with it; otherwise serve starts a background session for the
+;; thread. It stops the sessions it started once they idle with nothing
+;; waiting and their cache has expired. Its memory, times in epoch
+;; milliseconds as Claude Code's registry has them:
+;;   {:threads  {id {:agent :number :delivered (newest message file handed on)
+;;                   :holder (short id) :deaf #{short ids that held a post}
+;;                   :check {:session :file :at :status-updated-at}}}
+;;    :sessions {short-id {:session-id :agent :thread :number :name :kind
+;;                         :ours (serve started it) :state :status :since
+;;                         :started-at}}
+;;    :agents   {agent {:failures :until :reason}}}
+;; :state is "starting" (started or resumed, not listed by `claude agents`
+;; yet), "live", "stopped" or "gone" (not even `claude agents --all` lists
+;; it). The functions here decide; serve gathers and carries out.
 
-(defn sh-quote
-  "`s` as one POSIX shell word: single-quoted, each ' written as '\\''. The
-   same text means the same in sh, bash, zsh and fish."
-  [s]
-  (str "'" (str/replace (str s) "'" "'\\''") "'"))
+(def idle-statuses
+  "The registry statuses of a session between turns: \"idle\", and
+   \"shell\", which Claude Code reports instead while a background bash task
+   runs. \"busy\" (a turn) and \"waiting\" (blocked on the user) are not."
+  #{"idle" "shell"})
 
-(defn listener-command
-  "What a listener tab's login shell runs for `repo`: Claude Code named
-   \"📫 <repo>\" (its /resume entry and tab title) with the listen skill as
-   its first prompt. exec, so the tab closes when Claude Code exits."
-  [repo]
-  (str "exec claude --name " (sh-quote (str "📫 " repo)) " " (sh-quote "/agent-mail-listen")))
-
-(def oncall-grace-ms
-  "How long a tab serve opened has to come on duty before serve backs off:
-   Claude Code starting, loading the skill and arming its wait takes seconds,
-   so two minutes means something stopped it (a trust prompt, a missing
-   `claude`)."
+(def start-grace-ms
+  "How long a session serve started or resumed has to show up in `claude
+   agents` before serve backs off: `claude --bg` returns once the background
+   service has it, so two minutes means something stopped it."
   120000)
 
+(def post-check-ms
+  "How long after a post into an idle session serve looks whether it was
+   taken up: Claude Code holds a post from another process for the user to
+   approve in a session that bypasses permission prompts, and the session
+   stays idle with an unchanged statusUpdatedAt."
+  30000)
+
+(def default-ttl-ms
+  "A prompt cache's lifetime when nothing says otherwise: one hour."
+  3600000)
+
 (defn back-off-ms
-  "How long serve leaves a repo alone after its `n`th failure in a row: two
+  "How long serve leaves an agent alone after its `n`th failure in a row: two
    minutes, doubling, at most an hour."
   [n]
   (min 3600000 (* 120000 (bit-shift-left 1 (min 10 (max 0 (dec n)))))))
 
 (defn back-off
-  "The action backing `repo` off after one more failure; `m` is serve's
-   memory of the repo, whose :failures count so far."
-  [repo m now reason]
-  [:back-off repo (+ now (back-off-ms (inc (or (:failures m) 0)))) reason])
-
-(defn- pane-sessions
-  "The live sessions (values of `sessions`) behind `repo`'s duty records that
-   name `pane`; none without a pane."
-  [repo pane duty sessions]
-  (when pane
-    (keep #(get sessions (:session-pid %)) (filter #(and (= repo (:repo %)) (= pane (:pane %))) duty))))
-
-(def closable-statuses
-  "The registry statuses that let serve close its tab: \"idle\", and
-   \"shell\", which Claude Code reports instead of \"idle\" between turns
-   while a background bash task runs. A listener's own wait always is one, so
-   between turns a listener is always \"shell\", and statusUpdatedAt marks
-   when its last turn ended. Serve only closes the tabs it opened, which are
-   listeners, so the cost is that other background work such a session
-   started and left running for the whole idle period ends with it.
-   \"busy\" (a turn) and \"waiting\" (blocked on the user) never close."
-  #{"idle" "shell"})
-
-(defn- idle-since?
-  "Whether registry status `s` is closable (see closable-statuses) and has
-   been for `ms` by `now`."
-  [s now ms]
-  (and (contains? closable-statuses (:status s)) (number? (:status-updated-at s))
-       (>= (- now (:status-updated-at s)) ms)))
-
-(defn oncall-actions
-  "What serve does this round, as data. `oncall` maps the registered repos to
-   {:dir}; `memory` is serve's (see above); `duty` the duty records with
-   :on-duty decided; `pending` the set of repos open threads wait on; `panes`
-   the set of WezTerm's pane ids, nil when wezterm could not tell; `gui-pid`
-   the WezTerm GUI's pid (a pane id from an earlier GUI means nothing);
-   `sessions` maps a live session pid to its registry {:status
-   :status-updated-at}. Only panes in `memory` are ever closed or forgotten:
-   sessions the user started are never touched. Per repo, in name order:
-   [:forget R]            its pane is gone (closed by the user, or an older GUI's)
-   [:drop R]              no longer on call and no tab left: forget it all
-   [:reset R]             it came on duty: clear the spawn and the backoff
-   [:close R P]           nothing waits on R, and every session behind R's
-                          duty records in pane P is idle for `idle-ms`
-   [:back-off R until why] the tab did not come on duty in `grace-ms`, closed
-                          first, or is open with nobody on duty
-   [:spawn R]             mail waits, nobody is on duty, no tab is on its way,
-                          and R is not backing off"
-  [{:keys [now oncall memory duty pending panes gui-pid sessions idle-ms grace-ms]}]
-  (let [grace-ms (or grace-ms oncall-grace-ms)
-        on-duty (set (map :repo (filter :on-duty duty)))]
-    (vec
-     (mapcat
-      (fn [repo]
-        (let [m (get memory repo {})
-              gone? (boolean (and (:pane m) panes
-                                  (or (not (contains? panes (:pane m)))
-                                      (and gui-pid (:gui-pid m) (not= gui-pid (:gui-pid m))))))
-              pane (when-not gone? (:pane m))
-              spawned (:spawned-at m)
-              duty? (contains? on-duty repo)
-              live (pane-sessions repo pane duty sessions)]
-          (cond-> (if gone? [[:forget repo]] [])
-            (and (not (contains? oncall repo)) (not pane)) (conj [:drop repo])
-            (and (or (contains? oncall repo) pane) duty? (or spawned (:until m) (:failures m))) (conj [:reset repo])
-            (or (contains? oncall repo) pane)
-            (into (cond
-                    (and pane panes (not (contains? pending repo)) (seq live) (every? #(idle-since? % now idle-ms) live))
-                    [[:close repo pane]]
-                    duty? []
-                    (and spawned gone?) [(back-off repo m now "its tab closed before a session came on duty")]
-                    (and spawned (>= (- now spawned) grace-ms)) [(back-off repo m now "no session came on duty")]
-                    spawned []
-                    (not (and (contains? oncall repo) (contains? pending repo))) []
-                    (and (:until m) (< now (:until m))) []
-                    (and pane (nil? panes)) []
-                    pane [(back-off repo m now (str "its tab (pane " pane ") is open, but nobody is on duty"))]
-                    :else [[:spawn repo]])))))
-      (sort (distinct (concat (keys oncall) (keys memory))))))))
-
-(defn remember
-  "serve's memory after `event` at `now`: an action of oncall-actions carried
-   out, or [:spawned R pane gui-pid] for a tab opened ([:spawn R] itself
-   changes nothing: it ends as :spawned or :back-off). A repo left with
-   nothing to remember is dropped."
-  [memory [kind repo & more] now]
-  (let [m (get memory repo {})
-        m (case kind
-            :spawned (let [[pane gui-pid] more]
-                       (cond-> (-> m (assoc :pane pane :spawned-at now) (dissoc :until :reason :gui-pid))
-                         gui-pid (assoc :gui-pid gui-pid)))
-            (:forget :close) (dissoc m :pane :gui-pid)
-            :reset (dissoc m :spawned-at :failures :until :reason)
-            :back-off (let [[until reason] more]
-                        (-> m (assoc :until until :reason reason :failures (inc (or (:failures m) 0)))
-                            (dissoc :spawned-at)))
-            :drop {}
-            m)]
-    (if (empty? m) (dissoc memory repo) (assoc memory repo m))))
+  "The action backing `agent` off after one more failure; `m` is serve's
+   memory of the agent, whose :failures count so far."
+  [agent m now reason]
+  [:back-off agent (+ now (back-off-ms (inc (or (:failures m) 0)))) reason])
 
 (defn clock
   "Epoch milliseconds as the machine's local time of day, e.g. 05:40."
@@ -464,80 +391,461 @@
   (.format (.atZone (java.time.Instant/ofEpochMilli ms) (java.time.ZoneId/systemDefault))
            (java.time.format.DateTimeFormatter/ofPattern "HH:mm")))
 
-(defn oncall-view
-  "Each registered repo with what serve is doing about it, for `oncall`,
-   `who` and `status`: {:repo :dir :state :pane :text}, plus :sessions on
-   duty, :idle-s of the session in serve's tab, and :until (a UTC stamp)
-   with :reason while backing off. :state is \"on-duty\", \"backing-off\",
-   \"starting\" (a tab is on its way), \"tab-open\" (serve's tab, nobody on
-   duty) or \"on-call\". Inputs as for oncall-actions."
-  [{:keys [now oncall memory duty sessions]}]
-  (vec
-   (for [[repo {:keys [dir]}] (sort-by key oncall)
-         :let [m (get memory repo {})
-               pane (:pane m)
-               names (vec (distinct (keep :session (filter #(and (= repo (:repo %)) (:on-duty %)) duty))))
-               on-duty? (boolean (some #(and (= repo (:repo %)) (:on-duty %)) duty))
-               s (first (pane-sessions repo pane duty sessions))
-               status-s (when (number? (:status-updated-at s)) (quot (- now (:status-updated-at s)) 1000))
-               idle-s (when (contains? closable-statuses (:status s)) status-s)
-               until (when (and (:until m) (< now (:until m))) (:until m))
-               state (cond on-duty? "on-duty" until "backing-off" (:spawned-at m) "starting"
-                           pane "tab-open" :else "on-call")
-               tab (str "tab open (pane " pane ")")]]
-     (cond-> {:repo repo :dir dir :state state :pane pane
-              :text (case state
-                      "on-duty" (if pane
-                                  (str tab ", on duty"
-                                       (when (:status s)
-                                         (str ", " (if idle-s "idle" (:status s)) (when status-s (str " " (duration status-s))))))
-                                  (str "on duty (session " (str/join ", " names) ")"))
-                      "backing-off" (str "backing off until " (clock until) ": " (:reason m))
-                      "starting" (str "tab opening" (when pane (str " (pane " pane ")")))
-                      "tab-open" (str tab ", nobody on duty")
-                      "on call")}
-       (seq names) (assoc :sessions names)
-       idle-s (assoc :idle-s idle-s)
-       until (assoc :until (fmt-utc (java.time.Instant/ofEpochMilli until)) :reason (:reason m))))))
+(defn- ms-of [ts] (try (.toEpochMilli (java.time.Instant/parse ts)) (catch Exception _ nil)))
 
-;; ---------------------------------------------------------------- wait announcements
+(defn short-id
+  "The 8-character id Claude Code shows for a session (`claude agents`,
+   `claude attach`): the start of its sessionId. nil for nil."
+  [sid]
+  (when (string? sid) (subs sid 0 (min 8 (count sid)))))
+
+(defn find-session
+  "The entry of `sessions` (as agents-items gives them) for session `sid`, a
+   full sessionId or a short id."
+  [sessions sid]
+  (when-let [k (short-id sid)] (some #(when (= k (:id %)) %) sessions)))
+
+(defn background? [s] (contains? #{"background" "bg"} (:kind s)))
+
+(defn inside?
+  "Whether directory `path` is `dir` or below it."
+  [path dir]
+  (boolean (and path dir (let [d (str/replace dir #"/+$" "")]
+                           (or (= path d) (str/starts-with? path (str d "/")))))))
+
+(defn thread-session-name
+  "The name serve gives the session it starts for thread number `n` of
+   `agent`: its /resume entry and `claude agents` row."
+  [agent n]
+  (str "📫 " agent " #" n))
+
+;; ---- what Claude Code says
+
+(defn agents-items
+  "The sessions in `claude agents --json`, parsed with keyword keys: an
+   array, or an object holding one. Each as {:id :session-id :pid :cwd :name
+   :kind :status :run-state}, :id being the short id and :run-state the
+   list's own `state` (done, stopped, …)."
+  [parsed]
+  (let [xs (cond (sequential? parsed) parsed
+                 (map? parsed) (or (some #(when (sequential? %) %) ((juxt :agents :sessions :items) parsed))
+                                   (some #(when (sequential? %) %) (vals parsed)))
+                 :else [])]
+    (vec (for [x xs :when (map? x)
+               :let [sid (:sessionId x) id (short-id (or sid (:id x)))]
+               :when id]
+           {:id id :session-id sid :pid (:pid x) :cwd (:cwd x) :name (:name x) :kind (:kind x)
+            :status (:status x) :run-state (:state x)}))))
+
+(defn backgrounded-id
+  "The short id in what `claude --bg` prints, `backgrounded · 52f6bcf5 ·
+   name` (after a `Starting background service…` line when it started one);
+   nil when there is none."
+  [out]
+  (second (re-find #"(?m)^\s*backgrounded\s*·\s*([0-9a-f]{8})" (str out))))
+
+(defn claude-failure
+  "Why a run of claude failed, in one line for serve's log and back-off:
+   `what` failed, its exit code, and the first line it printed that is not
+   the background service starting, e.g. `Workspace not trusted. Run
+   `claude` in <dir> once…`."
+  [what {:keys [exit out err]}]
+  (let [line (->> (str/split-lines (str err "\n" out)) (map str/trim) (remove str/blank?)
+                  (remove #(str/starts-with? % "Starting background service")) first)]
+    (str what " failed (exit " exit ")" (when line (str ": " line)))))
+
+(defn cache-expiry
+  "When a session's prompt cache expires, in epoch ms, from its transcript's
+   entries (parsed with keyword keys, in file order; the tail is enough):
+   the last assistant entry's timestamp plus the lifetime of the cache the
+   latest assistant entry that wrote any wrote, 1 h for
+   ephemeral_1h_input_tokens and 5 min for ephemeral_5m_input_tokens, 1 h
+   when none says. nil without an assistant entry."
+  [entries]
+  (let [as (filter #(= "assistant" (:type %)) entries)
+        ttl (or (some (fn [e]
+                        (let [cc (get-in e [:message :usage :cache_creation])]
+                          (cond (pos? (or (:ephemeral_1h_input_tokens cc) 0)) 3600000
+                                (pos? (or (:ephemeral_5m_input_tokens cc) 0)) 300000)))
+                      (reverse as))
+                default-ttl-ms)]
+    (some-> (some :timestamp (reverse as)) ms-of (+ ttl))))
+
+;; ---- texts
+
+(defn- activity
+  "What a session is doing, in a word: busy, idle or waiting while it runs
+   (\"shell\" is idle), else its state as serve last saw it."
+  [{:keys [state status run-state]}]
+  (if (contains? #{nil "live"} state)
+    (cond (contains? idle-statuses status) "idle"
+          (some? status) status
+          :else (or run-state "running"))
+    state))
+
+(defn session-phrase
+  "A session as serve names it to others: \"name\" (kind, activity), with
+   the thread for a session serve started for one, e.g. \"📫 infra #70\"
+   (background, busy, thread #70). The name is `claude agents`' name field,
+   the one SendMessage reaches the session by; the short id without one."
+  [s]
+  (str "\"" (if (str/blank? (:name s)) (:id s) (:name s)) "\" ("
+       (str/join ", " (remove nil? [(:kind s) (activity s) (when (and (:ours s) (:number s)) (str "thread #" (:number s)))]))
+       ")"))
+
+(def coordinate-sentence
+  "What the also-line asks of a session when others work in its folder:
+   sessions coordinate with each other directly."
+  "If your work affects theirs (the same files, a push to the branch they work on), tell them with SendMessage and let them decide.")
+
+(defn also-line
+  "The also-line: the running sessions (`live`) whose folder is `dir` or
+   below it (worktrees under .claude/worktrees too), other than session
+   `exclude`, each by the name SendMessage takes and with its thread when
+   serve started it for one (`memory`); then, when there are any, a
+   sentence asking to tell them of work that affects theirs."
+  [dir live memory exclude]
+  (let [ours (into {} (for [[k s] (:sessions memory) :when (:ours s)] [k (:number s)]))
+        others (for [s live
+                     :when (and (inside? (:cwd s) dir) (not= (:id s) (short-id exclude)))]
+                 (cond-> s (contains? ours (:id s)) (assoc :ours true :number (ours (:id s)))))]
+    (if (seq others)
+      (str "Also working in this folder: " (str/join ", " (map session-phrase others)) ". " coordinate-sentence)
+      "No other session works in this folder.")))
+
+(defn- from-who
+  "A message's writer as a session is told of it. Claude Code presents
+   anything posted into a session as another session's, so one from `user`
+   says that it is the user's own."
+  [from]
+  (str from (when (= from "user") " (the user themself, writing by mail; not another agent or session)")))
+
+(defn first-prompt
+  "The first prompt of the session serve starts for thread `th`, now
+   `agent`'s turn: what started it and for which thread, what to do, that
+   later messages come into it and that it is for this thread alone; then
+   the also-line `also`."
+  [agent th also]
+  (let [n (or (:number th) (:id th))]
+    (str "agent-mail serve started this session for thread #" n " for " agent " from " (from-who (:last-from th))
+         ", \"" (:subject th) "\" (" (:id th) ", message " (count (:msgs th)) "). "
+         "Read it with `agent-mail read " n "` and act on it under this folder's own rules (CLAUDE.md). "
+         "Answer with `agent-mail reply " n "`; close it with `agent-mail close " n "` when the work is done. "
+         "Later messages in this thread are posted into this session. "
+         "One thread per session: don't take on other threads.\n"
+         also)))
+
+(defn posted-text
+  "What serve posts into the session holding thread `th` for `agent` (or
+   resumes it with) for its newest message, and why there: `wrote?`, the
+   session wrote in the thread, else serve started it for the thread; then
+   the also-line `also`. It names the message's position, so a later post
+   never repeats an earlier one word for word (Claude Code drops identical
+   posts arriving close together)."
+  [_agent th wrote? also]
+  (let [n (or (:number th) (:id th))]
+    (str "agent-mail: new message in #" n " \"" (:subject th) "\" from " (from-who (:last-from th))
+         " (" (:id th) ", message " (count (:msgs th)) "), posted by agent-mail serve because "
+         (if wrote? "this session wrote in this thread" "it started this session for this thread")
+         " (not another agent). Read it with `agent-mail read " n "` and answer once the current step is done.\n"
+         also)))
+
+;; ---- deciding
+
+(defn serve-memory
+  "serve's memory from its state file: the maps it knows, each {} when
+   missing or not a map, so an older serve's state (tabs, under :repos)
+   reads as nothing remembered."
+  [st]
+  (into {} (for [k [:threads :sessions :agents]] [k (let [v (get st k)] (if (map? v) v {}))])))
 
 (defn- newest-file [th] (:file (peek (vec (:msgs th)))))
 
-(defn announce
-  "What a waiting session must be told now. `announced` maps a thread id to the
-   newest message file already announced; `pending` are the threads that are
-   the session's turn. Returns the threads that are new or have a newer message
-   since (:fresh), and what to remember next (:announced), only for the threads
-   still pending: a thread changes hands only with a new message, so nothing
-   forgotten can come back unannounced."
-  [announced pending]
-  {:fresh (filterv #(not= (get announced (:id %)) (newest-file %)) pending)
-   :announced (into {} (map (juxt :id newest-file)) pending)})
+(defn holder
+  "Who holds thread `th` for `agent`, {:sid :wrote?}: the session of the
+   newest message `agent` wrote in it (:wrote? true), or the session serve
+   started for `agent` and the thread when that started later (a session
+   that has not written yet), leaving out the short ids in `deaf`. nil when
+   there is neither."
+  [th agent memory deaf]
+  (let [deaf (set deaf)
+        w (some #(when (and (= agent (:from %)) (:session %) (not (deaf (short-id (:session %)))))
+                   {:sid (:session %) :wrote? true :at (or (ms-of (:date %)) 0)})
+                (rseq (vec (:msgs th))))
+        a (some->> (:sessions memory)
+                   (filter (fn [[k s]] (and (:ours s) (= agent (:agent s)) (= (:id th) (:thread s)) (not (deaf k)))))
+                   (sort-by (comp #(or % 0) :started-at val))
+                   last
+                   ((fn [[k s]] {:sid (or (:session-id s) k) :wrote? false :at (or (:started-at s) 0)})))]
+    (some-> (if (and w a) (if (> (:at a) (:at w)) a w) (or w a)) (dissoc :at))))
 
-(defn announcement
-  "The text `wait` posts into its own session for `threads`, which are now
-   `me`'s turn, or closed with news for `me` (see closed-news?): one line per
-   thread, then where it comes from. Each line names
-   the newest message's position, so a thread announced again never repeats
-   the earlier text (Claude Code drops identical repeats arriving close together).
-   Claude Code presents anything posted through the socket as coming from
-   another session, so a message from `user` says that it is the user's own."
-  [me threads]
-  (str/join "\n"
-            (concat
-             (for [t threads :let [handle (or (:number t) (:id t))
-                                   from (:last-from t)
-                                   closed? (= "done" (:status t))]]
-               (str "agent-mail: " (if closed? "closed, with news for " "new mail for ") me ": #" handle
-                    " \"" (:subject t) "\" " (if closed? "closed by " "from ") from
-                    (if (= from "user") " (the user themself, writing by mail; not another agent or session)" "")
-                    " (" (:id t) ", message " (count (:msgs t)) "). Read it with `agent-mail read " handle
-                    (if closed?
-                      "`; there is nothing to answer in it. To follow up, start a new thread or `agent-mail forward` it."
-                      "` and answer before moving on.")))
-             ["(Posted by this session's own `agent-mail wait`, which keeps running: no need to re-arm it.)"])))
+(defn- backing-off? [memory agent now]
+  (let [u (get-in memory [:agents agent :until])] (boolean (and u (< now u)))))
 
+(defn- deliverable
+  "The open threads with something for serve to deliver: whose turn is an
+   on-call agent's (not `user`), with no listener on duty for it and not
+   backing off, and a newest message serve has not handed on (or is to hand
+   on again: ids in `redo`). By number."
+  [{:keys [now oncall threads memory on-duty]} redo]
+  (let [on-duty (set on-duty)]
+    (->> threads
+         (filter (fn [th]
+                   (let [a (:owner th)]
+                     (and (= "open" (:status th)) a (not= "user" a) (contains? oncall a) (not (on-duty a))
+                          (not (backing-off? memory a now)) (seq (:msgs th))
+                          (or (contains? redo (:id th))
+                              (not= (newest-file th) (get-in memory [:threads (:id th) :delivered])))))))
+         (sort-by :number))))
+
+(defn- due-checks [memory now check-ms]
+  (for [[t m] (sort-by key (:threads memory))
+        :let [c (:check m)]
+        :when (and c (>= (- now (or (:at c) 0)) check-ms))]
+    [t c]))
+
+(defn serve-wants
+  "Which session lists a round needs, so serve asks Claude Code (some 100 ms
+   a call) only when it has something to decide: :live for something to
+   deliver, a post to check, or a session of its own starting or running;
+   :known (stopped sessions too) only to choose between resuming and
+   starting. Takes serve-actions' input."
+  [{:keys [now memory check-ms] :as in}]
+  (let [todo (boolean (or (seq (deliverable in #{})) (seq (due-checks memory now (or check-ms post-check-ms)))))]
+    {:live (boolean (or todo (some #(or (= "starting" (:state %)) (and (:ours %) (= "live" (:state %))))
+                                   (vals (:sessions memory)))))
+     :known todo}))
+
+(defn- observed
+  "What serve keeps of a running session's entry, nils left out."
+  [e]
+  (into {} (remove (comp nil? val)) {:state "live" :status (:status e) :kind (:kind e) :name (:name e)
+                                     :session-id (:session-id e)}))
+
+(defn- route
+  "The delivery of thread `th`'s newest message: into its holder, by
+   resuming it, or to a new session (see serve-actions); nil while the
+   session serve started or resumed for it is still on its way."
+  [{:keys [now oncall memory live known expiry]} th deaf]
+  (let [agent (:owner th)
+        t (:id th)
+        dir (get-in oncall [agent :dir])
+        info {:agent agent :number (:number th) :file (newest-file th) :dir dir}
+        {:keys [sid wrote?] :as h} (holder th agent memory deaf)
+        s (when h (get-in memory [:sessions (short-id sid)]))
+        e (when h (find-session live sid))
+        k (when (and h (not e)) (find-session known sid))
+        warm (when (and k (background? k)) (expiry (or (:session-id k) sid)))
+        also #(also-line dir live memory %)]
+    (cond
+      (and s (= "starting" (:state s)) (not e)) nil
+      (and e (:socket e))
+      [:post t (:id e) (posted-text agent th wrote? (also sid))
+       (merge info {:socket (:socket e) :name (:name e) :kind (:kind e) :session-id (:session-id e)
+                    :idle (contains? idle-statuses (:status e)) :status-updated-at (:status-updated-at e)})]
+      (and warm (< now warm))
+      [:resume t (or (:session-id k) sid) (posted-text agent th wrote? (also sid))
+       (merge info {:name (:name k) :kind (:kind k) :warm-until warm})]
+      :else
+      [:start agent t (first-prompt agent th (also nil))
+       (assoc info :name (thread-session-name agent (or (:number th) t)))])))
+
+(defn serve-actions
+  "What serve does this round, as data. `oncall` maps the agents on call to
+   {:dir}; `threads` are every thread; `memory` is serve's (see above);
+   `on-duty` the agents a listener's duty record covers, whose threads serve
+   leaves to it (a wait still running code from before 9 Nov 2026, or a
+   classic one); `live` the running sessions as agents-items gives them,
+   with what their registry entry adds (:socket :status
+   :status-updated-at), nil when not asked or Claude Code could not tell
+   (`agents-error` says why); `known` every session Claude Code keeps
+   (`--all`), nil when not asked; `expiry` a session id's cache expiry from
+   its transcript (see cache-expiry), nil when unknown. In this order:
+   [:forget T]              thread T is closed or gone
+   [:observe S changes]     session S as `claude agents` now shows it
+   [:reset A]               a session for A showed up: its back-off is over
+   [:back-off A until why]  a session serve started or resumed for A did not
+                            show up in `grace-ms` (then [:lost S T]: T is to
+                            go out again), or the sessions could not be listed
+   [:drop S]                S is down and its thread closed: forget it
+   [:checked T]             the post into T's holder was taken up (or it ended)
+   [:deaf T S]              it was not: S stayed idle `check-ms` after it, so
+                            T goes to another session this round
+   [:post T S text info]    post into S, T's running holder
+   [:resume T S text info]  `claude --bg --resume S text`: the holder is a
+                            stopped background session with a warm cache
+   [:start A T text info]   `claude --bg --name …` in A's folder
+   [:stop S info]           `claude stop`: a session serve started, idle,
+                            holding no open thread and its cache expired
+                            (the registry's statusUpdatedAt + 1 h without a
+                            transcript)
+   Sessions serve did not start are never stopped."
+  [{:keys [now threads memory live known expiry agents-error grace-ms check-ms] :as in}]
+  (let [grace-ms (or grace-ms start-grace-ms)
+        check-ms (or check-ms post-check-ms)
+        expiry (or expiry (constantly nil))
+        in (assoc in :expiry expiry)
+        open (into {} (comp (filter #(= "open" (:status %))) (map (juxt :id identity))) threads)
+        sessions (sort-by key (:sessions memory))
+        agent-m #(get-in memory [:agents %])
+        forget (for [t (sort (keys (:threads memory))) :when (not (open t))] [:forget t])
+        observe (when live
+                  (mapcat
+                   (fn [[k s]]
+                     (let [e (find-session live k)]
+                       (cond
+                         e (let [o (observed e)]
+                             (concat (when-not (every? (fn [[x v]] (= v (get s x))) o) [[:observe k o]])
+                                     (when (and (= "starting" (:state s)) (agent-m (:agent s))) [[:reset (:agent s)]])))
+                         (= "starting" (:state s))
+                         (when (>= (- now (or (:since s) 0)) grace-ms)
+                           [(back-off (:agent s) (agent-m (:agent s)) now
+                                      (str "session " (pr-str (or (:name s) k)) " did not show up in `claude agents`"))
+                            [:lost k (:thread s)]])
+                         :else
+                         (let [st (cond (and known (find-session known k)) "stopped"
+                                        known "gone"
+                                        (= "live" (:state s)) "stopped"
+                                        :else (:state s))]
+                           (when (not= st (:state s)) [[:observe k {:state st}]])))))
+                   sessions))
+        drops (for [[k s] sessions
+                    :when (and (contains? #{"stopped" "gone"} (:state s)) (not (open (:thread s)))
+                               (not (find-session live k)))]
+                [:drop k])
+        backing (into #{} (keep #(when (= :back-off (first %)) (second %))) observe)
+        checks (when live
+                 (for [[t c] (due-checks memory now check-ms) :when (open t)]
+                   (let [e (find-session live (:session c))]
+                     (if (and e (contains? idle-statuses (:status e)) (= (:status-updated-at c) (:status-updated-at e)))
+                       [:deaf t (:session c)]
+                       [:checked t]))))
+        redo (into {} (for [[kind t s] checks :when (= :deaf kind)] [t s]))
+        cands (remove #(backing (:owner %)) (deliverable in (set (keys redo))))
+        deliveries (cond
+                     (empty? cands) []
+                     (nil? live) (for [a (distinct (map :owner cands))]
+                                   (back-off a (agent-m a) now (str "cannot list Claude Code sessions: "
+                                                                    (or agents-error "`claude agents` said nothing"))))
+                     :else (keep #(route in % (cond-> (set (get-in memory [:threads (:id %) :deaf]))
+                                                (redo (:id %)) (conj (short-id (redo (:id %))))))
+                                 cands))
+        held (set (for [th (vals open)
+                        :let [h (holder th (:owner th) memory (get-in memory [:threads (:id th) :deaf]))]
+                        :when h]
+                    (short-id (:sid h))))
+        checking (set (for [[t m] (:threads memory) :when (and (:check m) (open t))] (short-id (get-in m [:check :session]))))
+        targeted (set (keep (fn [[kind _ s]] (when (#{:post :resume} kind) (short-id s))) deliveries))
+        stops (when live
+                (for [[k s] sessions
+                      :let [e (find-session live k)]
+                      :when (and (:ours s) e (or (contains? idle-statuses (:status e)) (= "done" (:run-state e)))
+                                 (not (held k)) (not (checking k)) (not (targeted k)))
+                      :let [until (or (expiry (or (:session-id e) (:session-id s)))
+                                      (some-> (:status-updated-at e) (+ default-ttl-ms)))]
+                      :when (and until (<= until now))]
+                  [:stop k {:id (:id e) :name (or (:name e) (:name s)) :agent (:agent s) :expired until}]))]
+    (vec (concat forget observe drops checks deliveries stops))))
+
+(defn remember
+  "serve's memory after `action` at `now`: one of serve-actions' bookkeeping
+   actions, or what carrying out a delivery or a stop gave: [:posted T S
+   info], [:post-failed T S] (S counts as deaf for T), [:resumed T S info],
+   [:started A T short-id session-id info] (session-id nil until `claude
+   agents` lists it), [:stopped S]. [:post], [:resume], [:start] and [:stop]
+   themselves change nothing: they end as one of those or a :back-off."
+  [memory [kind & args] now]
+  (let [known-thread (fn [m t f & xs] (if (get-in m [:threads t]) (apply update-in m [:threads t] f xs) m))
+        known-session (fn [m k f & xs] (if (get-in m [:sessions k]) (apply update-in m [:sessions k] f xs) m))
+        delivered (fn [m t sid {:keys [agent number file]}]
+                    (update-in m [:threads t] #(-> % (assoc :agent agent :number number :delivered file :holder (short-id sid))
+                                                   (dissoc :check))))
+        strip (fn [m] (into {} (remove (comp nil? val)) m))]
+    (case kind
+      :forget (update memory :threads dissoc (first args))
+      :drop (update memory :sessions dissoc (first args))
+      :reset (update memory :agents dissoc (first args))
+      :back-off (let [[a until reason] args]
+                  (update-in memory [:agents a] #(assoc % :until until :reason reason :failures (inc (or (:failures %) 0)))))
+      :observe (let [[k changes] args]
+                 (known-session memory k
+                                (fn [s] (cond-> (merge s changes)
+                                          (and (:state changes) (not= (:state changes) (:state s))) (assoc :since now)))))
+      :lost (let [[k t] args]
+              (-> memory (known-session k assoc :state "gone" :since now)
+                  (known-thread t dissoc :delivered :check)))
+      :deaf (let [[t sid] args]
+              (known-thread memory t #(-> % (update :deaf (fnil conj #{}) (short-id sid)) (dissoc :check))))
+      :checked (known-thread memory (first args) dissoc :check)
+      :post-failed (let [[t sid] args] (update-in memory [:threads t :deaf] (fnil conj #{}) (short-id sid)))
+      :posted (let [[t sid {:keys [agent number file idle status-updated-at name kind session-id] :as info}] args
+                    k (short-id sid)]
+                (-> (delivered memory t sid info)
+                    (cond-> idle (assoc-in [:threads t :check] {:session k :file file :at now :status-updated-at status-updated-at}))
+                    (update-in [:sessions k] #(merge {:agent agent :thread t :number number :ours false} %
+                                                     (strip {:session-id session-id :name name :kind kind :state "live"})))))
+      :resumed (let [[t sid {:keys [agent number name kind] :as info}] args
+                     k (short-id sid)]
+                 (-> (delivered memory t sid info)
+                     (update-in [:sessions k] #(merge {:agent agent :thread t :number number :ours false} %
+                                                      (strip {:session-id sid :name name :kind kind :state "starting" :since now})))))
+      :started (let [[a t k sid {:keys [number name] :as info}] args]
+                 (-> (delivered memory t k info)
+                     (assoc-in [:sessions k] (strip {:session-id sid :agent a :thread t :number number :name name
+                                                     :kind "background" :ours true :state "starting" :since now
+                                                     :started-at now}))))
+      :stopped (known-session memory (first args) assoc :state "stopped" :since now)
+      memory)))
+
+;; ---- views
+
+(defn thread-session
+  "The session holding thread `id` as serve last saw it, for status:
+   {:id :name :kind :state}, :id being the short id `claude attach` takes;
+   nil when serve has delivered nothing of it."
+  [memory id]
+  (when-let [k (get-in memory [:threads id :holder])]
+    (when-let [s (get-in memory [:sessions k])]
+      (into {} (remove (comp nil? val)) {:id k :name (:name s) :kind (:kind s) :state (:state s)}))))
+
+(defn serve-sessions
+  "The sessions in serve's memory, each with its short id as :id, by agent
+   and thread number (`who`, `oncall`)."
+  [memory]
+  (sort-by (juxt :agent #(or (:number %) 0) :id) (for [[k s] (:sessions memory)] (assoc s :id k))))
+
+(defn session-line
+  "One of serve's sessions as `who` lists it: thread, short id, name and
+   what it is doing."
+  [s]
+  (str "#" (:number s) " → " (:id s) " " (session-phrase (dissoc s :ours))))
+
+(defn oncall-view
+  "Each registered agent with what serve is doing about it, for `oncall`,
+   `who` and `status`: {:repo :dir :state :pane :text}, plus :sessions on
+   duty, and :until (a UTC stamp) with :reason while backing off. :state is
+   \"on-duty\" (a listener's duty record covers it, so serve leaves its
+   threads alone), \"backing-off\" or \"on-call\"; :pane is always nil
+   (serve opened WezTerm tabs until 9 Nov 2026). The text ends with the
+   sessions serve holds for it. `memory` is serve's; `duty` the duty records
+   with :on-duty decided."
+  [{:keys [now oncall memory duty]}]
+  (vec
+   (for [[repo {:keys [dir]}] (sort-by key oncall)
+         :let [m (get-in memory [:agents repo])
+               names (vec (distinct (keep :session (filter #(and (= repo (:repo %)) (:on-duty %)) duty))))
+               until (when (and (:until m) (< now (:until m))) (:until m))
+               state (cond (seq names) "on-duty" until "backing-off" :else "on-call")
+               held (filter #(= repo (:agent %)) (serve-sessions memory))
+               tail (when (seq held) (str "; serve's sessions: " (str/join ", " (map session-phrase held))))]]
+     (cond-> {:repo repo :dir dir :state state :pane nil
+              :text (str (case state
+                           "on-duty" (str "on duty (session " (str/join ", " names) ")")
+                           "backing-off" (str "backing off until " (clock until) ": " (:reason m))
+                           "on call")
+                         tail)}
+       (seq names) (assoc :sessions names)
+       until (assoc :until (fmt-utc (java.time.Instant/ofEpochMilli until)) :reason (:reason m))))))
 ;; ---------------------------------------------------------------- drafts
 
 (def reply-marker "<!-- agent-mail: the thread above is quoted with `>`; answer inline under any line, or write below this marker. Quoted text is kept only next to what you write. Sent when you close the editor; nothing is sent if you write nothing. -->")
@@ -588,9 +896,9 @@
 
 ;; ---------------------------------------------------------------- argv
 
-(def value-opts #{"to" "subject" "as" "session" "date" "id" "timeout" "interval" "msg" "idle-minutes"})
-(def flag-opts #{"json" "all" "edit" "once" "standby"})
-(def ^:private number-opts {:timeout "seconds" :interval "seconds" :idle-minutes "minutes"})
+(def value-opts #{"to" "subject" "as" "session" "date" "id" "timeout" "interval" "msg"})
+(def flag-opts #{"json" "all" "edit" "once" "standby" "here"})
+(def ^:private number-opts {:timeout "seconds" :interval "seconds"})
 
 (defn- finish-opts [opts]
   (reduce (fn [o [k unit]]

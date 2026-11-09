@@ -35,11 +35,13 @@
 (def no-session {"CLAUDE_CODE_MESSAGING_SOCKET" "" "CLAUDE_CODE_MESSAGING_TOKEN" "" "CLAUDE_PID" ""
                  "CLAUDE_CODE_SESSION_ID" ""})
 ;; Nor may a test reach the real WezTerm (run from a WezTerm tab, the tests
-;; inherit its pane) or the real Claude Code registry: both point at nothing
-;; next to the store unless a test sets its own.
+;; inherit its pane), the real claude (serve and `who --here` run it) or the
+;; real Claude Code registry and transcripts: all point at nothing next to
+;; the store unless a test sets its own.
 (defn sandbox-env []
   {"WEZTERM_PANE" ""
    "AGENT_MAIL_WEZTERM" (str (fs/path (fs/parent *store*) "no-wezterm"))
+   "AGENT_MAIL_CLAUDE" (str (fs/path (fs/parent *store*) "no-claude"))
    "CLAUDE_CONFIG_DIR" (str (fs/path (fs/parent *store*) "no-claude-config"))})
 (defn env-for [{:keys [who env]}]
   (cond-> (merge {"AGENT_MAIL_DIR" (str *store*) "AGENT_MAIL_NO_NOTIFY" "1"} no-session (sandbox-env) agent-shell env)
@@ -319,7 +321,7 @@
             "nobody on duty: every open thread not waiting on the user, longest waiting first")))
     (testing "duration: one rounded-down unit"
       (is (= ["0s" "59s" "1m" "59m" "1h" "23h" "1d" "40d"] (map core/duration [0 59 60 3599 3600 86399 86400 (* 40 86400)]))))
-    (testing "listener on-call: the owner's tab is on its way; on duty wins"
+    (testing "listener on-call: serve hands it to a session; on duty wins"
       (is (= "on-call" (core/listener open-th #{} #{"b"})))
       (is (= "on-duty" (core/listener open-th #{"b"} #{"b"})))
       (is (= "user" (core/listener to-user #{} #{"user"})))
@@ -329,161 +331,301 @@
                                                :oncall [{:repo "b" :state state}] :serve {:alive alive :pid 1}}))
             heard (comp :listener first :threads)]
         (is (= ["on-call" []] ((juxt heard :undelivered) (st "on-call" true))))
-        (is (= "on-call" (heard (st "starting" true))) "a tab on its way")
         (is (= ["none" ["t1"]] ((juxt heard :undelivered) (st "backing-off" true))))
         (is (= "none" (heard (st "on-call" false))) "serve isn't running")
-        (is (= [[{:repo "b" :state "on-call"}] {:alive true :pid 1}] ((juxt :oncall :serve) (st "on-call" true))))))))
+        (is (= [[{:repo "b" :state "on-call"}] {:alive true :pid 1}] ((juxt :oncall :serve) (st "on-call" true))))))
+    (testing "status: the session serve handed a thread to, as it last saw it; nothing for the others"
+      (let [memory {:threads {"t1" {:holder "deadbeef"}}
+                    :sessions {"deadbeef" {:name "📫 b #1" :kind "background" :state "live" :ours true :agent "b"}}}
+            st (core/status {:now now :me "x" :seen {} :duty [] :threads [open-th closed-th] :memory memory})]
+        (is (= [{:id "deadbeef" :name "📫 b #1" :kind "background" :state "live"} nil] (map :session (:threads st))))
+        (is (not (contains? (second (:threads st)) :session)) "absent, not null")))))
 
-;; ================================================================ unit: on call
+;; ================================================================ unit: serve
 
-(deftest oncall-decisions
-  (let [now 100000000
+(def t0 "The tests' now: 2026-10-31 11:00 UTC, an hour after msg's messages."
+  (* 1000 (core/epoch-s "2026-10-31T11:00:00.000Z")))
+
+(defn th
+  "A thread for serve's tests: subject \"About <id>\", number `n`, `msgs`."
+  [id n msgs & {:as more}]
+  (merge (core/thread-state {:subject (str "About " id) :from "web" :created "2026-10-31T10:00:00.000Z" :number (str n)} id msgs)
+         more))
+
+(defn live-s
+  "A running session as serve-actions gets it, in /x/infra unless said."
+  [id & {:as more}]
+  (merge {:id id :session-id (str id "-full") :pid 1 :cwd "/x/infra" :name (str "s-" id) :kind "background"
+          :status "busy" :status-updated-at 5 :socket (str "/sock/" id)}
+         more))
+
+(deftest serve-decisions
+  (let [now t0
         hour 3600000
-        base {:now now :oncall {"infra" {:dir "/x/infra"}} :memory {} :duty [] :pending #{"infra"}
-              :panes #{7} :sessions {} :idle-ms hour :grace-ms 120000}
-        acts #(core/oncall-actions (merge base %))
-        tab {:pane 42 :gui-pid 9}
-        ours (fn [& {:as more}] (merge {:repo "infra" :pane 42 :session-pid 500 :on-duty true} more))
-        idle (fn [ago] {500 {:status "idle" :status-updated-at (- now ago)}})]
-    (testing "spawn: mail waits, nobody is on duty, nothing spawned recently"
-      (is (= [[:spawn "infra"]] (acts {})))
-      (is (= [[:spawn "infra"]] (acts {:duty [{:repo "infra" :on-duty false}]})) "a stale record is nobody"))
-    (testing "no spawn: nothing waits, someone is on duty (a session the user started too), not on call"
-      (is (= [] (acts {:pending #{}})))
-      (is (= [] (acts {:pending #{"web"}})) "mail for another repo")
-      (is (= [] (acts {:duty [{:repo "infra" :on-duty true :pane 3 :session-pid 77}]})))
-      (is (= [] (acts {:oncall {}}))))
-    (testing "no second tab within the grace period"
-      (is (= [] (acts {:memory {"infra" (assoc tab :spawned-at (- now 119999))} :panes #{7 42}}))))
-    (testing "back off when the grace period passes and nobody is on duty: 2 min, doubling, at most 1 h"
-      (is (= [[:back-off "infra" (+ now 120000) "no session came on duty"]]
-             (acts {:memory {"infra" (assoc tab :spawned-at (- now 120000))} :panes #{42}})))
-      (is (= [[:back-off "infra" (+ now 240000) "no session came on duty"]]
-             (acts {:memory {"infra" (assoc tab :spawned-at (- now 200000) :failures 1)} :panes #{42}})))
+        ask (th "t1" 1 [(msg 0 "web" "infra")])
+        ;; web asked, session aaaa1111 answered for infra, web wrote again: infra's turn
+        talk (th "t1" 1 [(msg 0 "web" "infra") (msg 1 "infra" "web" :session "aaaa1111-full") (msg 2 "web" "infra")])
+        base {:now now :oncall {"infra" {:dir "/x/infra"}} :threads [ask] :memory (core/serve-memory {}) :on-duty #{}
+              :live [] :known [] :expiry {} :grace-ms 120000 :check-ms 30000}
+        acts #(core/serve-actions (merge base %))
+        mem (fn [& {:as m}] (merge (core/serve-memory {}) m))
+        delivered (fn [file] {"t1" {:agent "infra" :number 1 :delivered file :holder "aaaa1111"}})
+        kinds #(mapv first %)
+        only (fn [ks as] (filterv (comp (set ks) first) as))
+        sent #(only [:post :resume :start] %)
+        ours (fn [& {:as more}] (merge {:ours true :agent "infra" :thread "t1" :number 1 :name "📫 infra #1"
+                                        :session-id "bbbb2222-full" :kind "background" :state "live" :started-at (- now 1000)}
+                                       more))]
+    (testing "a new thread: a session of its own, named for it, in the agent's folder"
+      (let [[[kind agent t text info] :as all] (acts {})]
+        (is (= 1 (count all)))
+        (is (= [:start "infra" "t1"] [kind agent t]))
+        (is (= {:agent "infra" :number 1 :file "000.md" :dir "/x/infra" :name "📫 infra #1"} info))
+        (is (str/starts-with? text "agent-mail serve started this session for thread #1 for infra from web"))
+        (is (str/ends-with? text "\nNo other session works in this folder."))))
+    (testing "nothing to deliver: delivered already, not on call, on duty, backing off, the user's, closed"
+      (is (= [] (acts {:memory (mem :threads (delivered "000.md"))})))
+      (is (= [] (acts {:oncall {}})))
+      (is (= [] (acts {:on-duty #{"infra"}})) "a listener's duty record (an older wait) keeps its threads")
+      (is (= [] (acts {:memory (mem :agents {"infra" {:failures 1 :until (inc now) :reason "x"}})})))
+      (is (= [:start] (kinds (acts {:memory (mem :agents {"infra" {:failures 1 :until now :reason "x"}})}))) "a back-off that is over")
+      (is (= [] (acts {:threads [(th "t2" 2 [(msg 0 "infra" "user")])] :oncall {"user" {:dir "/x"}}})) "never the user")
+      (is (= [] (acts {:threads [(th "t2" 2 [(msg 0 "web" "infra") (msg 1 "infra" "web" :status "done")])]}))))
+    (testing "the holder runs: the message is posted into it"
+      (let [[[kind t sid text info]] (acts {:threads [talk] :live [(live-s "aaaa1111")]})]
+        (is (= [:post "t1" "aaaa1111"] [kind t sid]))
+        (is (str/starts-with? text "agent-mail: new message in #1 \"About t1\" from web (t1, message 3), posted by agent-mail serve because this session wrote in this thread (not another agent)."))
+        (is (= {:agent "infra" :number 1 :file "002.md" :dir "/x/infra" :socket "/sock/aaaa1111" :name "s-aaaa1111"
+                :kind "background" :session-id "aaaa1111-full" :idle false :status-updated-at 5}
+               info)))
+      (is (true? (:idle (peek (first (acts {:threads [talk] :live [(live-s "aaaa1111" :status "shell")]})))))
+          "shell is idle: the post will be checked")
+      (is (= [:start] (kinds (acts {:threads [talk] :live [(live-s "aaaa1111" :socket nil)]}))) "no inbox: a new session"))
+    (testing "the holder has stopped: resumed while its cache is warm, else a new session"
+      (let [known [(dissoc (live-s "aaaa1111") :socket :status)]
+            [[kind t sid text info]] (acts {:threads [talk] :known known :expiry {"aaaa1111-full" (+ now 60000)}})]
+        (is (= [:resume "t1" "aaaa1111-full"] [kind t sid]))
+        (is (str/includes? text "because this session wrote in this thread"))
+        (is (= (+ now 60000) (:warm-until info))))
+      (is (= [:start] (kinds (acts {:threads [talk] :known [(live-s "aaaa1111")] :expiry {"aaaa1111-full" now}}))) "cold")
+      (is (= [:start] (kinds (acts {:threads [talk] :known [(live-s "aaaa1111")]}))) "no transcript to tell")
+      (is (= [:start] (kinds (acts {:threads [talk] :known [(live-s "aaaa1111" :kind "interactive")] :expiry {"aaaa1111-full" (+ now 60000)}})))
+          "an interactive session is not resumed")
+      (is (= [:start] (kinds (acts {:threads [talk] :expiry {"aaaa1111-full" (+ now 60000)}}))) "Claude Code no longer knows it"))
+    (testing "the session serve started for the thread holds it until a newer message of the agent's"
+      (let [m (mem :sessions {"bbbb2222" (ours)})
+            [[kind _ sid text]] (sent (acts {:threads [talk] :memory m :live [(live-s "aaaa1111") (live-s "bbbb2222")]}))]
+        (is (= [:post "bbbb2222"] [kind sid]) "started after aaaa1111 last wrote")
+        (is (str/includes? text "because it started this session for this thread (not another agent)")))
+      (is (= [:post "aaaa1111"] ((juxt first #(nth % 2)) (first (sent (acts {:threads [talk] :memory (mem :sessions {"bbbb2222" (ours :started-at 0)})
+                                                                                 :live [(live-s "aaaa1111") (live-s "bbbb2222")]})))))
+          "started before aaaa1111 wrote")
+      (is (= [:post "bbbb2222"] ((juxt first #(nth % 2)) (first (sent (acts {:memory (mem :sessions {"bbbb2222" (ours)}) :live [(live-s "bbbb2222")]})))))
+          "nobody wrote for infra yet"))
+    (testing "a session on its way: no second one; past the grace period, back off and deliver again later"
+      (let [m (mem :sessions {"bbbb2222" (ours :state "starting" :since (- now 119999))})]
+        (is (= [] (acts {:threads [talk] :memory m})))
+        (is (= [[:back-off "infra" (+ now 120000) "session \"📫 infra #1\" did not show up in `claude agents`"] [:lost "bbbb2222" "t1"]]
+               (acts {:threads [talk] :memory (assoc-in m [:sessions "bbbb2222" :since] (- now 120000))}))
+            "and nothing else for infra this round"))
+      (let [m (mem :sessions {"bbbb2222" (ours :state "starting")} :agents {"infra" {:failures 2 :until 0 :reason "x"}}
+                   :threads {"t1" {:delivered "000.md"}})]
+        (is (= [[:observe "bbbb2222" {:state "live" :status "idle" :kind "background" :name "📫 infra #1" :session-id "bbbb2222-full"}]
+                [:reset "infra"]]
+               (acts {:memory m :live [(live-s "bbbb2222" :status "idle" :name "📫 infra #1")]}))
+            "it showed up: the back-off is over")))
+    (testing "a post into an idle session that stays idle 30 s was held: another session takes the thread"
+      (let [check {:session "aaaa1111" :file "002.md" :at (- now 30000) :status-updated-at 5}
+            m (mem :threads (assoc-in (delivered "002.md") ["t1" :check] check))
+            [deaf start :as all] (acts {:threads [talk] :memory m :live [(live-s "aaaa1111" :status "idle")]})]
+        (is (= 2 (count all)))
+        (is (= [:deaf "t1" "aaaa1111"] deaf))
+        (is (= [:start "infra" "t1"] (subvec start 0 3)) "the message goes out again, past aaaa1111")
+        (is (= [[:checked "t1"]] (acts {:threads [talk] :memory m :live [(live-s "aaaa1111" :status "idle" :status-updated-at 6)]}))
+            "it took a turn since")
+        (is (= [[:checked "t1"]] (acts {:threads [talk] :memory m :live [(live-s "aaaa1111")]})) "busy")
+        (is (= [[:checked "t1"]] (acts {:threads [talk] :memory m :live []})) "gone: nothing to tell")
+        (is (= [] (acts {:threads [talk] :memory (assoc-in m [:threads "t1" :check :at] (- now 29999)) :live [(live-s "aaaa1111" :status "idle")]}))
+            "too early to tell"))
+      (is (= [:start] (kinds (acts {:threads [talk] :memory (mem :threads {"t1" {:deaf #{"aaaa1111"}}}) :live [(live-s "aaaa1111")]})))
+          "a session that held a post is passed over for that thread"))
+    (testing "serve stops a session it started once idle, holding no open thread, its cache expired"
+      (let [m (mem :sessions {"cccc3333" (ours :thread "t9" :session-id "cccc3333-full")})
+            idle (live-s "cccc3333" :status "idle" :status-updated-at (- now (* 2 hour)))
+            stop [:stop "cccc3333" {:id "cccc3333" :name "s-cccc3333" :agent "infra" :expired (- now hour)}]
+            stops #(only [:stop] (acts %))]
+        (is (= [stop] (stops {:threads [] :memory m :live [idle]})) "no transcript: statusUpdatedAt + 1 h")
+        (is (= [(assoc-in stop [2 :expired] (dec now))] (stops {:threads [] :memory m :live [idle] :expiry {"cccc3333-full" (dec now)}})))
+        (is (= [] (stops {:threads [] :memory m :live [idle] :expiry {"cccc3333-full" (inc now)}})) "the transcript says warm")
+        (is (= [] (stops {:threads [] :memory m :live [(assoc idle :status "busy")]})))
+        (is (= [] (stops {:threads [] :memory m :live [(assoc idle :status "waiting")]})) "waiting on the user")
+        (is (= [stop] (stops {:threads [] :memory m :live [(assoc idle :status "shell")]})))
+        (is (= [stop] (stops {:threads [] :memory m :live [(assoc idle :status nil :run-state "done")]})))
+        (is (= [] (stops {:threads [] :memory (assoc-in m [:sessions "cccc3333" :ours] false) :live [idle]})) "never one serve didn't start")
+        (is (= [] (stops {:threads [(th "t9" 9 [(msg 0 "web" "infra")])] :memory (assoc-in m [:threads "t9"] {:delivered "000.md"})
+                          :live [idle]}))
+            "an open thread waits on it")
+        (is (= [] (stops {:threads [(th "t9" 9 [(msg 0 "web" "infra")])]
+                          :memory (assoc-in m [:threads "t9"] {:delivered "000.md" :check {:session "cccc3333" :at now}}) :live [idle]}))
+            "a post into it is being checked")
+        (is (= [stop] (stops {:threads [(th "t9" 9 [(msg 0 "web" "infra") (msg 1 "infra" "user")])] :memory m :live [idle]}))
+            "its thread waits on the user, not on it")))
+    (testing "bookkeeping: closed threads forgotten, sessions seen ending, dropped once their thread is closed"
+      (is (= [[:forget "t1"]] (acts {:threads [] :memory (mem :threads (delivered "000.md"))})))
+      (let [m (mem :sessions {"bbbb2222" (ours)})]
+        (is (= [[:observe "bbbb2222" {:state "stopped"}]] (acts {:threads [] :memory m :live [] :known nil})))
+        (is (= [[:observe "bbbb2222" {:state "gone"}]] (acts {:threads [] :memory m :live [] :known []}))
+            "not even `--all` lists it")
+        (is (= [[:drop "bbbb2222"]] (acts {:threads [] :memory (assoc-in m [:sessions "bbbb2222" :state] "stopped") :live nil})))
+        (is (= [] (acts {:threads [ask] :memory (-> m (assoc-in [:sessions "bbbb2222" :state] "stopped") (assoc :threads (delivered "000.md")))
+                         :live nil}))
+            "its thread is open: kept")))
+    (testing "Claude Code can't list its sessions: back off with why"
+      (is (= [[:back-off "infra" (+ now 120000) "cannot list Claude Code sessions: `claude agents` failed (exit 127)"]]
+             (acts {:live nil :agents-error "`claude agents` failed (exit 127)"}))))
+    (testing "serve-wants: ask Claude Code only with something to decide"
+      (let [w #(core/serve-wants (merge base %))]
+        (is (= {:live true :known true} (w {})) "something to deliver")
+        (is (= {:live false :known false} (w {:threads []})))
+        (is (= {:live true :known false} (w {:threads [] :memory (mem :sessions {"bbbb2222" (ours)})})) "a session of its own runs")
+        (is (= {:live false :known false} (w {:threads [] :memory (mem :sessions {"bbbb2222" (ours :state "stopped")})})))
+        (is (= {:live false :known false} (w {:threads [] :memory (mem :sessions {"bbbb2222" (ours :ours false)})}))
+            "another's: looked at only in rounds that ask anyway")
+        (is (= {:live true :known false} (w {:threads [] :memory (mem :sessions {"bbbb2222" (ours :ours false :state "starting")})})))
+        (is (= {:live true :known true} (w {:threads [] :memory (mem :threads {"t1" {:check {:at (- now 30000)}}})})) "a post to check")))
+    (testing "back-off: 2 min, doubling, at most 1 h"
       (is (= [120000 240000 480000 960000 1920000 3600000 3600000] (map core/back-off-ms [1 2 3 4 5 6 40])))
-      (is (= [[:forget "infra"] [:back-off "infra" (+ now 120000) "its tab closed before a session came on duty"]]
-             (acts {:memory {"infra" (assoc tab :spawned-at (- now 5000))} :panes #{7}}))
-          "a tab that closes at once (no claude on PATH) backs off at once"))
-    (testing "backing off: nothing until it is over, then a new tab, or another back-off while the old tab is open"
-      (let [backing {:failures 1 :until (+ now 1) :reason "no session came on duty"}]
-        (is (= [] (acts {:memory {"infra" backing}})))
-        (is (= [[:spawn "infra"]] (acts {:memory {"infra" (assoc backing :until now)}})))
-        (is (= [[:back-off "infra" (+ now 240000) "its tab (pane 42) is open, but nobody is on duty"]]
-               (acts {:memory {"infra" (merge backing tab {:until now})} :panes #{42}}))
-            "never a second tab for one repo")))
-    (testing "on duty after a spawn or a back-off: reset"
-      (is (= [[:reset "infra"]] (acts {:memory {"infra" (assoc tab :spawned-at (- now 5000))} :panes #{42} :duty [(ours)]})))
-      (is (= [[:reset "infra"]] (acts {:memory {"infra" {:failures 2 :until (+ now 9)}} :duty [(ours :pane nil)]}))))
-    (testing "close serve's own tab once nothing waits and its session has been idle long enough"
-      (let [closing {:memory {"infra" tab} :panes #{7 42} :duty [(ours)] :pending #{}}]
-        (is (= [[:close "infra" 42]] (acts (assoc closing :sessions (idle hour)))))
-        (is (= [[:close "infra" 42]] (acts (assoc closing :sessions (idle (* 5 hour))))))
-        (is (= [] (acts (assoc closing :sessions (idle hour) :pending #{"infra"}))) "mail waits: keep it")
-        (is (= [] (acts (assoc closing :sessions (idle (dec hour))))) "idle too briefly")
-        (is (= [] (acts (assoc closing :sessions {500 {:status "busy" :status-updated-at (- now (* 5 hour))}}))) "busy")
-        (is (= [[:close "infra" 42]] (acts (assoc closing :sessions {500 {:status "shell" :status-updated-at (- now (* 5 hour))}})))
-            "shell: idle between turns, with the listener's own wait running")
-        (is (= [] (acts (assoc closing :sessions {500 {:status "shell" :status-updated-at (- now (dec hour))}})))
-            "shell too briefly")
-        (is (= [] (acts (assoc closing :sessions {500 {:status "waiting" :status-updated-at (- now (* 5 hour))}})))
-            "waiting on the user")
-        (is (= [] (acts (assoc closing :sessions {}))) "no live session behind the record: nothing to judge by")
-        (is (= [] (acts (assoc closing :duty [(ours) (ours :session-pid 501)]
-                               :sessions (assoc (idle hour) 501 {:status "busy" :status-updated-at 0}))))
-            "every session in the pane must be idle")
-        (is (= [] (acts (assoc closing :sessions (idle hour) :panes nil))) "wezterm could not list its panes")
-        (is (= [[:close "infra" 42]] (acts (assoc closing :sessions (idle hour) :oncall {})))
-            "a repo taken off call still gets serve's tab closed")))
-    (testing "sessions the user started are never touched"
-      (let [users {:pending #{} :panes #{7 42 50} :sessions (idle (* 5 hour)) :duty [(ours :pane 50)]}]
-        (is (= [] (acts users)) "no tab of serve's")
-        (is (= [] (acts (assoc users :memory {"infra" tab}))) "serve's tab has no session of its own, the user's is idle")
-        (is (= [] (acts (assoc users :duty [(ours :pane 7)]))) "a session in the user's own pane")))
-    (testing "forget a tab that is gone, or is an older WezTerm's"
-      (is (= [[:forget "infra"]] (acts {:memory {"infra" tab} :pending #{}})))
-      (is (= [[:forget "infra"] [:spawn "infra"]] (acts {:memory {"infra" tab}})) "and open a new one when mail waits")
-      (is (= [[:forget "infra"]] (acts {:memory {"infra" tab} :panes #{42} :gui-pid 10 :pending #{}})))
-      (is (= [] (acts {:memory {"infra" tab} :panes #{42} :gui-pid 9 :pending #{}})))
-      (is (= [] (acts {:memory {"infra" tab} :panes nil :pending #{}})) "wezterm could not tell: keep it")
-      (is (= [] (acts {:memory {"infra" tab} :panes nil})) "and open no other")
-      (is (= [[:forget "infra"] [:drop "infra"]] (acts {:memory {"infra" tab} :oncall {}}))
-          "taken off call, its tab gone: forget it all")
-      (is (= [[:spawn "infra"] [:drop "web"]] (acts {:memory {"web" {:failures 3}}})) "repos in name order"))
+      (is (= [:back-off "infra" (+ now 240000) "why"] (core/back-off "infra" {:failures 1} now "why"))))
     (testing "remember: serve's memory after each action"
-      (let [r #(core/remember %1 %2 now)]
-        (is (= {"infra" {:pane 42 :gui-pid 9 :spawned-at now :failures 1}}
-               (r {"infra" {:failures 1 :until 5 :reason "x"}} [:spawned "infra" 42 9])))
-        (is (= {"infra" {:failures 2 :until 7 :reason "why"}} (r {"infra" {:failures 1 :spawned-at 3}} [:back-off "infra" 7 "why"])))
-        (is (= {"infra" tab} (r {"infra" (assoc tab :spawned-at 1 :failures 2 :until 3 :reason "x")} [:reset "infra"])))
-        (is (= {} (r {"infra" tab} [:close "infra" 42])) "nothing left: dropped")
-        (is (= {"infra" {:failures 1}} (r {"infra" (assoc tab :failures 1)} [:forget "infra"])))
-        (is (= {"web" {:failures 2}} (r {"infra" {:failures 1} "web" {:failures 2}} [:drop "infra"])))
-        (is (= {"infra" tab} (r {"infra" tab} [:spawn "infra"])) "a spawn ends as :spawned or :back-off")))
-    (testing "oncall-view: each registered repo's state, in words"
-      (let [v (fn [m & {:as more}]
-                (first (core/oncall-view (merge {:now now :oncall {"infra" {:dir "/x/infra"}} :memory {"infra" m}
-                                                 :duty [] :sessions {}} more))))
-            later (+ now 60000)]
-        (is (= {:repo "infra" :dir "/x/infra" :state "on-call" :pane nil :text "on call"} (v {})))
-        (is (= ["starting" "tab opening (pane 42)"] ((juxt :state :text) (v (assoc tab :spawned-at now)))))
-        (let [b (v {:failures 1 :until later :reason "no session came on duty"})]
+      (let [r #(core/remember %1 %2 now)
+            info {:agent "infra" :number 1 :file "002.md" :name "s-aaaa1111" :kind "interactive" :session-id "aaaa1111-full"}]
+        (is (= {:threads {"t1" {:agent "infra" :number 1 :delivered "002.md" :holder "aaaa1111"}}
+                :sessions {"aaaa1111" {:agent "infra" :thread "t1" :number 1 :ours false :session-id "aaaa1111-full"
+                                       :name "s-aaaa1111" :kind "interactive" :state "live"}}
+                :agents {}}
+               (r (mem) [:posted "t1" "aaaa1111" info])))
+        (is (= {:session "aaaa1111" :file "002.md" :at now :status-updated-at 5}
+               (get-in (r (mem) [:posted "t1" "aaaa1111" (assoc info :idle true :status-updated-at 5)]) [:threads "t1" :check]))
+            "posted into an idle session: checked later")
+        (is (= ["t9" true] ((juxt :thread :ours) (get-in (r (mem :sessions {"bbbb2222" (ours :thread "t9")}) [:posted "t1" "bbbb2222" info])
+                                                         [:sessions "bbbb2222"])))
+            "a session serve started for another thread stays that thread's")
+        (is (= #{"aaaa1111"} (get-in (r (mem) [:post-failed "t1" "aaaa1111-full"]) [:threads "t1" :deaf])))
+        (is (= {"aaaa1111" {:agent "infra" :thread "t1" :number 1 :ours false :session-id "aaaa1111-full" :name "s-aaaa1111"
+                            :kind "interactive" :state "starting" :since now}}
+               (:sessions (r (mem) [:resumed "t1" "aaaa1111-full" info]))))
+        (let [m (r (mem) [:started "infra" "t1" "deadbeef" nil {:agent "infra" :number 1 :file "000.md" :name "📫 infra #1"}])]
+          (is (= {"deadbeef" {:agent "infra" :thread "t1" :number 1 :name "📫 infra #1" :kind "background" :ours true
+                              :state "starting" :since now :started-at now}}
+                 (:sessions m)))
+          (is (= {"t1" {:agent "infra" :number 1 :delivered "000.md" :holder "deadbeef"}} (:threads m))))
+        (is (= {:state "stopped" :since now :name "x"} (get-in (r (mem :sessions {"k" {:state "live" :name "x"}}) [:stopped "k"]) [:sessions "k"])))
+        (is (= {:state "live" :status "idle" :since now} (get-in (r (mem :sessions {"k" {:state "starting" :since 1}}) [:observe "k" {:state "live" :status "idle"}]) [:sessions "k"])))
+        (is (= {:state "live" :status "busy" :since 1} (get-in (r (mem :sessions {"k" {:state "live" :since 1}}) [:observe "k" {:state "live" :status "busy"}]) [:sessions "k"]))
+            ":since is when the state last changed")
+        (is (= {"infra" {:failures 2 :until 7 :reason "why"}} (:agents (r (mem :agents {"infra" {:failures 1}}) [:back-off "infra" 7 "why"]))))
+        (is (= {} (:agents (r (mem :agents {"infra" {:failures 1}}) [:reset "infra"]))))
+        (let [m (mem :threads {"t1" {:delivered "002.md" :check {:session "aaaa1111"}}} :sessions {"bbbb2222" (ours :state "starting")})]
+          (is (= {"t1" {:delivered "002.md" :deaf #{"aaaa1111"}}} (:threads (r m [:deaf "t1" "aaaa1111-full"]))))
+          (is (= {"t1" {:delivered "002.md"}} (:threads (r m [:checked "t1"]))))
+          (is (= [{} "gone"] ((juxt #(get-in % [:threads "t1"]) #(get-in % [:sessions "bbbb2222" :state])) (r m [:lost "bbbb2222" "t1"]))))
+          (is (= {} (:threads (r m [:forget "t1"]))))
+          (is (= {} (:sessions (r m [:drop "bbbb2222"]))))
+          (is (= {} (:threads (r (mem) [:lost "bbbb2222" "t1"]))) "bookkeeping never brings a forgotten thread back"))
+        (is (= (mem) (r (mem) [:start "infra" "t1" "text" {}])) "a start ends as :started or :back-off")))
+    (testing "serve-memory: an older serve's state (its tabs under :repos) is nothing remembered"
+      (is (= {:threads {} :sessions {} :agents {}} (core/serve-memory {:pid 1 :repos {"infra" {:pane 42}}})))
+      (is (= {:threads {} :sessions {} :agents {}} (core/serve-memory {:threads [1] :sessions "x"}))))
+    (testing "oncall-view and thread-session: each agent's state and serve's sessions, in words"
+      (let [v (fn [m & {:as more}] (first (core/oncall-view (merge {:now now :oncall {"infra" {:dir "/x/infra"}} :memory m :duty []} more))))
+            later (+ now 60000)
+            m (mem :threads {"t1" {:holder "deadbeef"}}
+                   :sessions {"deadbeef" (ours :name "📫 infra #1" :status "busy")
+                              "aaaa1111" {:agent "infra" :thread "t1" :number 1 :name "infra-aa" :kind "interactive" :state "stopped" :ours false}})]
+        (is (= {:repo "infra" :dir "/x/infra" :state "on-call" :pane nil :text "on call"} (v (mem))))
+        (is (= "on call; serve's sessions: \"infra-aa\" (interactive, stopped), \"📫 infra #1\" (background, busy, thread #1)"
+               (:text (v m)))
+            "by thread number, then short id")
+        (let [b (v (mem :agents {"infra" {:failures 1 :until later :reason "`claude --bg` failed (exit 1): Workspace not trusted."}}))]
           (is (= "backing-off" (:state b)))
-          (is (= (str "backing off until " (core/clock later) ": no session came on duty") (:text b)))
-          (is (= [(core/fmt-utc (java.time.Instant/ofEpochMilli later)) "no session came on duty"] ((juxt :until :reason) b))))
-        (is (= "on-call" (:state (v {:failures 1 :until now :reason "x"}))) "a back-off that is over")
-        (is (= ["tab-open" "tab open (pane 42), nobody on duty"] ((juxt :state :text) (v tab))))
-        (is (= ["on-duty" 42 "tab open (pane 42), on duty, idle 7m" 420 ["📫 infra"]]
-               ((juxt :state :pane :text :idle-s :sessions) (v tab :duty [(ours :session "📫 infra")] :sessions (idle 420000)))))
-        (is (= "tab open (pane 42), on duty, busy 0s"
-               (:text (v tab :duty [(ours)] :sessions {500 {:status "busy" :status-updated-at now}}))))
-        (let [sh (v tab :duty [(ours)] :sessions {500 {:status "shell" :status-updated-at (- now (* 3 hour))}})]
-          (is (= "tab open (pane 42), on duty, idle 3h" (:text sh)) "shell is idle between turns, and since when")
-          (is (= (* 3 3600) (:idle-s sh)) "closable (see closable-statuses)"))
-        (is (= "on duty (session hand-1)" (:text (v {} :duty [(ours :pane 3 :session "hand-1")]))) "a session the user started")
-        (is (empty? (core/oncall-view {:now now :oncall {} :memory {"infra" tab} :duty [] :sessions {}})) "registered repos only")))
-    (testing "the tab's command line, quoted for the shell"
-      (is (= "exec claude --name '📫 infra' '/agent-mail-listen'" (core/listener-command "infra")))
-      (is (= "'it'\\''s'" (core/sh-quote "it's")))
-      (let [nasty "it's $HOME `id` \"q\" ; ok"]
-        (is (= nasty (:out (p/shell {:out :string} "sh" "-c" (str "printf %s " (core/sh-quote nasty)))))
-            "the shell gets the text back unchanged")))))
+          (is (= (str "backing off until " (core/clock later) ": `claude --bg` failed (exit 1): Workspace not trusted.") (:text b)))
+          (is (= [(core/fmt-utc (java.time.Instant/ofEpochMilli later)) "`claude --bg` failed (exit 1): Workspace not trusted."]
+                 ((juxt :until :reason) b))))
+        (is (= "on-call" (:state (v (mem :agents {"infra" {:failures 1 :until now :reason "x"}})))) "a back-off that is over")
+        (is (= ["on-duty" "on duty (session hand-1)" ["hand-1"]]
+               ((juxt :state :text :sessions) (v (mem) :duty [{:repo "infra" :session "hand-1" :on-duty true}]))))
+        (is (empty? (core/oncall-view {:now now :oncall {} :memory m :duty []})) "registered agents only")
+        (is (= {:id "deadbeef" :name "📫 infra #1" :kind "background" :state "live"} (core/thread-session m "t1")))
+        (is (nil? (core/thread-session m "t2")))
+        (is (= "#1 → deadbeef \"📫 infra #1\" (background, busy)" (core/session-line (last (core/serve-sessions m)))))))))
 
-;; ================================================================ unit: wait announcements
-
-(deftest wait-announcements
-  (let [th (fn [id n & files] {:id id :number n :subject (str "About " id) :last-from "web"
-                               :msgs (mapv #(hash-map :file %) files)})
-        t1 (th "t1" 1 "001.md")
-        t1' (th "t1" 1 "001.md" "002.md")
-        t2 (th "t2" 2 "001.md")]
-    (testing "announce: every thread at first, then only a newer message"
-      (is (= {:fresh [t1 t2] :announced {"t1" "001.md" "t2" "001.md"}} (core/announce {} [t1 t2])))
-      (is (= {:fresh [] :announced {"t1" "001.md" "t2" "001.md"}}
-             (core/announce {"t1" "001.md" "t2" "001.md"} [t1 t2])) "nothing new: nothing to say")
-      (is (= [t1'] (:fresh (core/announce {"t1" "001.md" "t2" "001.md"} [t1' t2]))) "a reply in t1 is news")
-      (is (= {:fresh [] :announced {"t2" "001.md"}} (core/announce {"t1" "001.md" "t2" "001.md"} [t2]))
-          "a thread handed on is forgotten")
-      (is (= {:fresh [] :announced {}} (core/announce {"t1" "001.md"} []))))
-    (testing "announcement: one line per thread, then where it comes from"
-      (let [lines (str/split-lines (core/announcement "infra" [t1 t2]))]
-        (is (= 3 (count lines)))
-        (is (= "agent-mail: new mail for infra: #1 \"About t1\" from web (t1, message 1). Read it with `agent-mail read 1` and answer before moving on."
-               (first lines)))
-        (is (str/starts-with? (second lines) "agent-mail: new mail for infra: #2 \"About t2\""))
-        (is (str/includes? (last lines) "`agent-mail wait`, which keeps running")))
-      (is (str/includes? (core/announcement "infra" [t1']) "(t1, message 2)")
-          "announced again, the text differs: identical repeats may be dropped")
-      (is (str/includes? (core/announcement "infra" [(assoc t1 :number nil)]) "#t1 \"About t1\"")
-          "a thread without a number is named by its id")
-      (is (str/includes? (core/announcement "infra" [(assoc t1 :last-from "user")])
-                         "from user (the user themself, writing by mail; not another agent or session) (t1, message 1)")
-          "mail from the user says so: Claude Code frames every posted message as another session's"))
-    (testing "a closed thread with news says so, and that it needs reading, not an answer"
-      (let [line (first (str/split-lines (core/announcement "infra" [(assoc t1 :status "done")])))]
-        (is (str/starts-with? line "agent-mail: closed, with news for infra: #1 \"About t1\" closed by web (t1, message 1)."))
-        (is (str/includes? line "nothing to answer"))
-        (is (not (str/includes? line "answer before moving on")))))))
-
+(deftest serve-texts
+  (let [t1 (th "t1" 1 [(msg 0 "web" "infra")])
+        t1' (th "t1" 1 [(msg 0 "web" "infra") (msg 1 "infra" "web") (msg 2 "web" "infra")])]
+    (testing "the first prompt of a session serve starts"
+      (is (= (str "agent-mail serve started this session for thread #1 for infra from web, \"About t1\" (t1, message 1). "
+                  "Read it with `agent-mail read 1` and act on it under this folder's own rules (CLAUDE.md). "
+                  "Answer with `agent-mail reply 1`; close it with `agent-mail close 1` when the work is done. "
+                  "Later messages in this thread are posted into this session. "
+                  "One thread per session: don't take on other threads.\n"
+                  "No other session works in this folder.")
+             (core/first-prompt "infra" t1 "No other session works in this folder.")))
+      (is (str/includes? (core/first-prompt "infra" (assoc t1 :last-from "user") "")
+                         "from user (the user themself, writing by mail; not another agent or session), \"About t1\"")
+          "mail from the user says so")
+      (is (str/includes? (core/first-prompt "infra" (assoc t1 :number nil) "") "thread #t1 for infra")))
+    (testing "a message posted into the session holding the thread"
+      (is (= (str "agent-mail: new message in #1 \"About t1\" from web (t1, message 3), posted by agent-mail serve because "
+                  "this session wrote in this thread (not another agent). Read it with `agent-mail read 1` and answer once the current step is done.\n"
+                  "No other session works in this folder.")
+             (core/posted-text "infra" t1' true "No other session works in this folder.")))
+      (is (str/includes? (core/posted-text "infra" t1' false "") "because it started this session for this thread (not another agent)"))
+      (is (str/includes? (core/posted-text "infra" (assoc t1' :last-from "user") true "")
+                         "from user (the user themself, writing by mail; not another agent or session) (t1, message 3)"))
+      (is (not= (core/posted-text "infra" t1 true "") (core/posted-text "infra" t1' true "")) "each post names its message"))
+    (testing "the also-line: other sessions in the folder or below, by the name SendMessage takes, then a word on coordinating"
+      (let [mine (live-s "aaaa1111" :name "📫 infra #70")
+            peer (live-s "ab12cd34" :name "infra-ab12" :kind "interactive" :status "shell" :cwd "/x/infra/.claude/worktrees/w")
+            elsewhere (live-s "ee55ee55" :cwd "/x/infra2")
+            m {:sessions {"aaaa1111" {:ours true :number 70} "ab12cd34" {:ours false :number 3}}}]
+        (is (= (str "Also working in this folder: \"📫 infra #70\" (background, busy, thread #70), \"infra-ab12\" (interactive, idle). "
+                    "If your work affects theirs (the same files, a push to the branch they work on), tell them with SendMessage and let them decide.")
+               (core/also-line "/x/infra" [mine peer elsewhere] m nil))
+            "a thread number only for a session serve started for it; shell is idle; a sibling folder is not inside")
+        (is (= (str "Also working in this folder: \"infra-ab12\" (interactive, idle). " core/coordinate-sentence)
+               (core/also-line "/x/infra/" [mine peer] m "aaaa1111-full"))
+            "the session told is left out")
+        (is (= "No other session works in this folder." (core/also-line "/x/infra" [mine elsewhere] m "aaaa1111"))
+            "nobody else: no word on coordinating")
+        (is (= "No other session works in this folder." (core/also-line "/x/infra" [] {} nil)))
+        (is (str/includes? (core/also-line "/x/infra" [(assoc peer :name nil)] {} nil) "\"ab12cd34\" (interactive, idle)")
+            "no name: the short id")))
+    (testing "cache expiry from a transcript's tail: last assistant time plus the latest cache write's lifetime"
+      (let [ts "2026-10-31T10:00:00.000Z"
+            at (* 1000 (core/epoch-s ts))
+            a (fn [ts & {:as cc}] {:type "assistant" :timestamp ts :message {:usage {:cache_creation cc}}})]
+        (is (= (+ at 3600000) (core/cache-expiry [{:type "user"} (a ts :ephemeral_1h_input_tokens 900 :ephemeral_5m_input_tokens 0)])))
+        (is (= (+ at 300000) (core/cache-expiry [(a ts :ephemeral_1h_input_tokens 0 :ephemeral_5m_input_tokens 900)])))
+        (is (= (+ at 3600000) (core/cache-expiry [(a ts)])) "nothing says: an hour")
+        (is (= (+ at 1000 300000) (core/cache-expiry [(a ts :ephemeral_1h_input_tokens 9) (a "2026-10-31T10:00:01.000Z" :ephemeral_5m_input_tokens 9)]))
+            "the latest write decides")
+        (is (= (+ at 1000 3600000) (core/cache-expiry [(a ts :ephemeral_1h_input_tokens 9) (a "2026-10-31T10:00:01.000Z" :ephemeral_5m_input_tokens 0)]))
+            "an entry that wrote nothing: the one before")
+        (is (nil? (core/cache-expiry [{:type "user" :timestamp ts}])) "no assistant entry")
+        (is (nil? (core/cache-expiry [])))))
+    (testing "what claude prints"
+      (is (= "52f6bcf5" (core/backgrounded-id "Starting background service…\nbackgrounded · 52f6bcf5 · 📫 infra #7\n")))
+      (is (= "deadbeef" (core/backgrounded-id "backgrounded · deadbeef · x")))
+      (is (nil? (core/backgrounded-id "Workspace not trusted.")))
+      (is (= "`claude --bg` failed (exit 1): Workspace not trusted. Run `claude` in /x once…"
+             (core/claude-failure "`claude --bg`" {:exit 1 :out "Starting background service…\nWorkspace not trusted. Run `claude` in /x once…\n" :err ""})))
+      (is (= "`claude stop` failed (exit 2)" (core/claude-failure "`claude stop`" {:exit 2 :out "" :err " \n"})))
+      (let [item {:id "52f6bcf5" :sessionId "52f6bcf5-aaaa" :pid 9 :cwd "/x" :name "n" :kind "background" :status "idle" :state "done"}
+            want [{:id "52f6bcf5" :session-id "52f6bcf5-aaaa" :pid 9 :cwd "/x" :name "n" :kind "background" :status "idle" :run-state "done"}]]
+        (is (= want (core/agents-items [item])))
+        (is (= want (core/agents-items {:agents [item]})) "an object holding the list")
+        (is (= "52f6bcf5" (:id (first (core/agents-items [(dissoc item :id)])))) "the short id from the sessionId")
+        (is (= [] (core/agents-items "nonsense")))))))
 ;; ================================================================ unit: drafts
 
 (deftest draft-extraction
@@ -559,9 +701,12 @@
   (is (= 5 (:timeout (:opts (core/parse-argv ["wait" "--timeout" "5"])))))
   (is (= 2 (:interval (:opts (core/parse-argv ["wait" "--interval" "2" "--"])))) "numbers are parsed even when -- ends the options")
   (is (true? (:once (:opts (core/parse-argv ["wait" "--once"])))))
-  (is (= 90 (:idle-minutes (:opts (core/parse-argv ["serve" "--idle-minutes" "90"])))))
-  (is (= "--idle-minutes needs a whole number of minutes, got soon"
-         (try (core/parse-argv ["serve" "--idle-minutes" "soon"]) nil (catch clojure.lang.ExceptionInfo e (ex-message e)))))
+  (is (= "--interval needs a whole number of seconds, got soon"
+         (try (core/parse-argv ["serve" "--interval" "soon"]) nil (catch clojure.lang.ExceptionInfo e (ex-message e)))))
+  (is (true? (:here (:opts (core/parse-argv ["who" "--here"])))))
+  (is (= "unknown option --idle-minutes (try `agent-mail help`)"
+         (try (core/parse-argv ["serve" "--idle-minutes" "90"]) nil (catch clojure.lang.ExceptionInfo e (ex-message e))))
+      "gone with the tabs it closed")
   (is (= ["help" "read" "7"] (:args (core/parse-argv ["read" "7" "--help"]))) "help anywhere comes first")
   (is (= ["help"] (:args (core/parse-argv ["-h"]))))
   (is (usage-thrown? #(core/parse-argv ["wait" "--timeout" "soon"])))
@@ -1053,95 +1198,63 @@
   (loop [n (quot ms 50)]
     (or (f) (when (pos? n) (Thread/sleep 50) (recur (dec n))))))
 
-(deftest wait-posts-into-its-session
+(deftest wait-in-a-session-hands-over-to-serve
   ;; A unix socket's path must stay under ~104 bytes: with-store's directory is
   ;; too deep for that on macOS, so the socket gets a short one of its own.
   (with-store
-    (let [sock-dir (fs/create-temp-dir {:prefix "am"})
-          sess (fake-session (fs/path sock-dir "s.sock"))
-          env {"CLAUDE_CODE_MESSAGING_SOCKET" (:path sess) "CLAUDE_CODE_MESSAGING_TOKEN" "tok-123"}
-          posts #(deref (:posts sess))
-          text (fn [post] (get-in (peek post) [:message :content]))
-          duty-state (fn [s] (:state (first (filter #(= s (:session %)) (json/parse-string (out {} "who" "--json") true)))))
-          ids-out (fn [r] (str/split-lines (str/trim (:out r))))]
-      (try
-        (testing "with nothing for it: quiet until the timeout, exit 3, idle"
-          (let [r (am {:who "b" :env env} "wait" "--session" "b-0" "--timeout" "1" "--interval" "1")]
-            (is (= 3 (:exit r)))
-            (is (str/blank? (:out r)))
-            (is (empty? (posts)))
-            (is (= "idle" (duty-state "b-0")))
-            (testing "the old skill's shape (--session, hourly timeout) is told, at start and at the exit it re-arms on"
-              (let [lines (str/split-lines (str/trim (:err r)))]
-                (is (= 2 (count lines)))
-                (is (every? #(str/includes? % "wait --timeout 21600") lines))
-                (is (every? #(str/includes? % "/agent-mail-listen") lines))))))
-        (let [id (out {:who "a"} "send" "--to" "b" "--subject" "Vault please" "Add a vault.")
-              n (:number (thread-json id))
-              w (start {:who "b" :env env} "wait" "--session" "b-1" "--timeout" "60" "--interval" "1")]
-          (try
-            (testing "mail is posted into the session, after an auth line with its token, and the wait goes on"
-              (is (eventually 5000 #(= 1 (count (posts)))))
-              (let [[auth msg :as post] (first (posts))]
-                (is (= 2 (count post)))
-                (is (= {:type "auth" :token "tok-123"} auth))
-                (is (= ["user" "user"] [(:type msg) (get-in msg [:message :role])]))
-                (is (str/starts-with? (text post) (str "agent-mail: new mail for b: #" n " \"Vault please\" from a (" id ", message 1)")))
-                (is (str/includes? (text post) (str "Read it with `agent-mail read " n "`"))))
-              (is (= "working" (duty-state "b-1")) "working while the thread is the repo's turn")
-              (is (p/alive? w)))
-            (testing "not announced again while nothing changes"
-              (Thread/sleep 2500)
-              (is (= 1 (count (posts))))
-              (is (p/alive? w)))
-            (testing "a newer message in the thread is announced again"
-              (out {:who "a"} "reply" id "And make it fast.")
-              (is (eventually 5000 #(= 2 (count (posts)))))
-              (is (str/includes? (text (second (posts))) (str "#" n " \"Vault please\" from a (" id ", message 2)"))))
-            (testing "handed on, the thread leaves the session waiting, unannounced"
-              (out {:who "b"} "reply" id "Done.")
-              (is (eventually 5000 #(= "waiting" (duty-state "b-1"))))
-              (is (= 2 (count (posts))))
-              (is (p/alive? w)))
-            (finally (p/destroy-tree w))))
-        (testing "several threads at once: one post, one line each"
-          (let [x (out {:who "a"} "send" "--to" "c" "--subject" "One" "first")
-                y (out {:who "a"} "send" "--to" "c" "--subject" "Two" "second")
-                before (count (posts))
-                r (am {:who "c" :env env} "wait" "--session" "c-1" "--timeout" "1" "--interval" "1")]
-            (is (= 3 (:exit r)) "the safety net still ends it")
-            (is (str/blank? (:out r)))
-            (is (eventually 2000 #(= (inc before) (count (posts)))))
-            (let [lines (str/split-lines (text (last (posts))))]
-              (is (= 3 (count lines)) "two threads, then where it comes from")
-              (is (str/includes? (first lines) (str "\"One\" from a (" x ", message 1)")))
-              (is (str/includes? (second lines) (str "\"Two\" from a (" y ", message 1)"))))))
-        (testing "--once prints the ids and exits even with the socket set"
-          (let [before (count (posts))
-                r (am {:who "c" :env env} "wait" "--once" "--session" "c-2" "--timeout" "5")]
-            (is (zero? (:exit r)))
-            (is (= 2 (count (ids-out r))))
-            (Thread/sleep 200)
-            (is (= before (count (posts))))))
-        (testing "nothing at the socket's path: the classic exit"
-          (let [r (am {:who "c" :env (assoc env "CLAUDE_CODE_MESSAGING_SOCKET" (str (fs/path sock-dir "none.sock")))}
-                      "wait" "--session" "c-3" "--timeout" "5")]
-            (is (zero? (:exit r)))
-            (is (= 2 (count (ids-out r))))))
-        (testing "a socket nobody listens on any more: the post fails and the ids are printed instead"
-          ((:close sess))
-          (let [r (am {:who "c" :env env} "wait" "--session" "c-4" "--timeout" "5")]
-            (is (zero? (:exit r)))
-            (is (= 2 (count (ids-out r))))
-            (is (str/includes? (:err r) "could not post"))
-            (is (not (str/includes? (str (:out r) (:err r)) "tok-123")) "the token is never printed")
-            (is (= "working" (duty-state "c-4"))))
-          (testing "the skill's own shape earns no note about the old one"
-            (let [r (am {:who "c" :env env} "wait" "--timeout" "21600")]
-              (is (zero? (:exit r)))
-              (is (= ["agent-mail: could not post to this session's socket; printing the thread ids instead"]
-                     (str/split-lines (str/trim (:err r))))))))
-        (finally ((:close sess)) (fs/delete-tree sock-dir))))))
+    (with-dir [d]
+      (let [sock-dir (fs/create-temp-dir {:prefix "am"})
+            sess (fake-session (fs/path sock-dir "s.sock"))
+            web (str (fs/path d "web"))
+            src (str (fs/path web "src"))
+            me (.pid (java.lang.ProcessHandle/current))
+            env {"CLAUDE_CODE_MESSAGING_SOCKET" (:path sess) "CLAUDE_PID" (str me)}
+            real #(str (fs/real-path %))
+            listed #(json/parse-string (out {} "oncall" "--json") true)
+            records #(json/parse-string (out {} "who" "--json") true)
+            duty! (fn [nm rec] (spit (str (fs/path *store* "duty" (str nm ".edn")))
+                                     (pr-str (merge {:state "waiting" :heartbeat (core/now-utc) :pid 1} rec))))]
+        (git-in d "init" "-q" web)
+        (fs/create-dirs src)
+        (try
+          (testing "outside Claude Code a wait is classic and registers nothing"
+            (is (= 3 (:exit (am {:dir web :env (dissoc env "CLAUDE_CODE_MESSAGING_SOCKET")} "wait" "--timeout" "0"))))
+            (is (= [] (listed))))
+          (let [id (out {:who "a"} "@web" "Mail for web")]
+            (testing "in a Claude Code session: on call, its older waits' records gone, a notice, exit 0, nothing posted or printed"
+              (duty! "web__old" {:repo "web" :session "old" :session-pid me})
+              (duty! "web__other" {:repo "web" :session "other" :session-pid 4000000})
+              (let [r (am {:dir src :env env} "wait" "--timeout" "21600")
+                    notice (str/trim (:err r))]
+                (is (zero? (:exit r)))
+                (is (str/blank? (:out r)) "no thread ids: serve delivers them")
+                (is (= 1 (count (str/split-lines notice))))
+                (is (str/starts-with? notice "agent-mail: wait no longer runs in a Claude Code session. agent-mail serve now starts a background session for each thread"))
+                (is (str/includes? notice "web is on call."))
+                (is (str/includes? notice "agent-mail serve isn't running: tell the user"))
+                (is (str/ends-with? notice "Don't arm wait again, and re-read /agent-mail-listen.")))
+              (is (= ["web"] (map :repo (listed))))
+              (is (= (real web) (real (:dir (first (listed))))) "at the main worktree")
+              (is (= ["other"] (map :session (records))) "this session's record is gone, another's stays")
+              (Thread/sleep 200)
+              (is (empty? @(:posts sess))))
+            (testing "--once is classic even in a session"
+              (let [r (am {:dir web :env env} "wait" "--once" "--timeout" "5")]
+                (is (zero? (:exit r)))
+                (is (= [id] (str/split-lines (str/trim (:out r)))))
+                (is (str/blank? (:err r)))))
+            (testing "nothing at the socket's path: classic"
+              (is (= [id] (str/split-lines (out {:dir web :env (assoc env "CLAUDE_CODE_MESSAGING_SOCKET" (str (fs/path sock-dir "none.sock")))}
+                                                "wait" "--timeout" "5"))))))
+          (testing "an --as name is not registered: a session started there would not write as it"
+            (let [r (am {:who "other" :dir web :env env} "wait")]
+              (is (str/includes? (:err r) "other is not on call: `agent-mail oncall add` in its repo puts it there.")))
+            (is (= ["web"] (map :repo (listed)))))
+          (testing "taken off call, it stays off, and the notice says so"
+            (out {:dir web} "oncall" "remove")
+            (is (str/includes? (err {:dir web :env env} "wait") "web was taken off call: `agent-mail oncall add` puts it back."))
+            (is (= [] (listed))))
+          (finally ((:close sess)) (fs/delete-tree sock-dir)))))))
 
 (deftest messages-record-their-session
   (with-store
@@ -1319,151 +1432,227 @@
 
 ;; ================================================================ end to end: on call
 
-(defn fake-wezterm!
-  "A stand-in for the wezterm CLI in directory `d`: each call's arguments go
-   to argv.log as one line, separated by U+001F; `list` and `list-clients`
-   answer with list.json and clients.json, `spawn` with spawn.out; while a
-   file named `fail` exists every call fails. Returns its path."
+(defn fake-claude!
+  "A stand-in for the claude CLI in directory `d`: each call's arguments,
+   then `cwd=` its working directory and `sid=` the CLAUDE_CODE_SESSION_ID
+   that reached it, go to claude.log separated by U+001F, each call ended by
+   U+001E (a prompt holds newlines). `agents --json` answers with
+   agents.json, `agents --json --all` with all.json; `--bg` prints the
+   background service's start line and `backgrounded · <bg.id, else
+   deadbeef> · <its --name>`, or, while bg.fail exists, that file with exit
+   1; `stop` says what it stopped. Returns its path."
   [d]
-  (script! d "wezterm"
+  (script! d "claude"
            (str "d=\"$(dirname \"$0\")\"\n"
-                "printf '%s\\037' \"$@\" >> \"$d/argv.log\"; printf '\\n' >> \"$d/argv.log\"\n"
-                "[ -e \"$d/fail\" ] && { echo 'no running wezterm' >&2; exit 1; }\n"
-                "for a in \"$@\"; do case \"$a\" in\n"
-                "  list) cat \"$d/list.json\"; exit 0 ;;\n"
-                "  list-clients) cat \"$d/clients.json\"; exit 0 ;;\n"
-                "  spawn) cat \"$d/spawn.out\"; exit 0 ;;\n"
-                "esac; done")))
+                "{ printf '%s\\037' \"$@\"; printf 'cwd=%s\\037sid=%s\\036' \"$(pwd -P)\" \"${CLAUDE_CODE_SESSION_ID:-}\"; } >> \"$d/claude.log\"\n"
+                "case \"$1\" in\n"
+                "  agents) case \" $* \" in *' --all '*) cat \"$d/all.json\" ;; *) cat \"$d/agents.json\" ;; esac ;;\n"
+                "  --bg) if [ -e \"$d/bg.fail\" ]; then cat \"$d/bg.fail\"; exit 1; fi\n"
+                "        name=''; prev=''; for a in \"$@\"; do [ \"$prev\" = --name ] && name=\"$a\"; prev=\"$a\"; done\n"
+                "        echo 'Starting background service…'\n"
+                "        echo \"backgrounded · $(cat \"$d/bg.id\" 2>/dev/null || echo deadbeef) · $name\" ;;\n"
+                "  stop) echo \"stopped $2\" ;;\n"
+                "esac")))
 
-(defn wez-calls
-  "The fake wezterm's calls in `d` so far, each a vector of its arguments."
+(defn claude-calls
+  "The fake claude's calls in `d` so far, each a vector of its arguments
+   followed by its cwd= and sid= entries."
   [d]
-  (let [f (fs/path d "argv.log")]
-    (if (fs/exists? f) (mapv #(str/split % #"\u001f") (str/split-lines (slurp (str f)))) [])))
-
-(defn panes!
-  "The fake wezterm's `list`: these pane ids, all in window 3."
-  [d & ids]
-  (spit (str (fs/path d "list.json"))
-        (json/generate-string (for [id ids] {:window_id 3 :tab_id id :pane_id id :is_active true :title "zsh"
-                                             :tab_title "" :cwd "file:///" :tty_name "/dev/ttys009" :workspace "default"}))))
+  (let [f (fs/path d "claude.log")]
+    (if (fs/exists? f)
+      (mapv #(str/split % #"\u001f") (remove str/blank? (str/split (slurp (str f)) #"\u001e")))
+      [])))
 
 (defn serve-file [nm] (fs/path *store* "duty" "serve" nm))
 (defn serve-state [] (edn/read-string (slurp (str (serve-file "state.edn")))))
-(defn kills [calls] (filter #(some #{"kill-pane"} %) calls))
 
-(deftest serve-opens-and-closes-listener-tabs
+(deftest serve-delivers-a-session-per-thread
   (with-store
     (with-dir [d]
-      (let [wez (fake-wezterm! d)
-            cfg (str (fs/path d "claude"))
+      (let [claude (fake-claude! d)
+            cfg (str (fs/path d "claude-config"))
             infra (str (fs/create-dirs (fs/path d "infra")))
+            infra-real (str (fs/real-path infra))
+            sock-dir (fs/create-temp-dir {:prefix "am"})
+            sess (fake-session (fs/path sock-dir "s.sock"))
+            other (p/process ["sleep" "600"])
+            other-pid (.pid ^Process (:proc other))
             me (.pid (java.lang.ProcessHandle/current))
-            env {"AGENT_MAIL_WEZTERM" wez "CLAUDE_CONFIG_DIR" cfg "SHELL" "/bin/zsh"}
-            serve (fn [& args] (apply am {:env env} "serve" "--once" args))
-            calls #(wez-calls d)
-            clear! #(fs/delete-if-exists (fs/path d "argv.log"))
-            memory #(get-in (serve-state) [:repos "infra"])
-            remember! (fn [m] (spit (str (serve-file "state.edn")) (pr-str (assoc-in (serve-state) [:repos "infra"] m))))
-            text #(:text (first (json/parse-string (out {:env env} "oncall" "--json") true)))
-            ago #(- (System/currentTimeMillis) (* % 60000))
-            listener! (fn [status minutes] (registry! cfg me {:pid me :name "📫 infra" :status status :statusUpdatedAt (ago minutes)}))
-            on-duty! (fn [pane] (spit (str (fs/path *store* "duty" (str "infra__" pane ".edn")))
-                                      (pr-str {:repo "infra" :session "📫 infra" :state "waiting" :heartbeat (core/now-utc)
-                                               :pid 1 :session-pid me :pane pane})))]
-        (spit (str (fs/path d "clients.json"))
-              (json/generate-string [{:pid 999 :focused_pane_id 9 :idle_time {:secs 80 :nanos 0} :workspace "default"}
-                                     {:pid 999 :focused_pane_id 7 :idle_time {:secs 2 :nanos 5} :workspace "default"}]))
-        (panes! d 7 9)
-        (spit (str (fs/path d "spawn.out")) "42\n")
+            env {"AGENT_MAIL_CLAUDE" claude "CLAUDE_CONFIG_DIR" cfg "CLAUDE_CODE_SESSION_ID" "serve-parent"}
+            serve (fn [] (let [r (am {:env env} "serve" "--once")] (is (zero? (:exit r)) (:err r)) r))
+            calls #(claude-calls d)
+            clear! #(fs/delete-if-exists (fs/path d "claude.log"))
+            json! (fn [file x] (spit (str (fs/path d file)) (json/generate-string x)))
+            memory #(core/serve-memory (serve-state))
+            full "deadbeef-1111-4222-8333-444455556666"
+            entry {:id "deadbeef" :sessionId full :pid me :cwd infra-real :name "📫 infra #1" :kind "background" :status "busy" :state "running"}
+            stopped (assoc entry :pid nil :status nil :state "stopped")
+            peer {:id "ab12cd34" :sessionId "ab12cd34-5555-4666-8777-888899990000" :pid other-pid
+                  :cwd (str infra-real "/.claude/worktrees/w") :name "infra-ab12" :kind "interactive" :status "idle" :state "running"}
+            transcript! (fn [sid ago ttl]
+                          (let [f (fs/path cfg "projects" "-x-infra" (str sid ".jsonl"))
+                                ts (core/fmt-utc (java.time.Instant/ofEpochMilli (- (System/currentTimeMillis) ago)))]
+                            (fs/create-dirs (fs/parent f))
+                            (spit (str f) (str (json/generate-string {:type "user" :timestamp ts}) "\n"
+                                               (json/generate-string {:type "assistant" :timestamp ts
+                                                                      :message {:usage {:cache_creation {ttl 900}}}}) "\n"))))
+            as-session {:who "infra" :env {"CLAUDE_CODE_SESSION_ID" full}}
+            posts #(deref (:posts sess))
+            text-of (fn [post] (get-in (peek post) [:message :content]))
+            oncall-text #(:text (first (filter (comp #{"infra"} :repo) (json/parse-string (out {:env env} "oncall" "--json") true))))
+            minute 60000
+            hour 3600000]
+        (json! "agents.json" [])
+        (json! "all.json" [])
+        (fs/create-dirs (serve-file ""))
+        (spit (str (serve-file "state.edn"))
+              (pr-str {:pid 1 :heartbeat "2020-01-01T00:00:00.000Z" :interval 5
+                       :repos {"infra" {:pane 42 :failures 3 :until 99999999999999 :reason "old"}}}))
         (out {} "oncall" "add" "infra" infra)
-        (testing "nothing waits: no tab, and wezterm is not asked"
-          (is (zero? (:exit (serve))))
-          (is (= [] (calls))))
-        (let [id (out {:who "website"} "@infra" "Please rotate the certificate")]
-          (testing "mail waits and nobody is on duty: a tab in the window last focused, then focus goes back"
-            (let [r (serve)]
-              (is (zero? (:exit r)) (:err r))
-              (is (re-find #"(?m)^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} spawn infra: pane 42 in window 3, " (:err r))
-                  "one timestamped log line per action"))
-            (is (= [["cli" "--no-auto-start" "list-clients" "--format" "json"]
-                    ["cli" "--no-auto-start" "list" "--format" "json"]
-                    ["cli" "--no-auto-start" "spawn" "--window-id" "3" "--cwd" infra
-                     "--" "/bin/zsh" "-lic" "exec claude --name '📫 infra' '/agent-mail-listen'"]
-                    ["cli" "--no-auto-start" "activate-pane" "--pane-id" "7"]]
-                   (calls)))
-            (is (= {:pane 42 :gui-pid 999} (dissoc (memory) :spawned-at)))
-            (is (= "tab opening (pane 42)" (text))))
-          (testing "within the grace period: no second tab, only a look at the panes"
-            (clear!)
-            (panes! d 7 9 42)
+        (try
+          (testing "an older serve's memory (its tabs) is dropped; nothing waits, so Claude Code is not asked"
             (serve)
-            (is (= [["cli" "--no-auto-start" "list" "--format" "json"] ["cli" "--no-auto-start" "list-clients" "--format" "json"]]
-                   (calls))))
-          (testing "nobody on duty past the grace period: back off"
-            (clear!)
-            (remember! (assoc (memory) :spawned-at (- (System/currentTimeMillis) 121000)))
-            (let [r (serve)]
-              (is (re-find #"back off infra until \d\d:\d\d: no session came on duty" (:err r))))
-            (is (not-any? #(some #{"spawn"} %) (calls)))
-            (is (re-matches #"backing off until \d\d:\d\d: no session came on duty" (text)))
-            (is (= 1 (:failures (memory)))))
-          (testing "the listener comes on duty in that tab: the back-off is cleared"
-            (on-duty! 42)
-            (listener! "idle" 1)
-            (is (str/includes? (:err (serve)) "on duty: infra"))
-            (is (= {:pane 42 :gui-pid 999} (memory)))
-            (is (= "tab open (pane 42), on duty, idle 1m" (text))))
-          (testing "closed once nothing waits and its session has been idle an hour"
-            (clear!)
-            (listener! "idle" 120)
-            (serve)
-            (is (empty? (kills (calls))) "mail still waits")
-            (out {:who "infra"} "close" id "Rotated.")
-            (listener! "busy" 120)
-            (serve)
-            (is (empty? (kills (calls))) "busy")
-            (listener! "idle" 59)
-            (serve)
-            (is (empty? (kills (calls))) "idle 59 minutes: its prompt cache still holds")
-            (listener! "idle" 61)
-            (serve "--idle-minutes" "90")
-            (is (empty? (kills (calls))) "--idle-minutes sets the limit")
-            (let [r (serve)]
-              (is (str/includes? (:err r) "close infra: pane 42")))
-            (is (= [["cli" "--no-auto-start" "kill-pane" "--pane-id" "42"]] (kills (calls))))
-            (is (not (fs/exists? (fs/path *store* "duty" "infra__42.edn"))) "its duty record goes with it")
-            (is (nil? (memory)) "and serve forgets the tab")
-            (is (= "on call" (text)))))
-        (testing "a session the user started is never touched"
-          (clear!)
-          (panes! d 7 50)
-          (on-duty! 50)
-          (listener! "idle" 300)
-          (serve)
-          (is (= [] (calls)) "no tab of serve's, nothing waits: wezterm is not even asked"))
-        (testing "a tab the user closed is forgotten"
-          (remember! {:pane 43 :gui-pid 999})
-          (is (str/includes? (:err (serve)) "forget infra: pane 43 is gone"))
-          (is (nil? (memory))))
-        (testing "a failing wezterm backs off, and so does a directory that is gone"
-          (fs/delete (fs/path *store* "duty" "infra__50.edn"))
-          (out {:who "website"} "@infra" "One more")
-          (spit (str (fs/path d "fail")) "")
-          (is (re-find #"back off infra until \d\d:\d\d: wezterm spawn failed: no running wezterm" (:err (serve))))
-          (is (= 1 (:failures (memory))))
-          (fs/delete (fs/path d "fail"))
-          (let [gone (str (fs/create-dirs (fs/path d "gone")))]
-            (out {} "oncall" "add" "gone" gone)
-            (out {:who "website"} "@gone" "Anyone?")
-            (fs/delete gone)
-            (is (re-find #"back off gone until \d\d:\d\d: its directory is gone" (:err (serve))))
-            (is (= 1 (count (str/split-lines (str/trim (:err (serve))))))
-                "both backing off: no action, so nothing logged but the start line")
-            (is (str/ends-with? (:text (first (json/parse-string (out {:env env} "oncall" "--json") true)))
-                                (str "its directory is gone (" gone ")")))))
-        (is (str/blank? (store-git "status" "--porcelain")) "serve's files stay out of the store's history")))))
-
+            (is (= [] (calls)))
+            (is (not (contains? (serve-state) :repos)))
+            (is (= {:threads {} :sessions {} :agents {}} (memory)))
+            (is (= "on call" (oncall-text)) "not backing off"))
+          (let [id (out {:who "website"} "@infra" "Rotate the key")]
+            (testing "a new thread: a background session of its own, in the repo, named for the thread"
+              (let [r (serve)
+                    [list all bg resolve :as cs] (calls)]
+                (is (re-find #"(?m)^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} start \"📫 infra #1\" \(deadbeef\) for #1 in " (:err r))
+                    "one timestamped log line per action")
+                (is (= 4 (count cs)))
+                (is (= ["agents" "--json"] (take 2 list)))
+                (is (= ["agents" "--json" "--all"] (take 3 all)))
+                (is (= ["--bg" "--name" "📫 infra #1"] (take 3 bg)))
+                (is (str/starts-with? (nth bg 3) (str "agent-mail serve started this session for thread #1 for infra from website, \"Rotate the key\" (" id ", message 1).")))
+                (is (str/ends-with? (nth bg 3) "\nNo other session works in this folder."))
+                (is (= [(str "cwd=" infra-real) "sid="] (drop 4 bg)) "in the repo; the session id serve inherited is not passed on")
+                (is (= ["agents" "--json"] (take 2 resolve)) "to learn the full session id"))
+              (is (= {"deadbeef" {:agent "infra" :thread id :number 1 :name "📫 infra #1" :kind "background" :ours true :state "starting"}}
+                     (update-vals (:sessions (memory)) #(dissoc % :since :started-at))))
+              (is (= {:agent "infra" :number 1 :holder "deadbeef"} (dissoc (get-in (memory) [:threads id]) :delivered)))
+              (is (= "on call; serve's sessions: \"📫 infra #1\" (background, starting, thread #1)" (oncall-text)))
+              (is (= {:id "deadbeef" :name "📫 infra #1" :kind "background" :state "starting"}
+                     (:session (first (:threads (status-json {:env env})))))))
+            (testing "not started twice while it comes up"
+              (clear!)
+              (serve)
+              (is (= [["agents" "--json" (str "cwd=" (fs/real-path *store*)) "sid="]] (calls)) "a look at the sessions only"))
+            (testing "it shows up"
+              (json! "agents.json" [entry peer])
+              (registry! cfg me {:pid me :sessionId full :messagingSocketPath (:path sess) :status "busy" :statusUpdatedAt 1 :kind "bg"})
+              (registry! cfg other-pid {:pid other-pid :sessionId (:sessionId peer) :status "idle" :statusUpdatedAt 1 :kind "interactive"})
+              (is (str/includes? (:err (serve)) "up \"📫 infra #1\" (deadbeef)"))
+              (is (= ["live" full] ((juxt :state :session-id) (get-in (memory) [:sessions "deadbeef"])))))
+            (testing "a message in a thread the session wrote in is posted into it"
+              (out as-session "reply" id "Which key?")
+              (is (= full (:session (last (:msgs (thread-json id))))) "the reply records the session")
+              (out {:who "website"} "reply" id "The staging one.")
+              (clear!)
+              (let [r (serve)]
+                (is (str/includes? (:err r) "post #1 into \"📫 infra #1\" (deadbeef)")))
+              (is (eventually 3000 #(= 1 (count (posts)))))
+              (let [[post :as all] (posts)]
+                (is (= 1 (count all)))
+                (is (= 1 (count post)) "one line: serve has no token to send")
+                (is (str/starts-with? (text-of post) (str "agent-mail: new message in #1 \"Rotate the key\" from website (" id ", message 3), posted by agent-mail serve because this session wrote in this thread (not another agent).")))
+                (is (str/ends-with? (text-of post) (str "\nAlso working in this folder: \"infra-ab12\" (interactive, idle). " core/coordinate-sentence))
+                    "the other session, by the name SendMessage takes"))
+              (is (not-any? #(= "--bg" (first %)) (calls)))
+              (clear!)
+              (serve)
+              (Thread/sleep 200)
+              (is (= 1 (count (posts))) "posted once")
+              (is (= [["agents" "--json"]] (map #(take 2 %) (calls)))))
+            (testing "who: serve's sessions; who --here: the others in this folder"
+              (is (re-find #"(?m)^infra\s+\(serve\)\s+#1 → deadbeef \"📫 infra #1\" \(background, busy\)$" (out {:env env} "who")))
+              (is (= (str "Also working in this folder: \"infra-ab12\" (interactive, idle). " core/coordinate-sentence)
+                     (out {:dir infra :env (assoc env "CLAUDE_CODE_SESSION_ID" full)} "who" "--here")))
+              (is (str/starts-with? (err {:dir infra} "who" "--here") "agent-mail: `claude agents` failed (exit 127): Cannot run program")
+                  "no claude: says why"))
+            (testing "the session ended: resumed while its prompt cache is warm"
+              (out as-session "reply" id "Staging rotated.")
+              (out {:who "website"} "reply" id "And prod?")
+              (json! "agents.json" [peer])
+              (json! "all.json" [stopped peer])
+              (transcript! full (* 10 minute) :ephemeral_1h_input_tokens)
+              (clear!)
+              (let [r (serve)]
+                (is (str/includes? (:err r) "ended \"📫 infra #1\" (deadbeef)"))
+                (is (str/includes? (:err r) "resume \"📫 infra #1\" (deadbeef) for #1, its cache warm until ")))
+              (let [[bg :as resumes] (filter #(= "--bg" (first %)) (calls))]
+                (is (= 1 (count resumes)))
+                (is (= ["--bg" "--resume" full] (take 3 bg)))
+                (is (str/starts-with? (nth bg 3) (str "agent-mail: new message in #1 \"Rotate the key\" from website (" id ", message 5)")))
+                (is (= [(str "cwd=" infra-real) "sid="] (drop 4 bg))))
+              (is (= "starting" (get-in (memory) [:sessions "deadbeef" :state]))))
+            (testing "ended with its cache cold: a new session for the thread"
+              (json! "agents.json" [entry peer])
+              (serve)
+              (out as-session "reply" id "Prod rotated.")
+              (out {:who "website"} "reply" id "One more: the backup key.")
+              (json! "agents.json" [peer])
+              (transcript! full (* 2 hour) :ephemeral_5m_input_tokens)
+              (spit (str (fs/path d "bg.id")) "cafebabe")
+              (clear!)
+              (let [r (serve)]
+                (is (str/includes? (:err r) "start \"📫 infra #1\" (cafebabe) for #1")))
+              (let [[bg :as starts] (filter #(= "--bg" (first %)) (calls))]
+                (is (= 1 (count starts)))
+                (is (= ["--bg" "--name" "📫 infra #1"] (take 3 bg)))
+                (is (str/starts-with? (nth bg 3) "agent-mail serve started this session for thread #1"))
+                (is (str/ends-with? (nth bg 3) (str "\nAlso working in this folder: \"infra-ab12\" (interactive, idle). " core/coordinate-sentence))))
+              (is (= [true "starting" id] ((juxt :ours :state :thread) (get-in (memory) [:sessions "cafebabe"])))))
+            (testing "serve stops a session it started once idle, holding no open thread, its cache expired"
+              (json! "agents.json" [{:id "cafebabe" :sessionId "cafebabe-0000-4000-8000-000000000000" :pid other-pid :cwd infra-real
+                                     :name "📫 infra #1" :kind "background" :status "idle" :state "running"}])
+              (registry! cfg other-pid {:pid other-pid :status "idle" :statusUpdatedAt (- (System/currentTimeMillis) (* 2 hour)) :kind "bg"})
+              (serve)
+              (is (empty? (filter #(= "stop" (first %)) (calls))) "its thread still waits on it")
+              (out {:who "website"} "close" id "Never mind the backup key.")
+              (clear!)
+              (let [r (serve)]
+                (is (str/includes? (:err r) "stop \"📫 infra #1\" (cafebabe): idle, holding no open thread, its cache expired at ")))
+              (is (= [["stop" "cafebabe"]] (map #(take 2 %) (filter #(= "stop" (first %)) (calls)))))
+              (is (= "stopped" (get-in (memory) [:sessions "cafebabe" :state])))
+              (json! "agents.json" [])
+              (clear!)
+              (serve)
+              (is (= [] (calls)) "nothing of its own runs: Claude Code is not asked")
+              (is (= {:threads {} :sessions {} :agents {}} (memory)) "its thread closed: forgotten")))
+          (testing "`claude --bg` fails (an untrusted folder): back off, and say why"
+            (spit (str (fs/path d "bg.fail")) (str "Starting background service…\nWorkspace not trusted. Run `claude` in " infra-real " once…\n"))
+            (let [id (out {:who "website"} "@infra" "Anyone?")
+                  r (serve)
+                  why (str "`claude --bg` failed (exit 1): Workspace not trusted. Run `claude` in " infra-real " once…")]
+              (is (re-find #"back off infra until \d\d:\d\d: " (:err r)))
+              (is (str/includes? (:err r) why))
+              (is (re-matches #"backing off until \d\d:\d\d: .*" (oncall-text)))
+              (is (str/ends-with? (oncall-text) why))
+              (let [st (status-json {:env env})]
+                (is (= [id] (:undelivered st)))
+                (is (= "none" (:listener (first (:threads st))))))
+              (spit (str (serve-file "pid")) (str me "\n"))
+              (is (str/starts-with? (err {:who "website" :env env} "@infra" "Still?") "→ infra: nobody on duty; on call, backing off until")
+                  "while serve runs")
+              (fs/delete (serve-file "pid"))
+              (clear!)
+              (serve)
+              (is (= [] (calls)) "backing off: nothing tried")))
+          (testing "a listener on duty (an older wait) keeps its repo's threads"
+            (let [docs (str (fs/create-dirs (fs/path d "docs")))]
+              (out {} "oncall" "add" "docs" docs)
+              (spit (str (fs/path *store* "duty" "docs__l.edn"))
+                    (pr-str {:repo "docs" :session "l" :state "waiting" :heartbeat (core/now-utc) :pid 1}))
+              (out {:who "website"} "@docs" "Docs please")
+              (clear!)
+              (serve)
+              (is (= [] (calls)))
+              (is (= "on-duty" (:listener (first (:threads (status-json {:env env}))))))))
+          (is (str/blank? (store-git "status" "--porcelain")) "serve's files stay out of the store's history")
+          (finally ((:close sess)) (fs/delete-tree sock-dir) (p/destroy other)))))))
 (deftest serve-runs-once-at-a-time
   (with-store
     (let [me (.pid (java.lang.ProcessHandle/current))
@@ -1494,7 +1683,7 @@
         (is (= {:alive false :pid me} (:serve (status-json {}))) "a live pid alone is not enough")
         (let [r (am {} "serve" "--once")]
           (is (zero? (:exit r)) (:err r))
-          (is (str/includes? (:err r) "a round every 5s, idle tabs closed after 60m")))
+          (is (str/includes? (:err r) "a round every 5s, sessions through ")))
         (is (not (fs/exists? (serve-file "pid"))))
         (spit (str (serve-file "pid")) "4000000\n")
         (state! (core/now-utc))
@@ -1550,77 +1739,42 @@
           (out {:dir repo} "oncall" "add")
           (is (= ["docs" "repo-x"] (map :repo (listed)))))))))
 
-(deftest wait-puts-its-repo-on-call
-  (with-store
-    (with-dir [d]
-      (let [sock-dir (fs/create-temp-dir {:prefix "am"})
-            sess (fake-session (fs/path sock-dir "s.sock"))
-            web (str (fs/path d "web"))
-            src (str (fs/path web "src"))
-            me (.pid (java.lang.ProcessHandle/current))
-            env {"CLAUDE_CODE_MESSAGING_SOCKET" (:path sess) "CLAUDE_PID" (str me) "WEZTERM_PANE" "41"}
-            real #(str (fs/real-path %))
-            listed #(json/parse-string (out {} "oncall" "--json") true)
-            record (fn [repo] (last (filter #(= repo (:repo %)) (json/parse-string (out {} "who" "--json") true))))]
-        (git-in d "init" "-q" web)
-        (fs/create-dirs src)
-        (try
-          (testing "a wait outside Claude Code registers nothing"
-            (is (= 3 (:exit (am {:dir web :env (dissoc env "CLAUDE_CODE_MESSAGING_SOCKET")} "wait" "--timeout" "0"))))
-            (is (= [] (listed))))
-          (testing "in a Claude Code session: its repo goes on call at the main worktree; the record has its pane and directory"
-            (is (= 3 (:exit (am {:dir src :env env} "wait" "--timeout" "0"))))
-            (let [[e :as all] (listed)]
-              (is (= ["web"] (map :repo all)))
-              (is (= (real web) (real (:dir e)))))
-            (let [r (record "web")]
-              (is (= [41 me] ((juxt :pane :session-pid) r)))
-              (is (= (real src) (real (:dir r))))))
-          (testing "an --as name is not registered: a tab started here would not come on duty as it"
-            (am {:who "other" :dir web :env env} "wait" "--timeout" "0")
-            (is (= ["web"] (map :repo (listed)))))
-          (testing "taken off call, it stays off"
-            (out {:dir web} "oncall" "remove")
-            (am {:dir web :env env} "wait" "--timeout" "0")
-            (is (= [] (listed))))
-          (testing "a wait whose session is gone ends at once, its record with it"
-            (let [r (am {:who "ghost" :env (assoc env "CLAUDE_PID" "4000000")} "wait" "--timeout" "60")]
-              (is (= 3 (:exit r))))
-            (is (nil? (record "ghost"))))
-          (finally ((:close sess)) (fs/delete-tree sock-dir)))))))
-
 (deftest on-call-in-status-and-delivery-notes
   (with-store
     (with-dir [d]
       (let [me (.pid (java.lang.ProcessHandle/current))
-            serve! (fn [pid repos]
+            serve! (fn [pid agents]
                      (fs/create-dirs (serve-file ""))
                      (spit (str (serve-file "pid")) (str pid "\n"))
-                     (spit (str (serve-file "state.edn")) (pr-str {:pid pid :heartbeat (core/now-utc) :interval 5 :repos repos})))
+                     (spit (str (serve-file "state.edn")) (pr-str {:pid pid :heartbeat (core/now-utc) :interval 5 :agents agents})))
             note #(str/trim (err {:who "website"} "@infra" %))]
         (out {} "oncall" "add" "infra" d)
-        (testing "serve alive, infra on call, nobody on duty: a tab is on its way"
+        (testing "serve alive, infra on call, nobody on duty: serve hands it to a session"
           (serve! me {})
-          (is (= "→ infra: on call; a listener tab opens for it shortly" (note "Rotate it")))
+          (is (= "→ infra: on call; agent-mail serve hands it to a Claude Code session shortly (the one that wrote in the thread for infra, or a new one); nothing more to do"
+                 (note "Rotate it")))
           (let [st (status-json {})]
             (is (= ["on-call"] (map :listener (:threads st))))
             (is (= [] (:undelivered st)) "not undelivered")
             (is (= [{:repo "infra" :dir d :state "on-call" :pane nil :text "on call"}] (:oncall st)))
             (is (= {:alive true :pid me} (:serve st))))
-          (is (str/includes? (out {} "status") "\non call: infra\n")))
+          (is (str/includes? (out {} "status") "\non call: infra\n"))
+          (is (str/blank? (out {:who "infra"} "hook")) "a new session hears nothing of the threads serve delivers"))
         (testing "backing off: undelivered again, and the note says why"
-          (serve! me {"infra" {:failures 1 :until (+ (System/currentTimeMillis) 600000) :reason "no session came on duty"}})
-          (is (re-matches #"→ infra: nobody on duty; on call, backing off until \d\d:\d\d: no session came on duty; it will see this at its next session start"
+          (serve! me {"infra" {:failures 1 :until (+ (System/currentTimeMillis) 600000) :reason "`claude --bg` failed (exit 1): Workspace not trusted."}})
+          (is (re-matches #"→ infra: nobody on duty; on call, backing off until \d\d:\d\d: `claude --bg` failed \(exit 1\): Workspace not trusted\.; it will see this at its next session start"
                           (note "Still there?")))
           (let [st (status-json {})]
             (is (= ["none" "none"] (map :listener (:threads st))))
-            (is (= 2 (count (:undelivered st))))))
-        (testing "serve not running: no tab will open, and the note says so"
+            (is (= 2 (count (:undelivered st)))))
+          (is (str/starts-with? (out {:who "infra"} "hook") "agent-mail: 2 threads waiting on infra") "nor while backing off"))
+        (testing "serve not running: nothing is delivered, and the note says so"
           (serve! 4000000 {})
           (is (= "→ infra: nobody on duty; on call, but `agent-mail serve` isn't running; it will see this at its next session start"
                  (note "Anyone?")))
           (is (every? #(= "none" (:listener %)) (:threads (status-json {}))))
-          (is (str/includes? (out {} "status") "on call: infra (serve isn't running)")))
+          (is (str/includes? (out {} "status") "on call: infra (serve isn't running)"))
+          (is (str/starts-with? (out {:who "infra"} "hook") "agent-mail: 3 threads waiting on infra")))
         (testing "on duty beats on call"
           (serve! me {})
           (spit (str (fs/path *store* "duty" "infra__s1.edn"))

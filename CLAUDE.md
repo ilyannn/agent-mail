@@ -42,8 +42,10 @@ tool, sent by mail from other repos, are this repo's to answer.
 - **Never touch the real store** (`~/.local/share/agent-mail`) in tests or
   experiments. Use a temporary `AGENT_MAIL_DIR`. Tests also clear the
   `CLAUDE_*` and `WEZTERM_*` variables they inherit and point
-  `AGENT_MAIL_WEZTERM` and `CLAUDE_CONFIG_DIR` at fakes, so a test run inside
-  Claude Code or WezTerm can't post into a real session or open a real tab.
+  `AGENT_MAIL_WEZTERM`, `AGENT_MAIL_CLAUDE` and `CLAUDE_CONFIG_DIR` at fakes,
+  so a test run inside Claude Code or WezTerm can't post into a real session,
+  start or stop a real one, or retitle a real tab. Never run the real
+  `claude` from a test.
 - **Mac app testing:** use a scratch store, and don't send mail from the
   installed app.
 - **Keep docs in step.** A change agents rely on (a command, a flag, an output
