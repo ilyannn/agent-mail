@@ -107,6 +107,14 @@ Every few seconds serve looks at the open threads waiting on an on-call repo:
   are idle, hold no open thread and their prompt cache has expired, an hour or
   five minutes after their last reply. The conversation is kept for a later
   message. Serve never stops sessions you started.
+- **Waiting on you.** Nobody sits at a background session, so a permission
+  prompt would hold one, and its thread, unseen. When one of serve's
+  background sessions has waited on you for 2 minutes, serve sends a
+  notification saying which session and thread, what it waits for (e.g.
+  `approve Read: /etc/hosts`) and `claude attach <id>` to open it, once a
+  wait. `agent-mail who` and `oncall` show it until it goes on, and
+  `status --json` gives the thread's session `waiting-since`, `waiting-for`
+  and `needs`.
 
 `claude agents` lists the sessions and `claude attach <id>` opens one;
 `agent-mail who` lists those serve handed threads to. A new interactive session

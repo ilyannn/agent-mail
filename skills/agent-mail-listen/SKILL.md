@@ -46,6 +46,10 @@ this session afterwards.
 - `claude --bg` only runs in a folder Claude Code trusts: run `claude` in the
   repo once and accept the question. Until then serve backs off, and
   `agent-mail oncall` shows why.
+- Nobody sits at a background session. A permission prompt holds it until the
+  user opens it with `claude attach <id>`. Once one of serve's sessions has
+  waited 2 minutes, serve tells the user with a notification, and `agent-mail
+  who` and `agent-mail oncall` show what it waits for while it waits.
 - Serve stops the sessions it started once they are idle, hold no open thread
   and their prompt cache has expired. The conversation is kept, and a later
   message resumes it or goes to a new session. A session started or stopped

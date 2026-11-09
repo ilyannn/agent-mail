@@ -612,19 +612,38 @@
   [d]
   (try (str (fs/real-path d)) (catch Exception _ (str d))))
 
+(defn job-needs
+  "What background job `job-id` waits on the user for, as its state file
+   (<config>/jobs/<id>/state.json) says, e.g. \"approve Read: /etc/hosts\";
+   nil when it says nothing; never throws."
+  [job-id]
+  (try
+    (when (and (string? job-id) (re-matches #"[0-9A-Za-z-]+" job-id))
+      (let [f (fs/path (claude-config) "jobs" job-id "state.json")
+            needs (when (fs/regular-file? f) (get (json/parse-string (slurp (str f))) "needs"))]
+        (when (and (string? needs) (not (str/blank? needs))) needs)))
+    (catch Exception _ nil)))
+
 (defn live-sessions
   "The sessions of `items` whose process runs, each with what Claude Code's
    registry adds: its inbox (:socket), and its status with statusUpdatedAt,
-   which tell \"shell\" and \"waiting\" apart and since when."
+   which tell \"shell\" and \"waiting\" apart and since when. A waiting one
+   also has what it waits on (:waiting-for, e.g. \"permission prompt\") and,
+   for a background job, what it needs (:needs, see job-needs)."
   [items]
   (vec (for [s items
              :let [pid (:pid s)]
              :when (and (number? pid) (pid-alive? (long pid)))
-             :let [e (registry-entry pid)]]
-         (cond-> (update s :cwd #(some-> % real-dir))
-           e (assoc :socket (get e "messagingSocketPath")
-                    :status (or (get e "status") (:status s))
-                    :status-updated-at (get e "statusUpdatedAt"))))))
+             :let [e (registry-entry pid)
+                   s (cond-> (update s :cwd #(some-> % real-dir))
+                       e (assoc :socket (get e "messagingSocketPath")
+                                :status (or (get e "status") (:status s))
+                                :status-updated-at (get e "statusUpdatedAt")))]]
+         (if (= "waiting" (:status s))
+           (let [needs (job-needs (get e "jobId"))]
+             (cond-> (assoc s :waiting-for (or (get e "waitingFor") (:waiting-for s)))
+               needs (assoc :needs needs)))
+           (dissoc s :waiting-for)))))
 
 (defn transcript-file
   "Session `sid`'s transcript, <config>/projects/*/<sid>.jsonl; nil when
@@ -662,25 +681,34 @@
 
 (def launcher (str (fs/path repo-dir "bin" "agent-mail")))
 
-(defn notify-user!
-  "macOS notification for mail to the user. With terminal-notifier installed and
-   allowed, a click opens the thread for reading and replying; a plain osascript
-   banner is the fallback. Returns :clickable, :banner or nil."
-  [from id subject]
+(defn notify!
+  "A macOS notification. With terminal-notifier installed and allowed, one
+   per `group` (a newer one replaces it) and a click runs `execute` when
+   given; a plain osascript banner is the fallback. Returns :clickable,
+   :banner-not-allowed, :banner or nil (AGENT_MAIL_NO_NOTIFY, or neither
+   tool)."
+  [{:keys [title subtitle message group execute]}]
   (when-not (System/getenv "AGENT_MAIL_NO_NOTIFY")
-    (let [title (str "agent-mail: from " from)
-          tn (when (fs/which "terminal-notifier")
-               (p/shell {:continue true :out :string :err :string}
-                        "terminal-notifier" "-title" title "-subtitle" id "-message" subject
-                        "-group" (str "agent-mail/" id) "-execute" (str launcher " open " id)))]
+    (let [tn (when (fs/which "terminal-notifier")
+               (apply p/shell {:continue true :out :string :err :string}
+                      "terminal-notifier" "-title" title "-subtitle" subtitle "-message" message "-group" group
+                      (when execute ["-execute" execute])))]
       (cond
         (and tn (zero? (:exit tn))) :clickable
         (fs/which "osascript")
         (let [q #(str "\"" (str/replace (str/replace % "\\" "\\\\") "\"" "\\\"") "\"")]
           (p/shell {:continue true :out :string :err :string}
                    "osascript" "-e"
-                   (str "display notification " (q subject) " with title " (q title) " subtitle " (q id)))
+                   (str "display notification " (q message) " with title " (q title) " subtitle " (q subtitle)))
           (if tn :banner-not-allowed :banner))))))
+
+(defn notify-user!
+  "macOS notification for mail to the user. With terminal-notifier installed and
+   allowed, a click opens the thread for reading and replying; a plain osascript
+   banner is the fallback. Returns :clickable, :banner or nil (see notify!)."
+  [from id subject]
+  (notify! {:title (str "agent-mail: from " from) :subtitle id :message subject
+            :group (str "agent-mail/" id) :execute (str launcher " open " id)}))
 
 (defn oncall-note
   "The delivery note for `to`, which nobody is on duty for, when it is on
@@ -1214,6 +1242,14 @@
               (log! (str "#" (get-in memory [:threads t :number]) ": " (named (get-in memory [:sessions (core/short-id sid) :name]) sid)
                          " stayed idle " (quot core/post-check-ms 1000) "s after the post (held for the user to approve?); another session takes the thread"))
               (remember action))
+      :needs-input (let [[_ {:keys [id name number since waiting-for needs] :as info}] args
+                         told (notify! {:title (str "agent-mail: " (or name id) " needs you")
+                                        :subtitle (str "#" number ", waiting since " (core/clock since))
+                                        :message (str (or needs waiting-for "input") ". Open it with: claude attach " id)
+                                        :group (str "agent-mail/needs/" id)})]
+                     (log! (str (core/needs-input-note info)
+                                (if told " Told the user with a notification." " No notification sent; `agent-mail who` shows it.")))
+                     (remember action))
       :pass (let [[_ {:keys [agent number]}] args]
               (log! (str "#" number " closed with news for " agent ": no session of its runs to post it into;"
                          " `agent-mail list` shows it there"))
@@ -1365,7 +1401,8 @@
                                               on stderr that serve delivers there. --session
                                               NAME is needed only outside Claude Code
   agent-mail who [--json]                     who is on duty, the repos on call, and the
-                                              sessions serve handed threads to
+                                              sessions serve handed threads to (one waiting
+                                              on you says what for and `claude attach ID`)
   agent-mail who --here                       the other Claude Code sessions working in this
                                               folder, by the names SendMessage takes
   agent-mail oncall [--json]                  repos on call: serve hands each of their threads
@@ -1392,10 +1429,13 @@
                                               only into a running holder, and says it is
                                               closed. Sessions it started are
                                               stopped once idle, holding no open thread, with
-                                              their cache expired. `claude agents` lists them,
-                                              `claude attach ID` opens one. One serve at a
-                                              time; --standby (launchd's) waits for a running
-                                              one to end
+                                              their cache expired. A background session of its
+                                              that waits on you (a permission prompt) for 2 min
+                                              is reported once: a notification, serve's log,
+                                              and `who`/`oncall` while it waits. `claude agents`
+                                              lists them, `claude attach ID` opens one. One serve
+                                              at a time; --standby (launchd's) waits for a
+                                              running one to end
   agent-mail status [--json]                  everything at once, for UIs
   agent-mail hook                             SessionStart hook output
   agent-mail whoami                           who the caller is

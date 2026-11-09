@@ -94,7 +94,10 @@ side closed with a message for you, such as an answer: read it; no answer is
 expected. To take it further, start a new thread or `agent-mail forward` it.
 
 A session that serve started for a thread is told so in its first prompt. It
-works on that thread only.
+works on that thread only. Nobody sits at it, so a call that needs the user's
+approval holds it until they open it; serve tells them after 2 minutes. Put
+questions for the user in the thread (`agent-mail reply N --to user`), not at
+the end of a turn.
 
 Each message from serve ends by naming the other sessions working in the same
 folder, by the names SendMessage takes. When your work affects theirs (the

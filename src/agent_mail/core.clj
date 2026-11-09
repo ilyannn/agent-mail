@@ -344,7 +344,9 @@
 ;;                   :check {:session :file :at :status-updated-at}}}
 ;;    :sessions {short-id {:session-id :agent :thread :number :name :kind
 ;;                         :ours (serve started it) :state :status :since
-;;                         :started-at}}
+;;                         :started-at
+;;                         :waiting-since :waiting-for :needs :alerted
+;;                         (while it waits on the user, see needs-input-ms)}}
 ;;    :agents   {agent {:failures :until :reason}}}
 ;; :state is "starting" (started or resumed, not listed by `claude agents`
 ;; yet), "live", "stopped" or "gone" (not even `claude agents --all` lists
@@ -368,6 +370,13 @@
    approve in a session that bypasses permission prompts, and the session
    stays idle with an unchanged statusUpdatedAt."
   30000)
+
+(def needs-input-ms
+  "How long a background session in serve's memory has to wait on the user
+   (registry status \"waiting\": a permission prompt or another dialog)
+   before serve tells the user, once per wait. Nobody watches a background
+   session, so it would otherwise hold its thread unseen."
+  120000)
 
 (def starts-per-round
   "How many sessions serve starts in one round at most, for the lowest
@@ -431,8 +440,10 @@
 (defn agents-items
   "The sessions in `claude agents --json`, parsed with keyword keys: an
    array, or an object holding one. Each as {:id :session-id :pid :cwd :name
-   :kind :status :run-state}, :id being the short id and :run-state the
-   list's own `state` (done, stopped, …)."
+   :kind :status :run-state :waiting-for}, :id being the short id,
+   :run-state the list's own `state` (done, stopped, blocked, …) and
+   :waiting-for what a \"waiting\" session waits on (\"permission prompt\",
+   \"dialog open\", …)."
   [parsed]
   (let [xs (cond (sequential? parsed) parsed
                  (map? parsed) (or (some #(when (sequential? %) %) ((juxt :agents :sessions :items) parsed))
@@ -442,7 +453,7 @@
                :let [sid (:sessionId x) id (short-id (or sid (:id x)))]
                :when id]
            {:id id :session-id sid :pid (:pid x) :cwd (:cwd x) :name (:name x) :kind (:kind x)
-            :status (:status x) :run-state (:state x)}))))
+            :status (:status x) :run-state (:state x) :waiting-for (:waitingFor x)}))))
 
 (defn backgrounded-id
   "The short id in what `claude --bg` prints, `backgrounded · 52f6bcf5 ·
@@ -490,15 +501,36 @@
           :else (or run-state "running"))
     state))
 
+(defn needs-you
+  "What a session in serve's memory that waits on the user (it has
+   :waiting-since) waits for and how to open it, e.g. needs you since 02:41
+   (approve Read: /etc/hosts; `claude attach 166f77e1`). nil otherwise."
+  [s]
+  (when-let [since (:waiting-since s)]
+    (str "needs you since " (clock since) " ("
+         (or (some #(when-not (str/blank? %) %) [(:needs s) (:waiting-for s)]) "input")
+         "; `claude attach " (:id s) "`)")))
+
+(defn needs-input-note
+  "What serve tells the user of a session waiting on them, from a
+   [:needs-input S info] action's info: thread, session, since when, what
+   for, and how to open it."
+  [{:keys [id name number since waiting-for needs]}]
+  (str "#" number " " (pr-str (or name id)) " (" id ") has waited on you since " (clock since) ": "
+       (or (some #(when-not (str/blank? %) %) [needs waiting-for]) "input")
+       ". Open it with `claude attach " id "`."))
+
 (defn session-phrase
   "A session as serve names it to others: \"name\" (kind, activity), with
    the thread for a session serve started for one, e.g. \"📫 infra #70\"
-   (background, busy, thread #70). The name is `claude agents`' name field,
+   (background, busy, thread #70), then, for one of serve's waiting on the
+   user, what it needs (needs-you). The name is `claude agents`' name field,
    the one SendMessage reaches the session by; the short id without one."
   [s]
   (str "\"" (if (str/blank? (:name s)) (:id s) (:name s)) "\" ("
        (str/join ", " (remove nil? [(:kind s) (activity s) (when (and (:ours s) (:number s)) (str "thread #" (:number s)))]))
-       ")"))
+       ")"
+       (when-let [n (needs-you s)] (str " " n))))
 
 (def coordinate-sentence
   "What the also-line asks of a session when others work in its folder:
@@ -637,10 +669,29 @@
      :known todo}))
 
 (defn- observed
-  "What serve keeps of a running session's entry, nils left out."
+  "What serve keeps of a running session's entry, nils left out: what it
+   waits on only while it waits (status \"waiting\")."
   [e]
-  (into {} (remove (comp nil? val)) {:state "live" :status (:status e) :kind (:kind e) :name (:name e)
-                                     :session-id (:session-id e)}))
+  (let [waiting? (= "waiting" (:status e))]
+    (into {} (remove (comp nil? val)) {:state "live" :status (:status e) :kind (:kind e) :name (:name e)
+                                       :session-id (:session-id e)
+                                       :waiting-for (when waiting? (:waiting-for e))
+                                       :needs (when waiting? (:needs e))})))
+
+(defn- needs-input
+  "[:needs-input S info] when session `s` of serve's memory (short id `k`),
+   running as `e`, has waited on the user since serve first saw it wait
+   (:waiting-since, which remember keeps for background sessions only), for
+   `needs-input-ms` at least, and the user has not been told of this wait
+   yet."
+  [k s e now]
+  (when (and (background? s) (= "waiting" (:status e)) (= "waiting" (:status s))
+             (:waiting-since s) (not (:alerted s))
+             (>= (- now (:waiting-since s)) needs-input-ms))
+    [:needs-input k (into {} (remove (comp nil? val))
+                          {:id (:id e) :name (or (:name e) (:name s)) :agent (:agent s) :thread (:thread s)
+                           :number (:number s) :since (:waiting-since s)
+                           :waiting-for (or (:waiting-for e) (:waiting-for s)) :needs (or (:needs e) (:needs s))})]))
 
 (defn- route
   "The delivery of thread `th`'s newest message: into its holder, by
@@ -717,6 +768,10 @@
                             holding no open thread and its cache expired
                             (the registry's statusUpdatedAt + 1 h without a
                             transcript)
+   [:needs-input S info]    tell the user: background session S has waited
+                            on them (a permission prompt) `needs-input-ms`
+                            (see needs-input); serve's own are looked at
+                            every round, others when a round lists anyway
    Sessions serve did not start are never stopped."
   [{:keys [now oncall threads memory live known expiry agents-error grace-ms check-ms max-starts seen] :as in}]
   (let [grace-ms (or grace-ms start-grace-ms)
@@ -790,12 +845,15 @@
                       :let [until (or (expiry (or (:session-id e) (:session-id s)))
                                       (some-> (:status-updated-at e) (+ default-ttl-ms)))]
                       :when (and until (<= until now))]
-                  [:stop k {:id (:id e) :name (or (:name e) (:name s)) :agent (:agent s) :expired until}]))]
-    (vec (concat forget observe drops checks deliveries stops))))
+                  [:stop k {:id (:id e) :name (or (:name e) (:name s)) :agent (:agent s) :expired until}]))
+        alerts (when live
+                 (keep (fn [[k s]] (when-let [e (find-session live k)] (needs-input k s e now))) sessions))]
+    (vec (concat forget observe drops checks deliveries stops alerts))))
 
 (defn remember
   "serve's memory after `action` at `now`: one of serve-actions' bookkeeping
-   actions ([:pass T info] included), or what carrying out a delivery or a
+   actions ([:pass T info] and [:needs-input S info], once the user is told,
+   included), or what carrying out a delivery or a
    stop gave: [:posted T S
    info], [:post-failed T S] (S counts as deaf for T), [:resumed T S info],
    [:started A T short-id session-id info] (session-id nil until `claude
@@ -814,10 +872,18 @@
       :reset (update memory :agents dissoc (first args))
       :back-off (let [[a until reason] args]
                   (update-in memory [:agents a] #(assoc % :until until :reason reason :failures (inc (or (:failures %) 0)))))
-      :observe (let [[k changes] args]
+      :observe (let [[k changes] args
+                     ;; only a background session: nobody may be at it, and
+                     ;; `claude attach` opens it
+                     waiting? #(and (background? %) (= "live" (:state %)) (= "waiting" (:status %)))]
                  (known-session memory k
-                                (fn [s] (cond-> (merge s changes)
-                                          (and (:state changes) (not= (:state changes) (:state s))) (assoc :since now)))))
+                                (fn [s] (let [s' (cond-> (merge s changes)
+                                                   (and (:state changes) (not= (:state changes) (:state s))) (assoc :since now))]
+                                          (cond (not (waiting? s')) (dissoc s' :waiting-since :waiting-for :needs :alerted)
+                                                (waiting? s) (cond-> s' (not (:waiting-for changes)) (dissoc :waiting-for)
+                                                                     (not (:needs changes)) (dissoc :needs))
+                                                :else (assoc s' :waiting-since now))))))
+      :needs-input (known-session memory (first args) assoc :alerted now)
       :lost (let [[k t] args]
               (-> memory (known-session k assoc :state "gone" :since now)
                   (known-thread t dissoc :delivered :check)))
@@ -853,11 +919,17 @@
 (defn thread-session
   "The session holding thread `id` as serve last saw it, for status:
    {:id :name :kind :state}, :id being the short id `claude attach` takes;
-   nil when serve has delivered nothing of it."
+   while it waits on the user also :waiting-since (a UTC stamp),
+   :waiting-for and :needs (see needs-input-ms). nil when serve has
+   delivered nothing of it."
   [memory id]
   (when-let [k (get-in memory [:threads id :holder])]
     (when-let [s (get-in memory [:sessions k])]
-      (into {} (remove (comp nil? val)) {:id k :name (:name s) :kind (:kind s) :state (:state s)}))))
+      (into {} (remove (comp nil? val))
+            {:id k :name (:name s) :kind (:kind s) :state (:state s)
+             :waiting-since (some-> (:waiting-since s) java.time.Instant/ofEpochMilli fmt-utc)
+             :waiting-for (when (:waiting-since s) (:waiting-for s))
+             :needs (when (:waiting-since s) (:needs s))}))))
 
 (defn serve-sessions
   "The sessions in serve's memory, each with its short id as :id, by agent

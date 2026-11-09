@@ -470,6 +470,27 @@
             "a post into it is being checked")
         (is (= [stop] (stops {:threads [(th "t9" 9 [(msg 0 "web" "infra") (msg 1 "infra" "user")])] :memory m :live [idle]}))
             "its thread waits on the user, not on it")))
+    (testing "a background session waiting on the user for 2 min: the user is told, once a wait"
+      (let [since (- now 120000)
+            waiting (live-s "bbbb2222" :status "waiting" :waiting-for "permission prompt" :needs "approve Read: /etc/hosts")
+            m (mem :sessions {"bbbb2222" (ours :status "waiting" :waiting-for "permission prompt" :waiting-since since)}
+                   :threads {"t1" {:agent "infra" :number 1 :delivered "000.md" :holder "bbbb2222"}})
+            alerts #(only [:needs-input] (acts (merge {:memory m :live [waiting]} %)))]
+        (is (= [[:needs-input "bbbb2222" {:id "bbbb2222" :name "s-bbbb2222" :agent "infra" :thread "t1" :number 1 :since since
+                                          :waiting-for "permission prompt" :needs "approve Read: /etc/hosts"}]]
+               (alerts {})))
+        (is (= [] (alerts {:memory (assoc-in m [:sessions "bbbb2222" :waiting-since] (inc since))})) "not 2 min yet")
+        (is (= [] (alerts {:memory (assoc-in m [:sessions "bbbb2222" :alerted] now)})) "told already")
+        (is (= [] (alerts {:live [(assoc waiting :status "busy")]})) "it went on")
+        (is (= [] (alerts {:memory (update-in m [:sessions "bbbb2222"] dissoc :waiting-since :status)}))
+            "seen waiting for the first time: the 2 min start now")
+        (is (= [:needs-input] (kinds (alerts {:memory (assoc-in m [:sessions "bbbb2222" :ours] false)})))
+            "a background session serve posted into, too")
+        (is (= [] (alerts {:memory (update-in m [:sessions "bbbb2222"] assoc :ours false :kind "interactive")
+                           :live [(assoc waiting :kind "interactive")]}))
+            "an interactive one has someone at its terminal")
+        (is (= [] (only [:stop] (acts {:threads [] :memory m :live [waiting]}))) "never stopped while it waits")
+        (is (= {:live true :known false} (core/serve-wants (merge base {:threads [] :memory m}))) "watched every round")))
     (testing "at most 3 starts a round, lowest thread numbers first; posts and resumes are not capped"
       (let [news (for [n [5 2 4 1 3]] (th (str "n" n) n [(msg 0 "web" "infra")]))
             all (acts {:threads (cons talk news) :live [(live-s "aaaa1111")]})]
@@ -566,7 +587,25 @@
           (is (= {} (:threads (r m [:forget "t1"]))))
           (is (= {} (:sessions (r m [:drop "bbbb2222"]))))
           (is (= {} (:threads (r (mem) [:lost "bbbb2222" "t1"]))) "bookkeeping never brings a forgotten thread back"))
-        (is (= (mem) (r (mem) [:start "infra" "t1" "text" {}])) "a start ends as :started or :back-off")))
+        (is (= (mem) (r (mem) [:start "infra" "t1" "text" {}])) "a start ends as :started or :back-off")
+        (let [m (mem :sessions {"k" {:kind "background" :state "live" :status "busy" :since 1}})
+              w (r m [:observe "k" {:state "live" :status "waiting" :waiting-for "permission prompt" :needs "approve X"}])
+              at (fn [m' changes] (get-in (r m' [:observe "k" changes]) [:sessions "k"]))]
+          (is (= {:kind "background" :state "live" :status "waiting" :since 1 :waiting-for "permission prompt" :needs "approve X"
+                  :waiting-since now}
+                 (get-in w [:sessions "k"]))
+              "it began waiting on the user: since now")
+          (is (= {:kind "background" :state "live" :status "waiting" :since 1 :waiting-for "dialog open" :waiting-since 7}
+                 (at (assoc-in w [:sessions "k" :waiting-since] 7) {:state "live" :status "waiting" :waiting-for "dialog open"}))
+              "still waiting: since it began, with what it waits on now")
+          (is (= {:kind "background" :state "live" :status "busy" :since 1}
+                 (at (assoc-in w [:sessions "k" :alerted] now) {:state "live" :status "busy"}))
+              "it went on: a later wait is told again")
+          (is (= {:kind "background" :state "stopped" :status "waiting" :since now} (at w {:state "stopped"})) "it ended")
+          (is (= {:kind "interactive" :state "live" :status "waiting" :since 1}
+                 (at (assoc-in m [:sessions "k" :kind] "interactive") {:state "live" :status "waiting" :waiting-for "permission prompt"}))
+              "an interactive session has someone at it, and `claude attach` does not open it")
+          (is (= now (get-in (r w [:needs-input "k" {}]) [:sessions "k" :alerted])) "the user was told"))))
     (testing "serve-memory: an older serve's state (its tabs under :repos) is nothing remembered"
       (is (= {:threads {} :sessions {} :agents {}} (core/serve-memory {:pid 1 :repos {"infra" {:pane 42}}})))
       (is (= {:threads {} :sessions {} :agents {}} (core/serve-memory {:threads [1] :sessions "x"}))))
@@ -591,7 +630,26 @@
         (is (empty? (core/oncall-view {:now now :oncall {} :memory m :duty []})) "registered agents only")
         (is (= {:id "deadbeef" :name "📫 infra #1" :kind "background" :state "live"} (core/thread-session m "t1")))
         (is (nil? (core/thread-session m "t2")))
-        (is (= "#1 → deadbeef \"📫 infra #1\" (background, busy)" (core/session-line (last (core/serve-sessions m)))))))))
+        (is (= "#1 → deadbeef \"📫 infra #1\" (background, busy)" (core/session-line (last (core/serve-sessions m)))))
+        (let [since (- now 180000)
+              note (str "needs you since " (core/clock since) " (approve Read: /etc/hosts; `claude attach deadbeef`)")
+              w (update-in m [:sessions "deadbeef"] assoc :status "waiting" :waiting-since since
+                           :waiting-for "permission prompt" :needs "approve Read: /etc/hosts")]
+          (is (= (str "#1 → deadbeef \"📫 infra #1\" (background, waiting) " note) (core/session-line (last (core/serve-sessions w))))
+              "who: a session waiting on the user says what for and how to open it")
+          (is (str/ends-with? (:text (v w)) (str "\"📫 infra #1\" (background, waiting, thread #1) " note)) "oncall too")
+          (is (str/ends-with? (core/session-phrase {:id "deadbeef" :waiting-since since :waiting-for "dialog open"})
+                              "(dialog open; `claude attach deadbeef`)")
+              "what it waits on when its job says nothing")
+          (is (= {:id "deadbeef" :name "📫 infra #1" :kind "background" :state "live" :waiting-since (core/fmt-utc (java.time.Instant/ofEpochMilli since))
+                  :waiting-for "permission prompt" :needs "approve Read: /etc/hosts"}
+                 (core/thread-session w "t1"))
+              "status --json: since when and what for")
+          (is (= (str "#1 \"📫 infra #1\" (deadbeef) has waited on you since " (core/clock since)
+                      ": approve Read: /etc/hosts. Open it with `claude attach deadbeef`.")
+                 (core/needs-input-note {:id "deadbeef" :name "📫 infra #1" :number 1 :since since
+                                         :waiting-for "permission prompt" :needs "approve Read: /etc/hosts"}))
+              "what serve's log and the user are told"))))))
 
 (deftest serve-texts
   (let [t1 (th "t1" 1 [(msg 0 "web" "infra")])
@@ -661,8 +719,13 @@
              (core/claude-failure "`claude --bg`" {:exit 1 :out "Starting background service…\nWorkspace not trusted. Run `claude` in /x once…\n" :err ""})))
       (is (= "`claude stop` failed (exit 2)" (core/claude-failure "`claude stop`" {:exit 2 :out "" :err " \n"})))
       (let [item {:id "52f6bcf5" :sessionId "52f6bcf5-aaaa" :pid 9 :cwd "/x" :name "n" :kind "background" :status "idle" :state "done"}
-            want [{:id "52f6bcf5" :session-id "52f6bcf5-aaaa" :pid 9 :cwd "/x" :name "n" :kind "background" :status "idle" :run-state "done"}]]
+            want [{:id "52f6bcf5" :session-id "52f6bcf5-aaaa" :pid 9 :cwd "/x" :name "n" :kind "background" :status "idle" :run-state "done"
+                   :waiting-for nil}]]
         (is (= want (core/agents-items [item])))
+        (is (= ["waiting" "blocked" "permission prompt"]
+               ((juxt :status :run-state :waiting-for)
+                (first (core/agents-items [(assoc item :status "waiting" :state "blocked" :waitingFor "permission prompt")]))))
+            "a session stalled on a permission prompt, as Claude Code 2.1.319 lists it")
         (is (= want (core/agents-items {:agents [item]})) "an object holding the list")
         (is (= "52f6bcf5" (:id (first (core/agents-items [(dissoc item :id)])))) "the short id from the sessionId")
         (is (= [] (core/agents-items "nonsense")))))))
@@ -1612,6 +1675,35 @@
                      (out {:dir infra :env (assoc env "CLAUDE_CODE_SESSION_ID" full)} "who" "--here")))
               (is (str/starts-with? (err {:dir infra} "who" "--here") "agent-mail: `claude agents` failed (exit 127): Cannot run program")
                   "no claude: says why"))
+            (testing "the session waits on a permission prompt: after 2 min the user is told, once, and who shows it"
+              (let [busy {:pid me :sessionId full :messagingSocketPath (:path sess) :status "busy" :statusUpdatedAt 1 :kind "bg" :jobId "deadbeef"}
+                    job (fs/path cfg "jobs" "deadbeef" "state.json")
+                    told #(str/includes? % "has waited on you")]
+                (fs/create-dirs (fs/parent job))
+                (spit (str job) (json/generate-string {:state "working" :tempo "blocked" :needs "approve Read: /etc/hosts"}))
+                (registry! cfg me (assoc busy :status "waiting" :waitingFor "permission prompt"))
+                (json! "agents.json" [(assoc entry :status "waiting" :state "blocked" :waitingFor "permission prompt") peer])
+                (is (not (told (:err (serve)))) "not 2 min yet")
+                (let [s (get-in (memory) [:sessions "deadbeef"])]
+                  (is (= ["waiting" "permission prompt" "approve Read: /etc/hosts"] ((juxt :status :waiting-for :needs) s)))
+                  (is (number? (:waiting-since s))))
+                (let [since (- (System/currentTimeMillis) (* 3 minute))]
+                  (spit (str (serve-file "state.edn")) (pr-str (assoc-in (serve-state) [:sessions "deadbeef" :waiting-since] since)))
+                  (let [r (serve)]
+                    (is (str/includes? (:err r) (str "#1 \"📫 infra #1\" (deadbeef) has waited on you since " (core/clock since)
+                                                     ": approve Read: /etc/hosts. Open it with `claude attach deadbeef`.")))
+                    (is (str/includes? (:err r) "No notification sent; `agent-mail who` shows it.") "notifications are off in tests"))
+                  (is (number? (get-in (memory) [:sessions "deadbeef" :alerted])))
+                  (is (not (told (:err (serve)))) "told once")
+                  (is (re-find #"(?m)^infra\s+\(serve\)\s+#1 → deadbeef \"📫 infra #1\" \(background, waiting\) needs you since \d\d:\d\d \(approve Read: /etc/hosts; `claude attach deadbeef`\)$"
+                               (out {:env env} "who")))
+                  (is (= ["approve Read: /etc/hosts" "permission prompt"]
+                         ((juxt :needs :waiting-for) (:session (first (filter #(= id (:id %)) (:threads (status-json {:env env})))))))))
+                (registry! cfg me busy)
+                (json! "agents.json" [entry peer])
+                (serve)
+                (is (= ["busy" nil nil] ((juxt :status :waiting-since :alerted) (get-in (memory) [:sessions "deadbeef"])))
+                    "it went on: nothing waits")))
             (testing "a thread answered and closed in one go is posted into the session that asked, once"
               (let [q (out as-session "@website" "Which port?")]
                 (out {:who "website"} "reply" q "8443.")
