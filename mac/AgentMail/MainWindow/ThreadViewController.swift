@@ -1,8 +1,10 @@
 // The thread view: the whole thread rendered as one HTML document in a
 // WKWebView (content JavaScript off, strict CSP, attachments served by a
 // scheme handler, every click decided by LinkPolicy), the first message new
-// to me (else the newest) scrolled into view, and below it a pane that writes
-// in one of three modes:
+// to me (else the newest) scrolled into view. Its header names the session
+// serve handed the thread to, replaced in place when only that changes, and
+// says so when it waits on the user, with `claude attach ID` to copy. Below
+// it a pane that writes in one of three modes:
 // Reply, to whoever wrote last that isn't me (or the sender of the card
 // whose Reply was clicked); Forward, which hands an open thread on to anyone
 // else (`reply --to X`, To an editable combo box, Esc goes back to Reply);
@@ -78,6 +80,10 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
     /// Thread id and fingerprint of what the web view shows: a thread, or
     /// (fingerprint "preview|…") the messages a forward draft carries.
     private var rendered: (id: String, fingerprint: String)?
+    /// The session line the shown thread's page has, or will have once it
+    /// has loaded: a new one replaces it in place, so a session going idle
+    /// or stopping doesn't reload the page and lose the reader's place.
+    private var renderedSessionLine: String?
     /// Messages that were unread when first shown, by thread: they stay
     /// unfolded when the thread is rendered again this session.
     private var expandedFiles: [String: Set<String>] = [:]
@@ -389,6 +395,8 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
         if let detail {
             if rendered?.id != detail.id || rendered?.fingerprint != renderKey(detail) {
                 render(detail)
+            } else {
+                updateSessionLine()
             }
         } else if rendered?.id != id {
             rendered = nil
@@ -630,6 +638,8 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
         return [
             "thread.placeholder: \(placeholder.isHidden ? "hidden" : placeholder.stringValue)",
             "thread.rendered: \(rendered.map { "\($0.id) \($0.fingerprint)" } ?? "-")",
+            "thread.session: " + (rendered.flatMap { store.index.thread($0.id)?.session?.headerText(formatDate: formatSince) }
+                ?? "-"),
             "thread.mode: \(paneMode.rawValue) \(to)",
             "thread.draftHeader: \(header)",
             "thread.status: \(statusLabel.stringValue)",
@@ -712,13 +722,42 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
         let files = store.filesDirectory(detail.id)
         schemeHandler.thread = (detail.id, files)
         let (source, forwards) = related(detail)
+        let line = sessionLine(for: detail.id)
         let html = ThreadDocument.html(thread: detail, me: me, css: css + Self.systemColorsCSS(), unread: unread,
-                                       expanded: expanded, forwardedFrom: source, forwards: forwards,
+                                       expanded: expanded, forwardedFrom: source, forwards: forwards, sessionLine: line,
                                        readAttachment: { Self.readText(named: $0, in: files) }) { [dateStyle] in
             $0.formatted(dateStyle)
         }
         rendered = (detail.id, renderKey(detail))
+        renderedSessionLine = line
         webView.loadHTMLString(html, baseURL: nil)
+    }
+
+    /// The header's line about thread `id`'s session, as the latest status
+    /// has it: since when it waits on the user is a time today, else a date.
+    private func sessionLine(for id: String) -> String {
+        ThreadDocument.sessionLine(store.index.thread(id)?.session, thread: id, formatDate: formatSince)
+    }
+
+    private func formatSince(_ date: Date) -> String {
+        Calendar.current.isDateInToday(date) ? date.formatted(date: .omitted, time: .shortened) : date.formatted(dateStyle)
+    }
+
+    /// Puts the latest session line into the shown thread's page, without
+    /// reloading it; once it has loaded (didFinish catches up).
+    private func updateSessionLine() {
+        guard let rendered, !rendered.fingerprint.hasPrefix("preview|"), !webView.isLoading else { return }
+        let line = sessionLine(for: rendered.id)
+        guard line != renderedSessionLine,
+              let data = try? JSONSerialization.data(withJSONObject: [line]),
+              let quoted = String(data: data, encoding: .utf8) else { return }
+        renderedSessionLine = line
+        // App-injected script; runs even with content JavaScript disabled.
+        let js = "(function(){var e = document.getElementById('session'); if (!e) return false;"
+            + " e.outerHTML = \(quoted)[0]; return true;})()"
+        webView.evaluateJavaScript(js) { result, error in
+            Timing.note("session line replaced: \(error.map { $0.localizedDescription } ?? String(describing: result))")
+        }
     }
 
     /// The messages a forward draft carries, read-only below its header.
@@ -761,6 +800,8 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         // A forward's preview stays at its top.
         guard let rendered, !rendered.fingerprint.hasPrefix("preview|") else { return }
+        // The session may have changed while the page loaded.
+        updateSessionLine()
         // App-injected script; runs even with content JavaScript disabled.
         // The first unread message, else the newest; the top when that is the
         // first message, so the subject shows.
@@ -796,12 +837,22 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
             self.webView.refuseFocusBriefly()
             if let id = rendered?.id { forward(threadID: id, message: file) }
         case let .openThread(id): if !store.reveal(threadID: id) { NSSound.beep() }
+        case let .copyAttachCommand(session): copyAttachCommand(session)
         case .ignore: break
         }
         return .cancel
     }
 
     // MARK: Opening files
+
+    /// The header's session link: `claude attach <id>` on the pasteboard,
+    /// said in the pane's status line.
+    private func copyAttachCommand(_ session: String) {
+        let command = ThreadSession(id: session).attachCommand
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(command, forType: .string)
+        statusLabel.stringValue = "Copied “\(command)”: paste it in a terminal to open the session"
+    }
 
     private func openAttachment(_ name: String, reveal: Bool) {
         guard let id = rendered?.id, let file = AttachmentScheme.file(named: name, in: store.filesDirectory(id)),

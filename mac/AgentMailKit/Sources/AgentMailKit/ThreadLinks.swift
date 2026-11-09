@@ -2,8 +2,9 @@
 // view gets no file access to the store: attachments are linked and
 // embedded as `agent-mail-file:///<thread>/<name>`, which the app serves
 // (images only) from that thread's files/ directory and nothing else, and
-// the buttons (Open, Reply, Forward, Show in Finder) and links to related
-// threads are `agent-mail-action:///<verb>/<thread>[/<item>]` links, never
+// the buttons (Open, Reply, Forward, Show in Finder), links to related
+// threads and the session's attach command are
+// `agent-mail-action:///<verb>/<thread>[/<item>]` links, never
 // loaded, that the navigation delegate turns into app commands. Everything
 // else a click can reach is classified here: http(s) and mailto go to the
 // system, the rest is ignored.
@@ -99,6 +100,8 @@ public enum ThreadLink: Equatable, Sendable {
     case forward(message: String?)
     /// Show another thread by id: a forward's source, or a forward of this one.
     case openThread(String)
+    /// Copy `claude attach <id>` for the thread's session, by its short id.
+    case copyAttachCommand(String)
     /// Anything else is cancelled.
     case ignore
 }
@@ -110,6 +113,9 @@ public enum LinkPolicy {
         case open, reply, reveal, forward
         /// `show/<thread>/<other thread>`: go to the other thread.
         case show
+        /// `attach/<thread>/<session id>`: copy the command that opens the
+        /// thread's session.
+        case attach
     }
 
     /// `agent-mail-action:///<verb>/<thread>[/<item>]`.
@@ -162,6 +168,7 @@ public enum LinkPolicy {
         case let (.reply, item): return .reply(toMessage: item)
         case let (.forward, item): return .forward(message: item)
         case let (.show, item?) where item != thread: return .openThread(item)
+        case let (.attach, item?): return .copyAttachCommand(item)
         default: return .ignore
         }
     }

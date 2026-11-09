@@ -278,6 +278,38 @@ import Testing
         #expect(unknown.contains(">gone</a>"))
     }
 
+    @Test func theHeaderNamesTheThreadsSession() throws {
+        let st = try AgentMailJSON.decodeStatus(Fixture.data("status-directory"))
+        let rotate = try #require(st.threads.first { $0.number == 1 })
+        let th = ThreadDetail(id: rotate.id, number: 1, subject: rotate.subject, owner: "infra", msgs: [
+            Message(file: "a.md", from: "user", to: "infra", date: nil, body: "The key expires on Friday."),
+        ])
+        let line = ThreadDocument.sessionLine(rotate.session, thread: th.id) { _ in "23:39" }
+        let live = ThreadDocument.html(thread: th, me: "user", css: "", sessionLine: line) { _ in "" }
+        #expect(live.contains("<p class=\"session\" id=\"session\" title=\"background session 1a2b3c4d\"><span>Session "
+            + "<a class=\"session-name\" href=\"agent-mail-action:///attach/2026-11-09-rotate-the-staging-key/1a2b3c4d\" "
+            + "title=\"Copy “claude attach 1a2b3c4d”, which opens the session in a terminal\">📫 infra #1</a> · live"
+            + "</span></p>\n</header>"))
+        #expect(rotate.session?.headerText { _ in "23:39" } == "Session 📫 infra #1 · live")
+
+        let deploy = try #require(st.threads.first { $0.number == 2 })
+        let waiting = ThreadDocument.sessionLine(deploy.session, thread: deploy.id) { _ in "23:39" }
+        #expect(waiting == "<p class=\"session waiting\" id=\"session\" title=\"background session 5e6f7a8b\"><span>Session "
+            + "<strong>📫 website #2</strong> has waited on you since 23:39: approve Bash: npm run deploy</span> "
+            + "<span>Open it with <a class=\"attach\" href=\"agent-mail-action:///attach/2026-11-09-deploy-the-new-site/5e6f7a8b\" "
+            + "title=\"Copy “claude attach 5e6f7a8b”, which opens the session in a terminal\">"
+            + "<code>claude attach 5e6f7a8b</code></a></span></p>")
+        #expect(deploy.session?.headerText { _ in "23:39" }
+            == "Session 📫 website #2 has waited on you since 23:39: approve Bash: npm run deploy · open it with claude attach 5e6f7a8b")
+
+        // No session: nothing shows, but the element is there to fill in later.
+        let none = ThreadDocument.html(thread: th, me: "user", css: "") { _ in "" }
+        #expect(none.contains("<p class=\"session\" id=\"session\" hidden></p>"))
+        let odd = ThreadDocument.sessionLine(ThreadSession(id: "a/b", name: "<x>"), thread: "t") { _ in "" }
+        #expect(odd == "<p class=\"session\" id=\"session\" title=\"session a/b\"><span>Session &lt;x&gt;</span></p>",
+                "escaped, and no link for an id that can't be one")
+    }
+
     @Test func forwardPreviewIsCardsWithoutButtons() throws {
         let th = ThreadDetail(id: "t", number: 3, subject: "S", status: "done", msgs: [
             Message(file: "1.md", from: "infra", to: "user", date: nil, body: FoldingTests.paragraphs),
@@ -434,6 +466,9 @@ import Testing
         #expect(c("agent-mail-action:///show/t1/t1") == .ignore, "not the thread on screen")
         #expect(c("agent-mail-action:///show/t1/..") == .ignore)
         #expect(c("agent-mail-action:///show/t2/t3") == .ignore, "only from the thread on screen")
+        #expect(c("agent-mail-action:///attach/t1/5e6f7a8b") == .copyAttachCommand("5e6f7a8b"))
+        #expect(c("agent-mail-action:///attach/t1") == .ignore, "attach needs a session")
+        #expect(c("agent-mail-action:///attach/t2/5e6f7a8b") == .ignore)
         #expect(c("agent-mail-action:///open/t1") == .ignore)
         #expect(c("agent-mail-action:///delete/t1/m.md") == .ignore)
         #expect(c("agent-mail-action:///open/t2/m.md") == .ignore)

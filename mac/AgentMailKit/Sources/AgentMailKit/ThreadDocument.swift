@@ -1,7 +1,8 @@
 // A whole thread as one HTML document for the web view: a strict CSP (no
 // scripts, no network; images only from the attachment scheme), the app's
 // stylesheet inlined, a header (subject, state, Reply and Forward, links to
-// the thread it forwards and the forwards of it), and every message as a
+// the thread it forwards and the forwards of it, the session serve handed it
+// to), and every message as a
 // card with its header (from → to, date, Open, Reply and Forward buttons),
 // its body, and its attachments (links, image thumbnails, Markdown files
 // rendered in a collapsible section). Long read messages start folded with
@@ -28,9 +29,12 @@ public enum ThreadDocument {
     ///   - forwardedFrom: the thread this one forwards, linked from the header
     ///     (a bare id when the index doesn't know it).
     ///   - forwards: the threads that forward this one, linked from the header.
+    ///   - sessionLine: the line about the session serve handed the thread
+    ///     to (sessionLine(_:thread:formatDate:)); nil: an empty one.
     ///   - formatDate: local time for a message date.
     public static func html(thread: ThreadDetail, me: String, css: String, unread: Set<String> = [],
                             expanded: Set<String> = [], forwardedFrom: ThreadSummary? = nil, forwards: [ThreadSummary] = [],
+                            sessionLine: String? = nil,
                             readAttachment: (String) -> String? = { _ in nil },
                             formatDate: (Date) -> String) -> String {
         let e = MarkdownHTML.escape
@@ -52,7 +56,9 @@ public enum ThreadDocument {
             <header class="thread">
             <h1>\(e(thread.subject))</h1>
             <p class="meta"><span>\(meta.map(e).joined(separator: " · "))</span>\(buttons)</p>
-            \(related(thread: thread.id, forwardedFrom: forwardedFrom, forwards: forwards))</header>
+            \(related(thread: thread.id, forwardedFrom: forwardedFrom, forwards: forwards))\
+            \(sessionLine ?? Self.sessionLine(nil, thread: thread.id, formatDate: formatDate))
+            </header>
 
             """
         for (i, m) in thread.msgs.enumerated() {
@@ -100,6 +106,32 @@ public enum ThreadDocument {
         }
         guard !parts.isEmpty else { return "" }
         return "<p class=\"related\">" + parts.map { "<span>\($0)</span>" }.joined() + "</p>\n"
+    }
+
+    /// The header's line about the session serve handed the thread to,
+    /// always the element `#session` so the view can replace it in place
+    /// when only the session changed (hidden when there is none): "Session
+    /// 📫 infra #12 · live", the name copying `claude attach ID` when
+    /// clicked; or, while it waits on the user, what for and since when,
+    /// with the command to open it shown and copyable.
+    public static func sessionLine(_ session: ThreadSession?, thread: String, formatDate: (Date) -> String) -> String {
+        guard let s = session else { return "<p class=\"session\" id=\"session\" hidden></p>" }
+        let e = MarkdownHTML.escape
+        let copy = LinkPolicy.actionURL(.attach, thread: thread, item: s.id)?.absoluteString
+        let copyTip = "Copy “\(s.attachCommand)”, which opens the session in a terminal"
+        func link(_ inner: String, class name: String) -> String {
+            guard let copy else { return inner }
+            return "<a class=\"\(name)\" href=\"\(e(copy))\" title=\"\(e(copyTip))\">\(inner)</a>"
+        }
+        let what = [s.kind, "session", s.id].compactMap { $0 }.joined(separator: " ")
+        if let since = s.waitingSince {
+            return "<p class=\"session waiting\" id=\"session\" title=\"\(e(what))\"><span>Session <strong>"
+                + e(s.shownName) + "</strong> has waited on you since \(e(formatDate(since))): \(e(s.need))</span> "
+                + "<span>Open it with " + link("<code>\(e(s.attachCommand))</code>", class: "attach") + "</span></p>"
+        }
+        let state = s.state.map { " · \(e($0))" } ?? ""
+        return "<p class=\"session\" id=\"session\" title=\"\(e(what))\"><span>Session "
+            + link(e(s.shownName), class: "session-name") + "\(state)</span></p>"
     }
 
     static func document(title: String, css: String, body: String) -> String {
@@ -238,6 +270,16 @@ public enum MessageFolding {
 
     public static func startsFolded(body: String, isUnread: Bool, isNewest: Bool) -> Bool {
         !isUnread && !isNewest && isLong(body)
+    }
+}
+
+extension ThreadSession {
+    /// What the header's session line says, as plain text.
+    public func headerText(formatDate: (Date) -> String) -> String {
+        if let since = waitingSince {
+            return "Session \(shownName) has waited on you since \(formatDate(since)): \(need) · open it with \(attachCommand)"
+        }
+        return "Session \(shownName)" + (state.map { " · \($0)" } ?? "")
     }
 }
 

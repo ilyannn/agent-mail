@@ -62,6 +62,25 @@ header.thread .related {
   color: var(--muted); font-size: 0.82em; margin: 8px 0 0;
 }
 
+/* The session serve handed the thread to: a quiet line, or a notice while
+   it waits on the user. */
+header.thread .session {
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px;
+  color: var(--muted); font-size: 0.82em; margin: 8px 0 0;
+}
+header.thread .session[hidden] { display: none; }
+header.thread .session a.session-name { color: inherit; font-weight: 600; }
+header.thread .session.waiting {
+  color: var(--text);
+  background: color-mix(in srgb, #ff9f0a 12%, Canvas);
+  border: 1px solid color-mix(in srgb, #ff9f0a 45%, Canvas);
+  border-radius: 8px; padding: 6px 12px;
+}
+header.thread .session.waiting::before { content: "⚠\FE0E"; color: #c77700; margin-right: -6px; }
+header.thread .session a.attach { color: var(--text); }
+header.thread .session a.attach code { background: Canvas; border: 1px solid var(--rule); }
+header.thread .session a.attach:hover code { border-color: var(--rule-strong); }
+
 /* One card per message. */
 article.msg {
   background: var(--card);
