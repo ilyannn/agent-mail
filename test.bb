@@ -937,10 +937,9 @@
     (is (core/same-path? "/x//app" "/x/app"))
     (is (not (core/same-path? "/x/app" "/x/app-old")))
     (is (not (core/same-path? "/x/app" nil)))
-    (is (= ["/x/app/src/lib" "/x/app/src" "/x/app"] (core/folder-chain "/x/app/src/lib" "/x/app")) "inside a repo: up to its root")
-    (is (= ["/x/app/src" "/x/app" "/x" "/"] (core/folder-chain "/x/app/src" nil)) "outside git: up to /")
-    (is (= ["/x/app-old/src" "/x/app-old" "/x" "/"] (core/folder-chain "/x/app-old/src" "/x/app")) "no stop it is not below")
-    (is (= ["/"] (core/folder-chain "/" nil))))
+    (is (= ["/x/app/src" "/x/app" "/x" "/"] (core/folder-chain "/x/app/src")) "up to /, nearest first")
+    (is (= ["/x/app" "/x" "/"] (core/folder-chain "/x//app/")))
+    (is (= ["/"] (core/folder-chain "/"))))
   (testing "a linked worktree's folders count as the main worktree's"
     (is (= "/x/app/src" (core/worktree-path "/x/app/.claude/worktrees/w/src" "/x/app/.claude/worktrees/w" "/x/app")))
     (is (= "/x/app" (core/worktree-path "/x/app-wt" "/x/app-wt" "/x/app")))
@@ -951,12 +950,13 @@
           docs {:name "app-docs" :dir "/x/app/docs" :file-id "1:11" :oncall true}
           old {:name "old" :dir "/x/app-old" :oncall true}
           ids {"/y/moved" "1:10" "/y" "1:2"}
-          find #(core/find-entry [app docs old] (core/folder-chain %1 %2) ids)]
-      (is (= [app "/x/app" :path] (find "/x/app/src" "/x/app")))
-      (is (= [docs "/x/app/docs" :path] (find "/x/app/docs/guide" "/x/app")) "the nearest wins")
-      (is (= [app "/x/app" :path] (find "/x/app/" nil)))
-      (is (nil? (find "/x/app-older" nil)) "never by a prefix of a name")
-      (is (= [app "/y/moved" :moved] (find "/y/moved/src" nil)) "moved: found by its file id")
+          find #(core/find-entry [app docs old] (core/folder-chain %) ids)]
+      (is (= [app "/x/app" :path] (find "/x/app/src")))
+      (is (= [docs "/x/app/docs" :path] (find "/x/app/docs/guide")) "the nearest wins")
+      (is (= [app "/x/app" :path] (find "/x/app/nested-repo/src")) "a repo nested in an agent's folder is that agent")
+      (is (= [app "/x/app" :path] (find "/x/app/")))
+      (is (nil? (find "/x/app-older")) "never by a prefix of a name")
+      (is (= [app "/y/moved" :moved] (find "/y/moved/src")) "moved: found by its file id")
       (is (nil? (core/find-entry [old] ["/y/moved"] ids)) "an entry without a file id is found by its path alone")
       (is (= "on" (:name (first (core/find-entry [{:name "a-off" :dir "/q"} {:name "on" :dir "/q" :oncall true}] ["/q"] {}))))
           "two entries for one folder: the one on call")))
@@ -2316,7 +2316,7 @@
         (testing "segment by segment: tools-old is not tools"
           (is (= ["tools-old" "agent-mail: not in a git repo; acting as \"tools-old\" (AGENT_MAIL_AS=NAME or --as NAME to choose)"]
                  (who tools-old))))
-        (testing "in git: the nearest entry up to the repo's root, a worktree counting as its repo"
+        (testing "in git: the nearest entry from the folder up, a worktree counting as its repo"
           (let [mono (mk "zone" "mono") wt (str (fs/path d "zone" "mono-wt"))]
             (mk "zone" "mono" "pkg" "src")
             (mk "zone" "mono" "other")
@@ -2334,8 +2334,24 @@
             (is (= ["mono" ""] (who wt)))
             (let [repo2 (mk "zone" "repo2")]
               (git-in repo2 "init" "-q")
-              (is (= ["repo2" ""] (who repo2)) "the search stops at the repo's root: zone above it doesn't count"))
-            (is (= ["zone" ""] (who (mk "zone" "plain" "deep"))) "outside git it goes on up")))
+              (is (= ["zone" ""] (who repo2)) "a repo without an entry of its own is the agent whose folder encloses it"))
+            (is (= ["zone" ""] (who (mk "zone" "plain" "deep"))) "outside git too")))
+        (testing "a repo nested in a plain folder's agent, and a worktree of it elsewhere, are that agent"
+          (let [plain (mk "2026-10 iPhone")
+                guide (mk "2026-10 iPhone" "iPhone guide")
+                guide-wt (str (fs/path d "guide-wt"))]
+            (add! plain)
+            (spit (str (fs/path guide "notes.md")) "x")
+            (git-in guide "init" "-q")
+            (git-in guide "add" "-A")
+            (git-in guide "commit" "-q" "-m" "i")
+            (git-in guide "worktree" "add" "-q" guide-wt "-b" "wt")
+            (is (= ["2026-10-iPhone" ""] (who guide)) "not iPhone-guide")
+            (is (= ["2026-10-iPhone" ""] (who guide-wt)))
+            (let [r (am {:dir guide-wt} "@user" "From the guide")]
+              (is (zero? (:exit r)) (:err r))
+              (is (= "2026-10-iPhone" (:from (first (:msgs (thread-json (str/trim (:out r))))))) "so the user's reply reaches it")
+              (is (not (str/includes? (:err r) "added")) "nothing new joins the directory"))))
         (testing "a folder moved: found by its file id, and the directory follows it"
           (fs/move tools moved)
           (let [[nm e] (who (str (fs/path moved "a")))]
@@ -2346,20 +2362,22 @@
           (is (= ["tools" ""] (who moved)) "said once"))
         (testing "a shell that wandered off: the folder its session started in (Claude Code's registry)"
           (let [cfg (mk "cfg") scratch (mk "scratch" "work") pid 4000123
-                env {"CLAUDE_CONFIG_DIR" cfg "CLAUDE_PID" (str pid)}]
+                env {"CLAUDE_CONFIG_DIR" cfg "CLAUDE_PID" (str pid)}
+                solo (mk "solo" "sub")]
+            (git-in solo "init" "-q")
             (registry! cfg pid {:pid pid :cwd moved})
             (is (= ["tools" ""] (who scratch env)))
             (is (= "work" (first (who scratch))) "without a registry: the folder's own name")
-            (registry! cfg pid {:pid pid :cwd (str (fs/path d "zone" "repo2"))})
-            (is (= ["repo2" (str "agent-mail: this folder is in no repo; acting as \"repo2\", after " (real (fs/path d "zone" "repo2"))
-                                 ", where this session started (AGENT_MAIL_AS=NAME or --as NAME to choose)")]
+            (registry! cfg pid {:pid pid :cwd solo})
+            (is (= ["sub" (str "agent-mail: this folder is in no repo; acting as \"sub\", after " (real solo)
+                               ", where this session started (AGENT_MAIL_AS=NAME or --as NAME to choose)")]
                    (who scratch env))
                 "a start folder the directory doesn't have: named after it")
             (testing "and its first mail adds the start folder, not the scratch one"
               (let [r (am {:dir scratch :env env} "@user" "From a scratchpad")]
                 (is (zero? (:exit r)) (:err r))
-                (is (= "repo2" (:from (first (:msgs (thread-json (str/trim (:out r))))))))
-                (is (= [(real (fs/path d "zone" "repo2")) true] ((juxt :dir :oncall) (agent "repo2"))))
+                (is (= "sub" (:from (first (:msgs (thread-json (str/trim (:out r))))))))
+                (is (= [(real solo) true] ((juxt :dir :oncall) (agent "sub"))))
                 (is (nil? (agent "work")))))))
         (testing "a folder the directory doesn't know joins it, on call, with its first mail"
           (let [fresh (mk "fresh")

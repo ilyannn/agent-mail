@@ -271,12 +271,11 @@
 
 (defn folder-chain
   "Absolute folder `start` and each folder above it, nearest first, up to
-   `stop` (included) when `start` is at or below it, else up to `/`."
-  [start stop]
-  (let [segs (path-segments start)
-        stop-segs (when stop (path-segments stop))
-        last-n (if (and stop-segs (below-or-at? segs stop-segs)) (count stop-segs) 0)]
-    (vec (for [n (range (count segs) (dec last-n) -1)]
+   `/`. Inside git too: a repo nested in an agent's folder belongs to that
+   agent unless it has an entry of its own."
+  [start]
+  (let [segs (path-segments start)]
+    (vec (for [n (range (count segs) -1 -1)]
            (str "/" (str/join "/" (take n segs)))))))
 
 (defn worktree-path

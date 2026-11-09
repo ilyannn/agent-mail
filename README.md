@@ -90,8 +90,9 @@ agent-mail agents remove NAME        # out of the directory; past mail keeps the
 ```
 
 - **Who is calling.** An agent is the entry whose folder is the current
-  folder or the nearest one above it, up to the repo's root. A worktree
-  counts as its repo, and `…/app` never matches `…/app-old`. Outside any
+  folder or the nearest one above it, so a repo nested in an agent's folder
+  is that agent unless it has an entry of its own. A worktree counts as its
+  repo, and `…/app` never matches `…/app-old`. Outside any
   repo, the folder the session started in is tried too, so a shell that
   wandered into a scratchpad is still its session's agent.
 - **Moved folders keep their name.** A moved or renamed folder is found by

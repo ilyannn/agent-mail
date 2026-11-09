@@ -587,21 +587,21 @@
       {:name (core/address-from-dir (fs/file-name cwd)) :dir cwd :plain true})))
 
 (defn folder-place
-  "Where folder `dir` stands for the directory: {:folder :stop :git :main}.
+  "Where folder `dir` stands for the directory: {:folder :git :main}.
    :folder is its real path, moved from a linked worktree to the same place
-   in the main worktree; the search for its agent stops at :stop, the main
-   worktree's root inside git, else at `/` (nil)."
+   in the main worktree; :main is that main worktree's root inside git."
   [dir]
   (let [d (real-dir (fs/absolutize dir))]
     (if-let [{:keys [top main]} (git-roots d)]
-      {:folder (core/worktree-path d top main) :stop main :git true :main main}
-      {:folder d :stop nil :git false})))
+      {:folder (core/worktree-path d top main) :git true :main main}
+      {:folder d :git false})))
 
 (defn find-agent
-  "[entry folder how] for place `pl` (folder-place) among `entries`, see
-   core/find-entry; nil when none matches."
+  "[entry folder how] for place `pl` (folder-place) among `entries`: the
+   nearest of its folder and those above it up to `/` (see
+   core/find-entry); nil when none matches."
   [entries pl]
-  (core/find-entry entries (core/folder-chain (:folder pl) (:stop pl)) file-id))
+  (core/find-entry entries (core/folder-chain (:folder pl)) file-id))
 
 (defn session-start-folder
   "The folder the Claude Code session running this command started in: its
@@ -637,13 +637,15 @@
 
 (defn identify
   "The agent of folder `dir` (an agent's shell runs there): {:name :how
-   :folder}. The directory decides (find-agent): :how :directory, the entry
-   kept current (keep-current!, not when `pure`). With no entry, outside
-   git, the folder the session started in is tried the same way: a shell
-   that wandered into a scratchpad is still its session's agent. Otherwise
-   :how :derived, the name derived from the folder as before the directory
-   (the repo's name, else the folder's own), with :folder what auto-add!
-   adds, and a note on stderr outside git unless `quiet`."
+   :folder}. The directory decides (find-agent): the nearest entry from the
+   folder up, so a repo nested in an agent's folder is that agent unless it
+   has an entry of its own; :how :directory, the entry kept current
+   (keep-current!, not when `pure`). With no entry, outside git, the folder
+   the session started in is tried the same way: a shell that wandered
+   into a scratchpad is still its session's agent. Otherwise :how
+   :derived, the name derived from the folder as before the directory (the
+   repo's main worktree's name, else the folder's own), with :folder what
+   auto-add! adds, and a note on stderr outside git unless `quiet`."
   [dir {:keys [quiet pure]}]
   (let [entries (vals (directory))
         pl (folder-place dir)
@@ -1394,7 +1396,7 @@
 
 (defn folder-agent
   "The directory entry of the folder the command runs in, or of a folder
-   above it up to its repo's root (see find-agent); nil when none."
+   above it (see find-agent); nil when none."
   []
   (first (find-agent (vals (directory)) (folder-place "."))))
 
@@ -1894,11 +1896,12 @@ Editor for reply: AGENT_MAIL_EDITOR, else $VISUAL, else $EDITOR, else `open -W`
 A notification click runs `agent-mail open ID` (needs terminal-notifier).
 Who am I: in your own shell, `user`. In an agent's shell, the agent whose
 folder in the directory (<store>/agents) is this folder or the nearest above
-it, up to the repo's root; a worktree counts as its repo, a moved folder is
-found by its file id (and the directory follows it), and outside git the
-folder the session started in is tried too. Else the repo's name (main
-worktree), or outside any repo the folder's; that folder joins the
-directory, on call, with its first mail. --as NAME or AGENT_MAIL_AS
+it, so a repo nested in an agent's folder is that agent unless it has an
+entry of its own; a worktree counts as its repo, a moved folder is found by
+its file id (and the directory follows it), and outside git the folder the
+session started in is tried too. Else the repo's name (main worktree), or
+outside any repo the folder's; that folder joins the directory, on call,
+with its first mail. --as NAME or AGENT_MAIL_AS
 overrides. Mail goes only to `user` and to names in the directory.
 Bodies are Markdown; attachments are
 copied into the thread and `read` prints their absolute paths. --date backfills

@@ -13,9 +13,10 @@ the closest names.
 
 Identity follows the shell. In an agent's shell (Claude Code sets
 `CLAUDE_CODE_CHILD_SESSION` in the commands it runs) the caller is the agent
-whose folder is the current folder or the nearest one above it, up to the
-repo's root; a worktree counts as its repo. Outside any repo, the folder the
-session started in is tried too. A folder the directory doesn't have yet acts
+whose folder is the current folder or the nearest one above it, so a repo
+nested in an agent's folder is that agent unless it has an entry of its own;
+a worktree counts as its repo. Outside any repo, the folder the session
+started in is tried too. A folder the directory doesn't have yet acts
 as its repo's name (or the folder's own, with a note on stderr), and is added,
 on call, with its first mail. In the user's own shell the caller is always
 `user`. `AGENT_MAIL_AS=NAME` or `--as NAME` override everything (other agents
