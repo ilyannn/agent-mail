@@ -343,8 +343,9 @@
         (is (= [now "user" duty] [(:now st) (:me st) (:duty st)]))
         (is (= [[] {:alive false :pid nil} []] [(:oncall st) (:serve st) (:agents st)])
             "nothing on call, no serve, no directory: as from a caller that predates them")
-        (is (= [{:name "infra"}] (:agents (core/status {:now now :me "user" :threads [] :seen {} :duty [] :agents [{:name "infra"}]})))
-            "the directory as given")
+        (is (= [{:name "infra" :sessions []}]
+               (:agents (core/status {:now now :me "user" :threads [] :seen {} :duty [] :agents [{:name "infra"}]})))
+            "the directory as given, with each agent's sessions")
         (is (= ["t1" "t2" "t3"] (map :id (:threads st))) "every thread, closed too, newest-updated first")
         (is (not-any? :msgs (:threads st)) "summaries, no messages")
         (is (= [3 2 0] (map :unread [t1 t2 t3])) "the caller's own count: a bystander on t1 and t2, read up on t3")
@@ -389,8 +390,34 @@
       (let [memory {:threads {"t1" {:holder "deadbeef"}}
                     :sessions {"deadbeef" {:name "📫 b #1" :kind "background" :state "live" :ours true :agent "b"}}}
             st (core/status {:now now :me "x" :seen {} :duty [] :threads [open-th closed-th] :memory memory})]
-        (is (= [{:id "deadbeef" :name "📫 b #1" :kind "background" :state "live"} nil] (map :session (:threads st))))
-        (is (not (contains? (second (:threads st)) :session)) "absent, not null")))))
+        (is (= [{:id "deadbeef" :name "📫 b #1" :kind "background" :state "live" :activity "running"} nil]
+               (map :session (:threads st)))
+            "running: serve has no status for it")
+        (is (not (contains? (second (:threads st)) :session)) "absent, not null")))
+    (testing "status: each agent's running sessions, by the nearest agent folder at or above theirs"
+      (let [entries [{:name "infra" :dir "/x/infra" :oncall true} {:name "web" :dir "/x/web/"}
+                     {:name "web-docs" :dir "/x/web/docs"} {:name "gone"}]
+            s (fn [id cwd & {:as more}] (merge {:id id :cwd cwd :kind "bg" :status "busy"} more))
+            live [(s "aaaa1111" "/x/infra" :name "📫 infra #3")
+                  (s "bbbb2222" "/x/infra/.claude/worktrees/fix" :status "idle" :name "📫 infra #4")
+                  (s "cccc3333" "/x/infra/sub" :kind "interactive" :status "waiting")
+                  (s "dddd4444" "/x/web/docs/guide" :status "shell" :kind "interactive" :name "docs")
+                  (s "eeee5555" "/x/web-old" :name "elsewhere")
+                  (s "ffff6666" "/x" :name "above every folder")
+                  (s "gggg7777" nil :name "no folder")]
+            st (core/status {:now now :me "x" :seen {} :duty [] :threads [] :agents entries :live live})]
+        (is (= {"infra" [{:id "cccc3333" :kind "interactive" :activity "waiting"}
+                         {:id "aaaa1111" :name "📫 infra #3" :kind "background" :activity "busy"}
+                         {:id "bbbb2222" :name "📫 infra #4" :kind "background" :activity "idle"}]
+                "web" []
+                "web-docs" [{:id "dddd4444" :name "docs" :kind "interactive" :activity "idle"}]
+                "gone" []}
+               (into {} (map (juxt :name :sessions)) (:agents st)))
+            (str "a worktree below the folder counts; the nearest folder wins; /x/web-old is not /x/web;"
+                 " shell (a background task) is idle; by name, unnamed first"))
+        (is (= [] (:sessions (first (:agents (core/status {:now now :me "x" :seen {} :duty [] :threads []
+                                                           :agents entries})))))
+            "nothing running: an empty list, not null")))))
 
 ;; ================================================================ unit: serve
 
@@ -719,7 +746,7 @@
         (is (= ["on-duty" "on duty (session hand-1)" ["hand-1"]]
                ((juxt :state :text :sessions) (v (mem) :duty [{:repo "infra" :session "hand-1" :on-duty true}]))))
         (is (empty? (core/oncall-view {:now now :oncall {} :memory m :duty []})) "registered agents only")
-        (is (= {:id "deadbeef" :name "📫 infra #1" :kind "background" :state "live"} (core/thread-session m "t1")))
+        (is (= {:id "deadbeef" :name "📫 infra #1" :kind "background" :state "live" :activity "busy"} (core/thread-session m "t1")))
         (is (nil? (core/thread-session m "t2")))
         (is (= "#1 → deadbeef \"📫 infra #1\" (background, busy)" (core/session-line (last (core/serve-sessions m)))))
         (let [since (- now 180000)
@@ -732,7 +759,7 @@
           (is (str/ends-with? (core/session-phrase {:id "deadbeef" :waiting-since since :waiting-for "dialog open"})
                               "(dialog open; `claude attach deadbeef`)")
               "what it waits on when its job says nothing")
-          (is (= {:id "deadbeef" :name "📫 infra #1" :kind "background" :state "live" :waiting-since (core/fmt-utc (java.time.Instant/ofEpochMilli since))
+          (is (= {:id "deadbeef" :name "📫 infra #1" :kind "background" :state "live" :activity "waiting" :waiting-since (core/fmt-utc (java.time.Instant/ofEpochMilli since))
                   :waiting-for "permission prompt" :needs "approve Read: /etc/hosts"}
                  (core/thread-session w "t1"))
               "status --json: since when and what for")
@@ -2161,7 +2188,7 @@
           th (into {} (map (juxt :id identity)) (:threads st))]
       (testing "one object: the time, the caller, every thread, the duty records, the undelivered ids, on call, serve and the agents"
         (is (= #{:schema :now :me :threads :duty :undelivered :oncall :serve :agents :postmaster} (set (keys st))))
-        (is (every? #(= #{:name :dir :oncall :kind :summary :borrowed :trusted :dir-exists} (set (keys %))) (:agents st)))
+        (is (every? #(= #{:name :dir :oncall :kind :summary :borrowed :trusted :dir-exists :sessions} (set (keys %))) (:agents st)))
         (is (= "user" (:me st)))
         (is (re-matches #"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z" (:now st))))
       (testing "every thread, closed ones too, newest-updated first"
@@ -2331,7 +2358,7 @@
                      (update-vals (:sessions (memory)) #(dissoc % :since :started-at))))
               (is (= {:agent "infra" :number 1 :holder "deadbeef"} (dissoc (get-in (memory) [:threads id]) :delivered)))
               (is (= "on call; serve's sessions: \"📫 infra #1\" (background, starting, thread #1)" (oncall-text)))
-              (is (= {:id "deadbeef" :name "📫 infra #1" :kind "background" :state "starting"}
+              (is (= {:id "deadbeef" :name "📫 infra #1" :kind "background" :state "starting" :activity "starting"}
                      (:session (first (:threads (status-json {:env env})))))))
             (testing "not started twice while it comes up"
               (clear!)
@@ -2507,6 +2534,36 @@
               (is (= "on-duty" (:listener (first (:threads (status-json {:env env}))))))))
           (is (str/blank? (store-git "status" "--porcelain")) "serve's files stay out of the store's history")
           (finally ((:close sess)) (fs/delete-tree sock-dir) (p/destroy other)))))))
+(deftest status-lists-agents-sessions
+  (with-store
+    (let [me (.pid (java.lang.ProcessHandle/current))
+          folder #(str (fs/real-path (fs/path (fs/parent *store*) "folders" %)))
+          registry (fs/path (fs/parent *store*) "no-claude-config" "sessions")
+          entry! (fn [file m] (spit (str (fs/path registry file)) (json/generate-string m)))
+          sessions #(into {} (map (juxt :name :sessions)) (:agents (status-json {:env user-shell})))]
+      (testing "no registry: every agent has an empty list"
+        (is (every? #{[]} (vals (sessions)))))
+      (testing "the running sessions in Claude Code's registry, under the agent whose folder holds them"
+        (fs/create-dirs registry)
+        (fs/create-dirs (fs/path (folder "infra") ".claude" "worktrees" "fix"))
+        (entry! (str me ".json") {:pid me :sessionId "aaaa1111-full" :cwd (folder "infra") :kind "bg"
+                                  :name "📫 infra #3" :status "busy"})
+        (entry! "second.json" {:pid me :sessionId "bbbb2222-full" :kind "interactive" :status "waiting"
+                               :cwd (str (fs/path (folder "infra") ".claude" "worktrees" "fix"))})
+        (entry! "docs.json" {:pid me :sessionId "cccc3333-full" :cwd (folder "docs") :kind "interactive"
+                             :name "docs" :status "idle"})
+        (entry! "999999.json" {:pid 999999 :sessionId "dddd4444-full" :cwd (folder "website") :kind "bg" :status "busy"})
+        (spit (str (fs/path registry "broken.json")) "{not json")
+        (spit (str (fs/path registry (str me ".abc.key"))) "x")
+        (let [ss (sessions)]
+          (is (= [{:id "aaaa1111" :name "📫 infra #3" :kind "background" :activity "busy"}
+                  {:id "bbbb2222" :kind "interactive" :activity "waiting"}]
+                 (sort-by :id (get ss "infra")))
+              "a worktree below the folder counts")
+          (is (= [{:id "cccc3333" :name "docs" :kind "interactive" :activity "idle"}] (get ss "docs")))
+          (is (= [] (get ss "website")) "a process that has ended doesn't count")
+          (is (= [] (get ss "billing")))))
+      (is (str/blank? (store-git "status" "--porcelain")) "a pure read"))))
 (deftest serve-runs-once-at-a-time
   (with-store
     (let [me (.pid (java.lang.ProcessHandle/current))
@@ -3143,7 +3200,9 @@
                  (dissoc (agent "infra") :file-id :added)))
           (is (re-matches #"\d+:\d+" (:file-id (agent "infra"))))
           (is (= ["The documentation site. Ask it for pages." "README.md" false] ((juxt :summary :borrowed :trusted) (agent "site"))))
-          (is (= (map #(dissoc % :description :file-id :added) (listed)) (:agents (status-json {:env (merge env user-shell)})))))
+          (is (= (map #(-> % (dissoc :description :file-id :added) (assoc :sessions [])) (listed))
+                 (:agents (status-json {:env (merge env user-shell)})))
+              "with each agent's sessions too"))
         (testing "describe: an agent describes itself, found by its folder"
           (let [r (am {:dir infra :env env :in "Owns the servers and DNS.\n\nAsk it for keys."} "agents" "describe")]
             (is (zero? (:exit r)) (:err r))

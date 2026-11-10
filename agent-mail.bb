@@ -342,6 +342,24 @@
       (when (map? e) e))
     (catch Exception _ nil)))
 
+(defn registry-sessions
+  "The running sessions in Claude Code's session registry
+   (<config>/sessions/<pid>.json, see claude-config), as core/agents-items
+   gives them, their :cwd real paths: those whose process runs. Read from
+   the files, without running claude, so status can afford it on every
+   call. [] when there is no registry; never throws."
+  []
+  (try
+    (let [d (fs/path (claude-config) "sessions")]
+      (if-not (fs/directory? d)
+        []
+        (->> (fs/glob d "*.json")
+             (keep #(try (json/parse-string (slurp (str %)) true) (catch Exception _ nil)))
+             (filter #(and (map? %) (number? (:pid %)) (pid-alive? (long (:pid %)))))
+             core/agents-items
+             (mapv #(update % :cwd (fn [c] (some-> c real-dir)))))))
+    (catch Exception _ [])))
+
 (defn registry-name
   "The name Claude Code's session registry gives the session with process id
    `pid` (see registry-entry). Unlike a name learned once, it follows
@@ -1442,11 +1460,13 @@
    to it, :unread-to-me), waiting time, listener and the
    session serve delivered each to, the duty records, the open threads nobody
    is listening for, the repos on call and whether serve runs, the agent
-   directory, and the postmaster's open notices (:postmaster, see
-   core/postmaster-view). A pure read: no seen marker moves, nothing is written or
-   committed (not even the thread numbering that list and read catch up on,
-   nor a moved folder in the directory), and Claude Code is not asked:
-   sessions are as serve last saw them."
+   directory with each agent's running sessions and what they are doing
+   (core/agent-sessions), and the postmaster's open notices (:postmaster,
+   see core/postmaster-view). A pure read: no seen marker moves, nothing is
+   written or committed (not even the thread numbering that list and read
+   catch up on, nor a moved folder in the directory), and claude is not
+   run: an agent's sessions come from Claude Code's registry files
+   (registry-sessions), a thread's as serve last saw it."
   [opts]
   (let [me (caller (assoc opts :pure true))
         threads (all-threads)
@@ -1455,7 +1475,7 @@
         st (core/status {:now (core/now-utc) :me me :threads threads
                          :seen (into {} (map (juxt identity seen-map)) readers)
                          :duty duty :oncall (oncall-view duty) :serve (serve-info) :memory (serve-memory)
-                         :agents (agents-view)})]
+                         :agents (agents-view) :live (registry-sessions)})]
     (if (:json opts)
       (println (json/generate-string st {:pretty true}))
       (let [number-of (into {} (map (juxt :id :number)) (:threads st))
@@ -2264,8 +2284,11 @@
   agent-mail status [--json]                  everything at once, for UIs. --json gives each
                                               thread's unread (new to me) and unread-to-me
                                               (those of them addressed to me: what an inbox
-                                              counts), unread-by, flow, waiting-s, listener;
-                                              and postmaster, the open notices
+                                              counts), unread-by, flow, waiting-s, listener,
+                                              session (its activity: busy, idle, waiting);
+                                              each agent's sessions, the running Claude
+                                              Code sessions in its folder with their
+                                              activity; and postmaster, the open notices
   agent-mail hook                             SessionStart hook output
   agent-mail whoami                           who the caller is
 

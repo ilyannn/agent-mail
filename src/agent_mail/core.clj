@@ -576,7 +576,7 @@
 ;; is compatible. UIs refuse a schema they don't know.
 (def status-schema 1)
 
-(declare thread-session postmaster-view)
+(declare thread-session postmaster-view agent-sessions)
 
 (defn status
   "Everything at once, for a UI that must not re-derive anything: every thread
@@ -586,16 +586,17 @@
    a thread that now waits on the caller), unread counts per participant,
    how long it has waited and who will pick it up; the duty records as
    given; and the undelivered thread ids; the on-call repos and whether
-   serve runs; the agent directory; for a thread serve delivered, the
-   session holding it (thread-session); and the postmaster's open notices
-   (postmaster-view).
+   serve runs; the agent directory, each agent with its running sessions
+   and what each is doing (:sessions, see agent-sessions); for a thread
+   serve delivered, the session holding it (thread-session); and the
+   postmaster's open notices (postmaster-view).
    `seen` maps each reader (the caller and every participant) to their seen
    markers; `duty` is the duty records with :on-duty already decided;
    `oncall` is oncall-view's list, `serve` is {:alive :pid}, `memory`
-   serve's and `agents` agent-view's for each agent. A repo counts as on
-   call only while serve is alive and the repo
-   is not backing off."
-  [{:keys [now me threads seen duty oncall serve memory agents]}]
+   serve's, `agents` agent-view's for each agent and `live` the running
+   Claude Code sessions (agent-sessions). A repo counts as on call only
+   while serve is alive and the repo is not backing off."
+  [{:keys [now me threads seen duty oncall serve memory agents live]}]
   (let [on-duty-repos (set (map :repo (filter :on-duty duty)))
         on-call-repos (if (:alive serve) (set (map :repo (remove #(= "backing-off" (:state %)) oncall))) #{})
         ths (->> threads
@@ -612,7 +613,9 @@
                  (sort-by :updated #(compare %2 %1))
                  vec)]
     {:schema status-schema :now now :me me :threads ths :duty (vec duty) :undelivered (undelivered ths)
-     :oncall (vec oncall) :serve (or serve {:alive false :pid nil}) :agents (vec agents)
+     :oncall (vec oncall) :serve (or serve {:alive false :pid nil})
+     :agents (let [by-agent (agent-sessions agents live)]
+               (mapv #(assoc % :sessions (get by-agent (:name %) [])) agents))
      :postmaster (postmaster-view memory (into {} (map (juxt :id identity)) threads))}))
 
 ;; ---------------------------------------------------------------- serve: a session per thread
@@ -1520,18 +1523,40 @@
 
 (defn thread-session
   "The session holding thread `id` as serve last saw it, for status:
-   {:id :name :kind :state}, :id being the short id `claude attach` takes;
-   while it waits on the user also :waiting-since (a UTC stamp),
-   :waiting-for and :needs (see needs-input-ms). nil when serve has
-   delivered nothing of it."
+   {:id :name :kind :state :activity}, :id being the short id `claude
+   attach` takes and :activity what it is doing (see activity: busy, idle
+   or waiting while it runs, else its state); while it waits on the user
+   also :waiting-since (a UTC stamp), :waiting-for and :needs (see
+   needs-input-ms). nil when serve has delivered nothing of it."
   [memory id]
   (when-let [k (get-in memory [:threads id :holder])]
     (when-let [s (get-in memory [:sessions k])]
       (into {} (remove (comp nil? val))
-            {:id k :name (:name s) :kind (:kind s) :state (:state s)
+            {:id k :name (:name s) :kind (:kind s) :state (:state s) :activity (activity s)
              :waiting-since (some-> (:waiting-since s) java.time.Instant/ofEpochMilli fmt-utc)
              :waiting-for (when (:waiting-since s) (:waiting-for s))
              :needs (when (:waiting-since s) (:needs s))}))))
+
+(defn agent-sessions
+  "The running Claude Code sessions of each agent, by name, for status: a
+   session is the agent's whose folder is the nearest at or above its own
+   (find-entry, by path), so one in a worktree below the folder counts,
+   and one outside every agent's folder counts for none. `entries` are
+   agent-view's; `live` the running sessions as agents-items gives them,
+   their :cwd real paths. Each as {:id :name :kind :activity}: :kind
+   background or interactive, :activity busy (in a turn), waiting (on the
+   user, a prompt or a dialog) or idle, as activity says; by name."
+  [entries live]
+  (let [es (filter :dir entries)]
+    (->> live
+         (keep (fn [s]
+                 (when-let [[e] (some-> (:cwd s) folder-chain (as-> chain (find-entry es chain (constantly nil))))]
+                   [(:name e) (into {} (remove (comp nil? val))
+                                    {:id (:id s) :name (:name s)
+                                     :kind (if (background? s) "background" (:kind s))
+                                     :activity (activity (assoc s :state "live"))})])))
+         (group-by first)
+         (into {} (map (fn [[agent xs]] [agent (vec (sort-by (juxt #(str (:name %)) :id) (map second xs)))]))))))
 
 (defn serve-sessions
   "The sessions in serve's memory, each with its short id as :id, by agent
