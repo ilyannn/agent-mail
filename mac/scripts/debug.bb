@@ -16,6 +16,8 @@
 ;;   bb scripts/debug.bb filter sent              (the participant filter)
 ;;   bb scripts/debug.bb compose                  (New Message: the draft)
 ;;   bb scripts/debug.bb forward ID[/FILE]        (Forward; discard drops a draft)
+;;   bb scripts/debug.bb attach "/a.png|/b.txt"   (files for the message being written)
+;;   bb scripts/debug.bb action paste:            (pastes the clipboard: files and images attach)
 ;;   bb scripts/debug.bb sidebarmenu agent:infra  (a sidebar row's context menu)
 ;;   bb scripts/debug.bb sidebarpick "agent:infra|On Call"  (picks one of its items)
 ;;   bb scripts/debug.bb addfolder /path/to/folder (Add Folder… once the panel returns)

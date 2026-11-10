@@ -51,6 +51,40 @@ import Testing
         #expect(f.hasTypedContent)
     }
 
+    @Test func attachmentsAreWorthAskingAboutButNeedABody() {
+        var d = NewThreadDraft(to: "infra")
+        d.attachments = [URL(filePath: "/tmp/shot.png")]
+        #expect(d.hasTypedContent)
+        #expect(!d.canSend(me: "user"), "the CLI refuses a message of attachments alone")
+        d.body = "The screenshot"
+        #expect(d.canSend(me: "user"))
+        var f = NewThreadDraft.forwarding(ForwardSource(threadID: "t"), subject: "Deploy")
+        f.to = "docs"
+        f.attachments = d.attachments
+        #expect(f.canSend(me: "user"), "a forward's note stays optional")
+    }
+
+    @Test func theListKeepsEachFileOnceInOrder() {
+        let a = URL(filePath: "/tmp/a.png"), b = URL(filePath: "/tmp/b.txt")
+        #expect(Attaching.adding([a, b], to: []) == [a, b])
+        #expect(Attaching.adding([URL(filePath: "/tmp/x/../a.png"), b, URL(filePath: "/tmp/c.md")], to: [a, b])
+            == [a, b, URL(filePath: "/tmp/c.md")], "the same file by another path is still the same")
+        #expect(Attaching.adding([URL(string: "https://example.com/a.png")!], to: [a]) == [a], "not a file")
+        #expect(Attaching.count([a]) == "1 attachment")
+        #expect(Attaching.count([a, b]) == "2 attachments")
+    }
+
+    @Test func aPastedImageIsNamedForItsTime() {
+        let date = Date(timeIntervalSince1970: 1_762_800_252)  // 2025-11-10 18:44:12 UTC
+        let utc = TimeZone(identifier: "UTC")!
+        #expect(Attaching.pastedName(at: date, extension: "png", timeZone: utc) == "pasted-2025-11-10-184412.png")
+        #expect(Attaching.pastedName(at: date, extension: "png", taken: ["pasted-2025-11-10-184412.png",
+                                                                        "pasted-2025-11-10-184412-2.png"],
+                                     timeZone: utc) == "pasted-2025-11-10-184412-3.png")
+        #expect(Attaching.pastedName(at: date, extension: "jpg", timeZone: TimeZone(identifier: "Asia/Tokyo")!)
+            == "pasted-2025-11-11-034412.jpg", "local time")
+    }
+
     @Test func newMessageAgainFillsAnEmptyRecipient() {
         var d = NewThreadDraft()
         d.fillRecipient("infra")

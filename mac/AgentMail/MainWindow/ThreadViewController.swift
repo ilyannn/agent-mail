@@ -11,8 +11,12 @@
 // and the new-thread draft, shown as an empty thread: an editable subject
 // heading, "No messages yet" (or, for a forward of a closed thread, the
 // forwarded messages read-only), and the pane with To, Discard and Send.
-// ⌘↩ or ⇧⌘D sends. The text size (View menu, pinch) is a page zoom kept in
-// AppSettings; the reply box, in the message bodies' type, follows it.
+// ⌘↩ or ⇧⌘D sends. Files go along from the paperclip (⇧⌘A), or dropped or
+// pasted into the text (a screenshot on the clipboard too): a strip above
+// the buttons lists them, each thread's and the draft's their own, and Send
+// passes them to the CLI's --attach. The text size (View menu, pinch) is a
+// page zoom kept in AppSettings; the reply box, in the message bodies'
+// type, follows it.
 import AgentMailKit
 import AppKit
 import Observation
@@ -64,8 +68,12 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
     private let closeButton = NSButton(title: "Close Thread", target: nil, action: nil)
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private let statusLabel = NSTextField.label(font: .systemFont(ofSize: NSFont.smallSystemFontSize), color: .secondaryLabelColor)
-    private let sendHint = NSTextField.label("⌘↩ to send", font: .systemFont(ofSize: NSFont.smallSystemFontSize),
+    private let sendHint = NSTextField.label(ThreadViewController.sendHintText,
+                                             font: .systemFont(ofSize: NSFont.smallSystemFontSize),
                                              color: .tertiaryLabelColor)
+    private let attachButton = NSButton(title: "", target: nil, action: nil)
+    private let attachmentStrip = AttachmentStrip()
+    private var stripHeight: NSLayoutConstraint!
     private var replyScroll: NSScrollView!
     private(set) var replyView: NSTextView!
     /// To's list: the directory's agents, each with its summary.
@@ -130,6 +138,7 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
         replyView = text
         replyView.delegate = self
         text.onCommandReturn = { [weak self] in self?.sendReply() }
+        text.onAttach = { [weak self] in self?.attach($0) }
         buildTopPane()
         buildReplyPane()
 
@@ -311,14 +320,26 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
         sendButton.keyEquivalent = ""
         sendButton.imagePosition = .imageLeading
         sendHint.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let bottom = NSStackView(views: [sendHint, NSView(), cancelButton, closeButton, sendButton])
+        attachButton.target = self
+        attachButton.action = #selector(attachClicked(_:))
+        attachButton.bezelStyle = .push
+        attachButton.image = NSImage(systemSymbolName: "paperclip", accessibilityDescription: nil)
+        attachButton.imagePosition = .imageOnly
+        attachButton.toolTip = "Attach files (⇧⌘A). You can also drop files on the text, or paste them or a screenshot."
+        attachButton.setAccessibilityLabel("Attach Files")
+        let bottom = NSStackView(views: [attachButton, sendHint, NSView(), cancelButton, closeButton, sendButton])
         bottom.orientation = .horizontal
         bottom.spacing = 8
-        bottom.edgeInsets = NSEdgeInsets(top: 6, left: 12, bottom: 8, right: 10)
+        bottom.edgeInsets = NSEdgeInsets(top: 6, left: 10, bottom: 8, right: 10)
+
+        attachmentStrip.onOpen = { [weak self] in self?.openPending($0) }
+        attachmentStrip.onRemove = { [weak self] in self?.removeAttachment($0) }
+        attachmentStrip.isHidden = true
+        stripHeight = attachmentStrip.heightAnchor.constraint(equalToConstant: 0)
 
         let separator = NSBox()
         separator.boxType = .separator
-        for v in [top, separator, replyScroll!, bottom] as [NSView] {
+        for v in [top, separator, replyScroll!, attachmentStrip, bottom] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             replyPane.addSubview(v)
         }
@@ -334,7 +355,11 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
             replyScroll.leadingAnchor.constraint(equalTo: replyPane.leadingAnchor),
             replyScroll.trailingAnchor.constraint(equalTo: replyPane.trailingAnchor),
             replyScroll.topAnchor.constraint(equalTo: separator.bottomAnchor),
-            replyScroll.bottomAnchor.constraint(equalTo: bottom.topAnchor),
+            replyScroll.bottomAnchor.constraint(equalTo: attachmentStrip.topAnchor),
+            attachmentStrip.leadingAnchor.constraint(equalTo: replyPane.leadingAnchor),
+            attachmentStrip.trailingAnchor.constraint(equalTo: replyPane.trailingAnchor),
+            attachmentStrip.bottomAnchor.constraint(equalTo: bottom.topAnchor),
+            stripHeight,
             bottom.leadingAnchor.constraint(equalTo: replyPane.leadingAnchor),
             bottom.trailingAnchor.constraint(equalTo: replyPane.trailingAnchor),
             bottom.bottomAnchor.constraint(equalTo: replyPane.bottomAnchor),
@@ -390,6 +415,7 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
             rendered = nil
             sendButton.isEnabled = false
             closeButton.isEnabled = false
+            showAttachments()
             return
         }
 
@@ -429,6 +455,7 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
         replyView.isEditable = !busy
         toField.isEnabled = !busy
         if busy { statusLabel.stringValue = "Sending…" }
+        showAttachments()
     }
 
     /// Forward mode's status line: what handing the thread on does, or what
@@ -493,6 +520,7 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
         replyView.isEditable = !sending
         subjectField.isEditable = !sending
         toField.isEnabled = !sending
+        showAttachments()
     }
 
     /// The draft's header over the web view, or the web view alone.
@@ -658,6 +686,146 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
         saveComposing()
     }
 
+    // MARK: Attachments
+
+    static let sendHintText = "⌘↩ to send"
+
+    /// The files waiting to go with what the editor holds, or with `key`'s.
+    var attachments: [URL] { attachments(of: composing) }
+
+    private func attachments(of key: Composing?) -> [URL] {
+        switch key {
+        case let .thread(id)?: store.replyAttachments[id] ?? []
+        case let .newThread(draftID)?: store.newDraft?.id == draftID ? store.newDraft?.attachments ?? [] : []
+        case nil: []
+        }
+    }
+
+    private func setAttachments(_ files: [URL], of key: Composing?) {
+        switch key {
+        case let .thread(id)?:
+            store.replyAttachments[id] = files.isEmpty ? nil : files
+        case let .newThread(draftID)?:
+            if store.newDraft?.id == draftID { store.editDraft { $0.attachments = files } }
+        case nil:
+            break
+        }
+        showAttachments()
+    }
+
+    /// Files can go along while the editor writes something and can be typed in.
+    var canAttach: Bool { composing != nil && replyView.isEditable }
+
+    /// The strip, the paperclip and the hint as the editor's message stands.
+    private func showAttachments() {
+        let files = attachments
+        attachmentStrip.show(files)
+        attachmentStrip.isHidden = files.isEmpty
+        stripHeight.constant = files.isEmpty ? 0 : AttachmentStrip.height
+        attachButton.isEnabled = canAttach
+        showSendHint()
+    }
+
+    /// "⌘↩ to send", or, with files and no text where text is needed, that
+    /// they go with a message.
+    private func showSendHint() {
+        let needsText = !attachments.isEmpty
+            && replyView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !(paneMode == .newThread && store.newDraft?.forward != nil)
+        let hint = needsText ? "Attachments go with a message: write a line" : Self.sendHintText
+        if sendHint.stringValue != hint { sendHint.stringValue = hint }
+    }
+
+    /// Adds files to the message being written. Folders can't go: the CLI
+    /// copies files.
+    func addAttachments(_ urls: [URL]) { addAttachments(urls, to: composing) }
+
+    /// To `key`'s message, which may no longer be the one on screen: an open
+    /// panel's choice, a promised file, arrive later.
+    private func addAttachments(_ urls: [URL], to key: Composing?) {
+        guard key != nil, replyView.isEditable || key != composing else {
+            NSSound.beep()
+            return
+        }
+        let files = urls.filter { url in
+            var folder: ObjCBool = false
+            return FileManager.default.fileExists(atPath: url.path, isDirectory: &folder) && !folder.boolValue
+        }
+        if files.count < urls.count {
+            NSSound.beep()
+            statusLabel.stringValue = "Only files can be attached, not folders"
+        }
+        setAttachments(Attaching.adding(files, to: attachments(of: key)), of: key)
+    }
+
+    /// Message › Attach Files… and the paperclip: an open panel as a sheet.
+    func chooseAttachments() {
+        update()
+        guard canAttach, let window = view.window else {
+            NSSound.beep()
+            return
+        }
+        let key = composing
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Attach"
+        panel.message = "Choose files to send with your message. They are copied into the thread."
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let self else { return }
+            addAttachments(panel.urls, to: key)
+            if composing == key { view.window?.makeFirstResponder(replyView) }
+        }
+    }
+
+    /// A paste or a drop on the editor that carries files or an image.
+    private func attach(_ found: PastedAttachment) {
+        let key = composing
+        switch found {
+        case let .files(urls):
+            addAttachments(urls)
+        case let .image(data, ext):
+            let name = Attaching.pastedName(at: .now, extension: ext, taken: Set(attachments.map(\.lastPathComponent)))
+            do {
+                addAttachments([try PastedFiles.write(data, name: name)])
+            } catch {
+                showError(error)
+            }
+        case let .promises(receivers):
+            for receiver in receivers {
+                guard let folder = try? PastedFiles.newFolder() else { continue }
+                receiver.receivePromisedFiles(atDestination: folder, options: [:], operationQueue: .main) {
+                    [weak self] url, error in
+                    MainActor.assumeIsolated {
+                        if let error {
+                            self?.statusLabel.stringValue = "Couldn’t attach the file: \(error.localizedDescription)"
+                        } else {
+                            self?.addAttachments([url], to: key)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func removeAttachment(_ file: URL) {
+        setAttachments(attachments.filter { $0 != file }, of: composing)
+        PastedFiles.remove([file])
+    }
+
+    /// A chip's name: the file in its app; scripts and apps are shown, never run.
+    private func openPending(_ file: URL) {
+        guard FileManager.default.fileExists(atPath: file.path) else {
+            NSSound.beep()
+            statusLabel.stringValue = "\(file.lastPathComponent) is no longer there"
+            return
+        }
+        if !LinkPolicy.isSafeToOpen(file) || !openURL(file) { revealFiles([file]) }
+    }
+
+    @objc private func attachClicked(_ sender: Any?) { chooseAttachments() }
+
     #if DEBUG
     func debugState() -> [String] {
         let to = paneMode == .reply ? "to=\(recipientLabel.stringValue)"
@@ -677,6 +845,8 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
             "thread.draftHeader: \(header)",
             "thread.status: \(statusLabel.stringValue)",
             "thread.buttons: send=\(button(sendButton)) close=\(button(closeButton)) cancel=\(button(cancelButton))",
+            "thread.attachments: \(attachmentStrip.isHidden ? "hidden" : "\(attachmentStrip.files.map(\.lastPathComponent))") "
+                + "paperclip=\(attachButton.isEnabled ? "on" : "off") hint=\(sendHint.stringValue.debugDescription)",
             "thread.reply: \(replyView.string.debugDescription) label=\(replyView.accessibilityLabel() ?? "") "
                 + "smartQuotes=\(replyView.isAutomaticQuoteSubstitutionEnabled) "
                 + "spelling=\(replyView.isContinuousSpellCheckingEnabled) undo=\(replyView.allowsUndo)",
@@ -984,6 +1154,7 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
 
     func textDidChange(_ notification: Notification) {
         sendButton.isEnabled = canSendReply
+        showSendHint()
     }
 
     func controlTextDidChange(_ notification: Notification) {
@@ -1205,10 +1376,11 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
             return
         }
         let body = replyView.string
+        let files = attachments
         let handedOn = forwarding
         Task {
             do {
-                try await store.reply(threadID: id, to: to, body: body)
+                try await store.reply(threadID: id, to: to, body: body, attachments: files)
                 if composing == .thread(id) {
                     if replyView.string == body {
                         replyView.string = ""
@@ -1248,29 +1420,31 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
             return
         }
         let note = replyView.string.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !note.isEmpty, let window = view.window else {
+        let files = attachments
+        guard !note.isEmpty || !files.isEmpty, let window = view.window else {
             performClose(id, note: "")
             return
         }
+        let what = files.isEmpty ? "your reply" : note.isEmpty ? "your attachments" : "your reply and its attachments"
         let alert = NSAlert()
-        alert.messageText = "Close the thread with your reply as the closing note?"
-        alert.informativeText = "The text in the reply box is sent with the close. Without it, the thread is closed with “Closed.” and your text stays here."
+        alert.messageText = "Close the thread with \(what) as the closing note?"
+        alert.informativeText = "What’s in the reply box is sent with the close. Without it, the thread is closed with “Closed.” and it stays here."
         alert.addButton(withTitle: "Close with Note")
         alert.addButton(withTitle: "Close Without Note")
         alert.addButton(withTitle: "Cancel")
         alert.beginSheetModal(for: window) { [weak self] response in
             switch response {
-            case .alertFirstButtonReturn: self?.performClose(id, note: note)
+            case .alertFirstButtonReturn: self?.performClose(id, note: note, attachments: files)
             case .alertSecondButtonReturn: self?.performClose(id, note: "")
             default: break
             }
         }
     }
 
-    private func performClose(_ id: String, note: String) {
+    private func performClose(_ id: String, note: String, attachments files: [URL] = []) {
         Task {
             do {
-                try await store.close(threadID: id, note: note)
+                try await store.close(threadID: id, note: note, attachments: files)
                 if !note.isEmpty, composing == .thread(id) { replyView.string = "" }
                 update()
             } catch {

@@ -228,14 +228,18 @@ import Testing
         }
     }
 
-    @Test func messageMenuHasForward() throws {
+    @Test func messageMenuHasForwardAndAttachFiles() throws {
         let menu = MainMenu.messageMenu()
-        #expect(menu.items.map(\.title) == ["Send", "", "Reply", "Forward", "Close Thread", "", "Copy Thread ID",
-                                            "Show in Finder"])
+        #expect(menu.items.map(\.title) == ["Send", "Attach Files…", "", "Reply", "Forward", "Close Thread", "",
+                                            "Copy Thread ID", "Show in Finder"])
         let forward = try #require(menu.items.first { $0.title == "Forward" })
         #expect(forward.keyEquivalent == "f")
         #expect(forward.keyEquivalentModifierMask == [.command, .shift])
         #expect(forward.action == #selector(MailActions.forwardThread(_:)))
+        let attach = try #require(menu.items.first { $0.title == "Attach Files…" })
+        #expect(attach.keyEquivalent == "a")
+        #expect(attach.keyEquivalentModifierMask == [.command, .shift], "Mail's shortcut")
+        #expect(attach.action == #selector(MailActions.attachFiles(_:)))
     }
 
     @Test func scopeBarShowsForParticipantsAndFilters() async {
@@ -507,6 +511,125 @@ import Testing
             thread.makeTextActualSize()
             #expect(thread.replyView.font?.pointSize == 17)
         }
+    }
+
+    /// A folder of scratch files: shot.png, app.log and a subfolder.
+    func scratchFiles() throws -> (dir: URL, shot: URL, log: URL, folder: URL) {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "attach-tests-\(UUID().uuidString)")
+        let folder = dir.appending(path: "folder")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let shot = dir.appending(path: "shot.png"), log = dir.appending(path: "app.log")
+        try Data([0x89, 0x50]).write(to: shot)
+        try Data("log".utf8).write(to: log)
+        return (dir, shot, log, folder)
+    }
+
+    /// A 2×2 PNG.
+    static let png: Data = {
+        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2, bitsPerSample: 8,
+                                   samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+                                   bytesPerRow: 0, bitsPerPixel: 0)!
+        return rep.representation(using: .png, properties: [:])!
+    }()
+
+    @Test func filesWaitWithEachThreadsReplyAndWithTheDraft() async throws {
+        try await withStore { store in
+            let files = try scratchFiles()
+            defer { try? FileManager.default.removeItem(at: files.dir) }
+            let thread = ThreadViewController(store: store)
+            let window = show(thread)
+            defer { window.close() }
+            #expect(state(thread, "attachments") == "hidden paperclip=off hint=\"⌘↩ to send\"", "nothing selected")
+
+            store.select(threadID: "a")
+            await settle { state(thread, "mode") == "reply to=infra" }
+            #expect(state(thread, "attachments") == "hidden paperclip=on hint=\"⌘↩ to send\"")
+            thread.addAttachments([files.shot, files.log, files.shot, files.folder])
+            #expect(state(thread, "attachments")
+                == "[\"shot.png\", \"app.log\"] paperclip=on hint=\"Attachments go with a message: write a line\"")
+            #expect(state(thread, "status") == "Only files can be attached, not folders")
+            #expect(!thread.canSendReply, "files go with a message")
+            thread.replyView.string = "The logs"
+            thread.replyView.didChangeText()
+            #expect(thread.canSendReply)
+            #expect(state(thread, "attachments").hasSuffix("hint=\"⌘↩ to send\""))
+
+            // Each thread has its own.
+            store.select(threadID: "b")
+            await settle { state(thread, "attachments").hasPrefix("hidden") }
+            #expect(thread.attachments.isEmpty)
+            store.select(threadID: "a")
+            await settle { !state(thread, "attachments").hasPrefix("hidden") }
+            #expect(thread.attachments == [files.shot, files.log])
+            #expect(store.replyAttachments["a"] == [files.shot, files.log])
+
+            // The draft's are its own, and make it worth asking about.
+            thread.newMessage(to: "infra")
+            #expect(state(thread, "attachments").hasPrefix("hidden"))
+            thread.addAttachments([files.log])
+            #expect(store.newDraft?.attachments == [files.log])
+            #expect(store.newDraft?.hasTypedContent == true)
+            #expect(state(thread, "attachments").hasPrefix("[\"app.log\"]"))
+            thread.discardDraft()
+            #expect(store.newDraft != nil, "Discard asks first")
+            if let sheet = window.attachedSheet { window.endSheet(sheet) }
+        }
+    }
+
+    @Test func pastingFilesOrABareImageAttachesThemAndTextStaysText() async throws {
+        try await withStore { store in
+            let files = try scratchFiles()
+            defer { try? FileManager.default.removeItem(at: files.dir) }
+            let thread = ThreadViewController(store: store)
+            let window = show(thread)
+            defer { window.close() }
+            store.select(threadID: "a")
+            await settle { state(thread, "mode") == "reply to=infra" }
+            let editor = try #require(thread.replyView as? EditorTextView)
+            let pasteboard = NSPasteboard(name: NSPasteboard.Name("agent-mail-tests-\(UUID().uuidString)"))
+            defer { pasteboard.releaseGlobally() }
+
+            pasteboard.clearContents()
+            pasteboard.setString("just text", forType: .string)
+            #expect(!editor.attach(from: pasteboard), "text pastes as text")
+
+            pasteboard.clearContents()
+            pasteboard.writeObjects([files.log as NSURL])
+            #expect(editor.attach(from: pasteboard), "a file copied in Finder")
+            #expect(thread.attachments == [files.log])
+
+            pasteboard.clearContents()
+            pasteboard.declareTypes([.png, .string], owner: nil)
+            pasteboard.setData(Self.png, forType: .png)
+            pasteboard.setString("a caption", forType: .string)
+            #expect(!editor.attach(from: pasteboard), "an image with text pastes the text")
+
+            pasteboard.clearContents()
+            pasteboard.setData(NSBitmapImageRep(data: Self.png)!.tiffRepresentation!, forType: .tiff)
+            #expect(editor.attach(from: pasteboard), "a screenshot copied to the clipboard")
+            let pasted = try #require(thread.attachments.last)
+            defer { PastedFiles.remove([pasted]) }
+            #expect(thread.attachments.count == 2)
+            #expect(pasted.lastPathComponent.hasPrefix("pasted-") && pasted.pathExtension == "png")
+            #expect(NSImage(contentsOf: pasted)?.size == NSSize(width: 2, height: 2), "written as a PNG")
+            #expect(pasted.deletingLastPathComponent().deletingLastPathComponent().path == PastedFiles.directory.path)
+
+            editor.isEditable = false
+            pasteboard.clearContents()
+            pasteboard.writeObjects([files.shot as NSURL])
+            #expect(!editor.attach(from: pasteboard), "not while sending")
+        }
+    }
+
+    @Test func onlyPastedFilesAreDeleted() throws {
+        let files = try scratchFiles()
+        defer { try? FileManager.default.removeItem(at: files.dir) }
+        let pasted = try PastedFiles.write(Self.png, name: "pasted.png")
+        #expect(FileManager.default.fileExists(atPath: pasted.path))
+        PastedFiles.remove([pasted, files.shot, files.dir.appending(path: "folder/x")])
+        #expect(!FileManager.default.fileExists(atPath: pasted.deletingLastPathComponent().path), "its folder too")
+        #expect(FileManager.default.fileExists(atPath: files.shot.path), "the user's own file stays")
+        #expect(FileManager.default.fileExists(atPath: files.folder.path))
     }
 
     /// One line of the thread view's debug state, without its label.

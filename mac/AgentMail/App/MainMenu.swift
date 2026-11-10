@@ -1,6 +1,6 @@
 // The menu bar, with Mail's shortcuts where Mail has the command: New ⌘N,
 // Reply ⌘R, Forward ⇧⌘F, Send ⇧⌘D, Close Thread ⌃⌘A (Mail's Archive), Get
-// New Mail ⇧⌘N; mailboxes ⌘1–3 and the sidebar ⌃⌘S. Text size has Safari's:
+// New Mail ⇧⌘N, Attach Files ⇧⌘A; mailboxes ⌘1–3 and the sidebar ⌃⌘S. Text size has Safari's:
 // Actual Size ⌘0, Make Text Bigger ⌘+ (and ⌘=), Make Text Smaller ⌘−, so the
 // main window is ⌥⌘0. ⌘↩ also sends from the reply box
 // (ThreadViewController). Every command is here, so it can be rebound in
@@ -27,6 +27,8 @@ import AppKit
     func replyToThread(_ sender: Any?)
     func forwardThread(_ sender: Any?)
     func sendReply(_ sender: Any?)
+    /// Message › Attach Files…: files to go with the message being written.
+    func attachFiles(_ sender: Any?)
     func closeThread(_ sender: Any?)
     func copyThreadID(_ sender: Any?)
     func revealThreadInFinder(_ sender: Any?)
@@ -218,6 +220,7 @@ enum MainMenu {
     static func messageMenu() -> NSMenu {
         let m = NSMenu(title: "Message")
         m.addItem(item("Send", #selector(MailActions.sendReply(_:)), "d", [.command, .shift]))
+        m.addItem(item("Attach Files…", #selector(MailActions.attachFiles(_:)), "a", [.command, .shift]))
         m.addItem(.separator())
         m.addItem(item("Reply", #selector(MailActions.replyToThread(_:)), "r"))
         m.addItem(item("Forward", #selector(MailActions.forwardThread(_:)), "f", [.command, .shift]))

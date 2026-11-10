@@ -165,13 +165,45 @@ struct StubCLI {
     }
 
     @Test func forwardArguments() {
-        func args(message: String? = nil, subject: String? = nil, note: String = "") -> [String] {
-            CLIClient.forwardArguments(threadID: "t", message: message, to: "docs", subject: subject, note: note)
+        func args(message: String? = nil, subject: String? = nil, note: String = "", files: [URL] = []) -> [String] {
+            CLIClient.forwardArguments(threadID: "t", message: message, to: "docs", subject: subject, note: note,
+                                       attachments: files)
         }
         #expect(args() == ["forward", "t", "--to", "docs"])
         #expect(args(subject: "  ", note: " \n ") == ["forward", "t", "--to", "docs"], "blank: the CLI's defaults")
         #expect(args(message: "m.md", subject: "S", note: "hi") == ["forward", "t", "--to", "docs", "--msg", "m.md",
                                                                     "--subject", "S", "--", "hi"])
+        #expect(args(note: "hi", files: [URL(filePath: "/x/a b.png")])
+            == ["forward", "t", "--to", "docs", "--attach", "/x/a b.png", "--", "hi"], "files before the note")
+    }
+
+    @Test func attachmentsGoAsAttachOptions() async throws {
+        let stub = try StubCLI(script: """
+            for a in "$@"; do echo "arg: $a" >> "$LOG"; done
+            echo "body: $(cat)" >> "$LOG"
+            echo "2026-11-10-shot"
+            """)
+        defer { stub.remove() }
+        let client = stub.client()
+        let files = [URL(filePath: "/tmp/shot one.png"), URL(filePath: "/tmp/notes.md")]
+        try await client.reply(threadID: "t1", to: "infra", body: "See these", attachments: files)
+        let id = try await client.send(to: "docs", subject: nil, body: "Hi", attachments: [files[1]])
+        #expect(id == "2026-11-10-shot")
+        try await client.close(threadID: "t1", text: "Done", attachments: [files[0]])
+        let log = try stub.calls()
+        #expect(log.contains("""
+            arg: reply
+            arg: t1
+            arg: --to
+            arg: infra
+            arg: --attach
+            arg: /tmp/shot one.png
+            arg: --attach
+            arg: /tmp/notes.md
+            body: See these
+            """))
+        #expect(log.contains("arg: send\narg: --to\narg: docs\narg: --attach\narg: /tmp/notes.md\nbody: Hi\n"))
+        #expect(log.contains("arg: close\narg: t1\narg: --attach\narg: /tmp/shot one.png\nbody: Done\n"))
     }
 
     @Test func theDirectoryIsChangedThroughTheCLI() async throws {

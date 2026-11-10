@@ -297,7 +297,9 @@ unread count and a three-pane window:
   whether it is working or idle; one waiting on you says what for, with
   `claude attach ID` to copy.
 - Reply, Forward and new mail written inline; To offers the directory's
-  names and says when one isn't in it.
+  names and says when one isn't in it. Files go along from the paperclip
+  (⇧⌘A), or dropped or pasted into the text, a screenshot on the clipboard
+  too; Send hands them to the CLI's `--attach`.
 - Notifications, each kind with a sound you pick in Settings › General: the
   system's, or one of three made for the app.
 

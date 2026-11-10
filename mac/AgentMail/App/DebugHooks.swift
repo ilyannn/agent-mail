@@ -129,6 +129,9 @@ final class DebugHooks: NSObject {
             let parts = arg.split(separator: "/", maxSplits: 1).map(String.init)
             if let id = parts.first { app.debugMain?.thread.forward(threadID: id, message: parts.count > 1 ? parts[1] : nil) }
         case "discard": app.debugMain?.thread.discardDraft()
+        case "attach":
+            // Files for the message being written, as the open panel would add them.
+            app.debugMain?.thread.addAttachments(arg.split(separator: "|").map { URL(filePath: String($0)) })
         case "visible":
             // The thread view only runs `read` while the user can see it; a
             // window behind others can't be seen. "on" pretends it can.

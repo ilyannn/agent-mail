@@ -51,18 +51,29 @@ public struct CLIClient: Sendable {
         return Timed(value: try AgentMailJSON.decodeThread(r.stdout), duration: r.duration)
     }
 
+    /// `attachments` (absolute file paths) go as `--attach`, which copies
+    /// each file into the thread; the CLI refuses, before writing anything,
+    /// when one is missing.
     @discardableResult
-    public func reply(threadID: String, to recipient: String, body: String) async throws(AgentMailError) -> String {
-        try await run(["reply", threadID, "--to", recipient], input: body, label: "reply").stdoutString
+    public func reply(threadID: String, to recipient: String, body: String,
+                      attachments: [URL] = []) async throws(AgentMailError) -> String {
+        try await run(["reply", threadID, "--to", recipient] + Self.attachArguments(attachments), input: body,
+                      label: "reply").stdoutString
     }
 
     /// Starts a thread; returns its id.
     @discardableResult
-    public func send(to recipient: String, subject: String?, body: String) async throws(AgentMailError) -> String {
+    public func send(to recipient: String, subject: String?, body: String,
+                     attachments: [URL] = []) async throws(AgentMailError) -> String {
         var args = ["send", "--to", recipient]
         if let subject, !subject.trimmingCharacters(in: .whitespaces).isEmpty { args += ["--subject", subject] }
-        return try await run(args, input: body, label: "send").stdoutString
+        return try await run(args + Self.attachArguments(attachments), input: body, label: "send").stdoutString
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// `--attach PATH` for each file.
+    static func attachArguments(_ files: [URL]) -> [String] {
+        files.flatMap { ["--attach", $0.path] }
     }
 
     /// Starts a thread to `recipient` carrying thread `threadID`, or only its
@@ -73,25 +84,26 @@ public struct CLIClient: Sendable {
     /// option; stdin stays empty (the CLI reads it only when it is ready).
     @discardableResult
     public func forward(threadID: String, message: String? = nil, to recipient: String, subject: String? = nil,
-                        note: String = "") async throws(AgentMailError) -> String {
+                        note: String = "", attachments: [URL] = []) async throws(AgentMailError) -> String {
         try await run(Self.forwardArguments(threadID: threadID, message: message, to: recipient, subject: subject,
-                                            note: note), label: "forward").stdoutString
+                                            note: note, attachments: attachments), label: "forward").stdoutString
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     static func forwardArguments(threadID: String, message: String?, to recipient: String, subject: String?,
-                                 note: String) -> [String] {
+                                 note: String, attachments: [URL] = []) -> [String] {
         var args = ["forward", threadID, "--to", recipient]
         if let message { args += ["--msg", message] }
         if let subject, !subject.trimmingCharacters(in: .whitespaces).isEmpty { args += ["--subject", subject] }
+        args += attachArguments(attachments)
         if !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { args += ["--", note] }
         return args
     }
 
     /// Closes the thread; an empty text closes it with the CLI's "Closed.".
     @discardableResult
-    public func close(threadID: String, text: String = "") async throws(AgentMailError) -> String {
-        try await run(["close", threadID], input: text, label: "close").stdoutString
+    public func close(threadID: String, text: String = "", attachments: [URL] = []) async throws(AgentMailError) -> String {
+        try await run(["close", threadID] + Self.attachArguments(attachments), input: text, label: "close").stdoutString
     }
 
     /// Adds folder `directory` (an absolute path) to the agent directory, on

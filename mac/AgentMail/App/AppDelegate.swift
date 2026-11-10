@@ -206,6 +206,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MailActions, NSMenuIte
     @objc func replyToThread(_ sender: Any?) {}
     @objc func forwardThread(_ sender: Any?) {}
     @objc func sendReply(_ sender: Any?) {}
+    @objc func attachFiles(_ sender: Any?) {}
     @objc func closeThread(_ sender: Any?) {}
     @objc func copyThreadID(_ sender: Any?) {}
     @objc func revealThreadInFinder(_ sender: Any?) {}
@@ -238,7 +239,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MailActions, NSMenuIte
             if case .agent = store.mailbox { return true }
             return false
         case #selector(replyToThread(_:)), #selector(forwardThread(_:)), #selector(sendReply(_:)), #selector(closeThread(_:)),
-             #selector(copyThreadID(_:)), #selector(revealThreadInFinder(_:)),
+             #selector(attachFiles(_:)), #selector(copyThreadID(_:)), #selector(revealThreadInFinder(_:)),
              #selector(increaseTextSize(_:)), #selector(decreaseTextSize(_:)), #selector(resetTextSize(_:)):
             return false
         default:

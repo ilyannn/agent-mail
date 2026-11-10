@@ -27,6 +27,8 @@ public struct NewThreadDraft: Sendable, Equatable, Identifiable {
     public var subject: String
     public var body: String
     public var forward: ForwardSource?
+    /// Files to go along (`--attach`), in the order they were added.
+    public var attachments: [URL] = []
     /// What the app filled in itself; leaving it as it is isn't typing.
     public private(set) var prefilledTo: String
     public let prefilledSubject: String
@@ -49,18 +51,20 @@ public struct NewThreadDraft: Sendable, Equatable, Identifiable {
 
     public var recipient: String { to.trimmingCharacters(in: .whitespaces) }
 
-    /// Something the user typed (not what the app filled in), which Discard
-    /// and starting another draft ask about before throwing it away.
+    /// Something the user typed or attached (not what the app filled in),
+    /// which Discard and starting another draft ask about before throwing it
+    /// away.
     public var hasTypedContent: Bool {
         func typed(_ value: String, over prefill: String) -> Bool {
             let v = value.trimmingCharacters(in: .whitespacesAndNewlines)
             return !v.isEmpty && v != prefill.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         return typed(body, over: "") || typed(subject, over: prefilledSubject) || typed(to, over: prefilledTo)
+            || !attachments.isEmpty
     }
 
     /// A recipient the CLI accepts and, unless it is a forward (whose note is
-    /// optional), a body.
+    /// optional), a body: the CLI refuses a message of attachments alone.
     public func canSend(me: String) -> Bool {
         Formatting.isValidRecipient(recipient, me: me)
             && (forward != nil || !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)

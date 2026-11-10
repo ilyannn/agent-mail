@@ -70,6 +70,9 @@ final class MailStore {
     /// Unsent replies by thread id; the thread view saves into it on every
     /// selection change, and a failed notification reply lands here.
     @ObservationIgnored var drafts: [String: String] = [:]
+    /// Files waiting to go with each thread's reply, by thread id; the new
+    /// thread's are the draft's own.
+    @ObservationIgnored var replyAttachments: [String: [URL]] = [:]
     /// Whether the thread view is on screen: `read` marks a thread seen, so
     /// it only runs when the user can actually see the thread.
     @ObservationIgnored var detailIsVisible: () -> Bool = { false }
@@ -353,6 +356,7 @@ final class MailStore {
     func discardDraft() {
         let back = threadBeforeDraft
         let showing = isShowingDraft
+        PastedFiles.remove(newDraft?.attachments ?? [])
         clearDraft()
         guard showing else { return }
         select(threadID: back.flatMap { isShown($0) ? $0 : nil })
@@ -375,10 +379,12 @@ final class MailStore {
         defer { isSendingDraft = false }
         let id = if let source = draft.forward {
             try await forward(threadID: source.threadID, message: source.message, to: draft.recipient,
-                              subject: draft.subject, note: draft.body)
+                              subject: draft.subject, note: draft.body, attachments: draft.attachments)
         } else {
-            try await send(to: draft.recipient, subject: draft.subject, body: draft.body)
+            try await send(to: draft.recipient, subject: draft.subject, body: draft.body,
+                           attachments: draft.attachments)
         }
+        PastedFiles.remove(draft.attachments)
         guard newDraft?.id == draft.id else { return }
         let showing = isShowingDraft
         clearDraft()
@@ -424,21 +430,25 @@ final class MailStore {
         throw cliError ?? .cliNotFound(searched: [])
     }
 
-    func reply(threadID: String, to recipient: String, body: String) async throws(AgentMailError) {
+    /// A reply with `attachments`; once sent they leave the thread's list.
+    func reply(threadID: String, to recipient: String, body: String,
+               attachments: [URL] = []) async throws(AgentMailError) {
         let client = try await requireClient()
         busyThreadIDs.insert(threadID)
         defer { busyThreadIDs.remove(threadID) }
         let began = ContinuousClock.now
-        try await client.reply(threadID: threadID, to: recipient, body: body)
+        try await client.reply(threadID: threadID, to: recipient, body: body, attachments: attachments)
         drafts[threadID] = nil
+        sent(attachments, from: threadID)
         Timing.note("reply \(threadID) \(Timing.ms(.now - began))")
     }
 
     /// Starts a thread; returns its id.
-    func send(to recipient: String, subject: String?, body: String) async throws(AgentMailError) -> String {
+    func send(to recipient: String, subject: String?, body: String,
+              attachments: [URL] = []) async throws(AgentMailError) -> String {
         let client = try await requireClient()
         let began = ContinuousClock.now
-        let id = try await client.send(to: recipient, subject: subject, body: body)
+        let id = try await client.send(to: recipient, subject: subject, body: body, attachments: attachments)
         Timing.note("send \(Timing.ms(.now - began))")
         return id
     }
@@ -446,21 +456,33 @@ final class MailStore {
     /// Forwards a thread, or one message of it, in a new thread to
     /// `recipient`; returns the new thread's id.
     func forward(threadID: String, message: String?, to recipient: String, subject: String?,
-                 note: String) async throws(AgentMailError) -> String {
+                 note: String, attachments: [URL] = []) async throws(AgentMailError) -> String {
         let client = try await requireClient()
         let began = ContinuousClock.now
         let id = try await client.forward(threadID: threadID, message: message, to: recipient, subject: subject,
-                                          note: note)
+                                          note: note, attachments: attachments)
         Timing.note("forward \(threadID) \(Timing.ms(.now - began))")
         return id
     }
 
-    func close(threadID: String, note: String = "") async throws(AgentMailError) {
+    /// Closes the thread; a note may carry attachments, which then leave
+    /// the thread's list.
+    func close(threadID: String, note: String = "", attachments: [URL] = []) async throws(AgentMailError) {
         let client = try await requireClient()
         busyThreadIDs.insert(threadID)
         defer { busyThreadIDs.remove(threadID) }
-        try await client.close(threadID: threadID, text: note)
+        try await client.close(threadID: threadID, text: note, attachments: attachments)
         drafts[threadID] = nil
+        sent(attachments, from: threadID)
+    }
+
+    /// The CLI has copied `files` into the thread: they leave its list, and
+    /// pasted images leave the disk.
+    private func sent(_ files: [URL], from threadID: String) {
+        guard !files.isEmpty else { return }
+        let left = (replyAttachments[threadID] ?? []).filter { !files.contains($0) }
+        replyAttachments[threadID] = left.isEmpty ? nil : left
+        PastedFiles.remove(files)
     }
 
     /// Adds `folder` to the agent directory, on call (`agents add DIR`);

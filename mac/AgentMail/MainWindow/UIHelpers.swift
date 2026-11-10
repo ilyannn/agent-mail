@@ -52,8 +52,13 @@ extension NSTextField {
 
 /// The editor's text view: ⌘↩ while it has focus runs `onCommandReturn`
 /// (Send). It comes as a key equivalent, before the text system sees it.
+/// With `onAttach` set, files pasted or dropped on it, and an image pasted
+/// without text, go to `onAttach` instead of into the text.
 final class EditorTextView: NSTextView {
     var onCommandReturn: (() -> Void)?
+    var onAttach: ((PastedAttachment) -> Void)? {
+        didSet { updateDragTypeRegistration() }
+    }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if let onCommandReturn, event.isCommandReturn, window?.firstResponder === self {
@@ -61,6 +66,36 @@ final class EditorTextView: NSTextView {
             return true
         }
         return super.performKeyEquivalent(with: event)
+    }
+
+    /// Paste is enabled, and a drop accepted, for files and images too.
+    override var readablePasteboardTypes: [NSPasteboard.PasteboardType] {
+        let text = super.readablePasteboardTypes
+        guard onAttach != nil else { return text }
+        return text + PastedAttachment.pasteboardTypes.filter { !text.contains($0) }
+    }
+
+    override func paste(_ sender: Any?) {
+        if attach(from: .general) { return }
+        super.paste(sender)
+    }
+
+    override func dragOperation(for dragInfo: any NSDraggingInfo, type: NSPasteboard.PasteboardType) -> NSDragOperation {
+        if isEditable, onAttach != nil, PastedAttachment.read(dragInfo.draggingPasteboard) != nil { return .copy }
+        return super.dragOperation(for: dragInfo, type: type)
+    }
+
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        if attach(from: sender.draggingPasteboard) { return true }
+        return super.performDragOperation(sender)
+    }
+
+    /// What paste and drop do first: true when `pasteboard` held files or an
+    /// image, now handed to `onAttach`.
+    func attach(from pasteboard: NSPasteboard) -> Bool {
+        guard isEditable, let onAttach, let found = PastedAttachment.read(pasteboard) else { return false }
+        onAttach(found)
+        return true
     }
 }
 

@@ -242,6 +242,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
         thread.forward(threadID: id)
     }
     @objc func sendReply(_ sender: Any?) { thread.sendReply() }
+    @objc func attachFiles(_ sender: Any?) { thread.chooseAttachments() }
     @objc func closeThread(_ sender: Any?) { thread.closeThread() }
     @objc func increaseTextSize(_ sender: Any?) { thread.makeTextBigger() }
     @objc func decreaseTextSize(_ sender: Any?) { thread.makeTextSmaller() }
@@ -266,6 +267,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
             store.selectedThreadID != nil
         case #selector(sendReply(_:)):
             thread.canSendReply
+        case #selector(attachFiles(_:)):
+            thread.canAttach
         case #selector(closeThread(_:)):
             thread.canCloseThread
         case #selector(increaseTextSize(_:)):
