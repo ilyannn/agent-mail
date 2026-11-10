@@ -288,9 +288,12 @@ import Testing
         let live = ThreadDocument.html(thread: th, me: "user", css: "", sessionLine: line) { _ in "" }
         #expect(live.contains("<p class=\"session\" id=\"session\" title=\"background session 1a2b3c4d\"><span>Session "
             + "<a class=\"session-name\" href=\"agent-mail-action:///attach/2026-11-09-rotate-the-staging-key/1a2b3c4d\" "
-            + "title=\"Copy “claude attach 1a2b3c4d”, which opens the session in a terminal\">📫 infra #1</a> · live"
+            + "title=\"Copy “claude attach 1a2b3c4d”, which opens the session in a terminal\">📫 infra #1</a> · working"
             + "</span></p>\n</header>"))
-        #expect(rotate.session?.headerText { _ in "23:39" } == "Session 📫 infra #1 · live")
+        #expect(rotate.session?.headerText { _ in "23:39" } == "Session 📫 infra #1 · working", "in a turn")
+        var idle = try #require(rotate.session)
+        idle.activity = "idle"
+        #expect(ThreadDocument.sessionLine(idle, thread: th.id) { _ in "" }.contains("📫 infra #1</a> · idle</span>"))
 
         let deploy = try #require(st.threads.first { $0.number == 2 })
         let waiting = ThreadDocument.sessionLine(deploy.session, thread: deploy.id) { _ in "23:39" }

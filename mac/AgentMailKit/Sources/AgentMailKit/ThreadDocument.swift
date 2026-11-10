@@ -111,8 +111,9 @@ public enum ThreadDocument {
     /// The header's line about the session serve handed the thread to,
     /// always the element `#session` so the view can replace it in place
     /// when only the session changed (hidden when there is none): "Session
-    /// 📫 infra #12 · live", the name copying `claude attach ID` when
-    /// clicked; or, while it waits on the user, what for and since when,
+    /// 📫 infra #12 · working" (ThreadSession.shownState), the name copying
+    /// `claude attach ID` when clicked; or, while it waits on the user, what
+    /// for and since when,
     /// with the command to open it shown and copyable.
     public static func sessionLine(_ session: ThreadSession?, thread: String, formatDate: (Date) -> String) -> String {
         guard let s = session else { return "<p class=\"session\" id=\"session\" hidden></p>" }
@@ -129,7 +130,7 @@ public enum ThreadDocument {
                 + e(s.shownName) + "</strong> has waited on you since \(e(formatDate(since))): \(e(s.need))</span> "
                 + "<span>Open it with " + link("<code>\(e(s.attachCommand))</code>", class: "attach") + "</span></p>"
         }
-        let state = s.state.map { " · \(e($0))" } ?? ""
+        let state = s.shownState.map { " · \(e($0))" } ?? ""
         return "<p class=\"session\" id=\"session\" title=\"\(e(what))\"><span>Session "
             + link(e(s.shownName), class: "session-name") + "\(state)</span></p>"
     }
@@ -279,7 +280,7 @@ extension ThreadSession {
         if let since = waitingSince {
             return "Session \(shownName) has waited on you since \(formatDate(since)): \(need) · open it with \(attachCommand)"
         }
-        return "Session \(shownName)" + (state.map { " · \($0)" } ?? "")
+        return "Session \(shownName)" + (shownState.map { " · \($0)" } ?? "")
     }
 }
 

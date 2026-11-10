@@ -288,6 +288,49 @@ struct StubCLI {
         return await counter.value > baseline
     }
 
+    @Test func sessionRegistryFilesAreTold() {
+        let reg = "/u/.claude/sessions"
+        #expect(StoreEventFilter.isSessionChange(path: "/u/.claude/sessions/123.json", registry: reg))
+        #expect(StoreEventFilter.isSessionChange(path: "/u/.claude/sessions/123.json", registry: reg + "/"))
+        #expect(!StoreEventFilter.isSessionChange(path: "/u/.claude/sessions/123.abc.key", registry: reg))
+        #expect(!StoreEventFilter.isSessionChange(path: "/u/.claude/sessions/.123.json.tmp", registry: reg))
+        #expect(!StoreEventFilter.isSessionChange(path: "/u/.claude/sessions/sub/1.json", registry: reg))
+        #expect(!StoreEventFilter.isSessionChange(path: "/u/.claude/sessions-old/1.json", registry: reg))
+        let home = URL(filePath: "/u")
+        #expect(StoreEventFilter.sessionRegistry(environment: [:], home: home).path == "/u/.claude/sessions")
+        #expect(StoreEventFilter.sessionRegistry(environment: ["CLAUDE_CONFIG_DIR": "/c"], home: home).path
+            == "/c/sessions")
+        #expect(StoreEventFilter.sessionRegistry(environment: ["CLAUDE_CONFIG_DIR": " "], home: home).path
+            == "/u/.claude/sessions", "blank: the default")
+    }
+
+    @Test func aSessionChangingStatusYields() async throws {
+        let base = FileManager.default.temporaryDirectory.appending(path: "watch-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let root = base.appending(path: "store")
+        let registry = base.appending(path: "config/sessions")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: registry, withIntermediateDirectories: true)
+        let entry = registry.appending(path: "123.json")
+        try #"{"status": "idle"}"#.write(to: entry, atomically: false, encoding: .utf8)
+
+        let watcher = StoreWatcher(root: root, registry: registry, latency: 0.1)
+        let counter = Counter()
+        let stream = watcher.events()
+        let consumer = Task { for await _ in stream { await counter.increment() } }
+        defer {
+            consumer.cancel()
+            watcher.stop()
+        }
+        try await Task.sleep(for: .milliseconds(800))
+        let baseline = await counter.value
+        try "x".write(to: registry.appending(path: "123.abc.key"), atomically: false, encoding: .utf8)
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(await counter.value == baseline, "not a session's file")
+        try #"{"status": "busy"}"#.write(to: entry, atomically: false, encoding: .utf8)
+        #expect(try await waitPast(baseline, counter), "a session went busy")
+    }
+
     @Test func dutyHeartbeatsDontYieldButNewRecordsDo() async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "watch-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }

@@ -85,11 +85,11 @@ import Testing
     @Test func aParticipantsDotAndNameSayWhoPicksItsMailUp() {
         func icon(_ who: AgentInfo) -> String? { SidebarViewController.icon(for: who)?.accessibilityDescription }
         let onCall = AgentInfo(name: "infra", entry: DirectoryEntry(name: "infra"), directoryKnown: true, serveRunning: true)
-        #expect(icon(onCall) == "On call")
+        #expect(icon(onCall) == "On call", "a green ring: serve starts a session when mail comes")
         #expect(!SidebarViewController.isDimmed(onCall))
         var noServe = onCall
         noServe.serveRunning = false
-        #expect(icon(noServe) == "On call, serve isn’t running", "a green ring: nothing delivers until serve runs")
+        #expect(icon(noServe) == "On call, serve isn’t running", "a grey ring: nothing delivers until serve runs")
         #expect(!SidebarViewController.isDimmed(noServe))
         let off = AgentInfo(name: "notes", entry: DirectoryEntry(name: "notes", onCall: false), directoryKnown: true)
         #expect(icon(off) == "Off call")
@@ -97,6 +97,21 @@ import Testing
         #expect(icon(AgentInfo(name: "x", onDuty: true)) == "On duty")
         #expect(!SidebarViewController.isDimmed(AgentInfo(name: "x", onDuty: true)))
         #expect(!SidebarViewController.isDimmed(AgentInfo(name: "user", isMe: true)))
+
+        func with(_ who: AgentInfo, _ activities: String...) -> AgentInfo {
+            var who = who
+            var entry = who.entry ?? DirectoryEntry(name: who.name)
+            entry.sessions = activities.enumerated().map { AgentSession(id: "s\($0.offset)", activity: $0.element) }
+            who.entry = entry
+            return who
+        }
+        #expect(icon(with(onCall, "busy")) == "Working", "filled: a session is in a turn")
+        #expect(icon(with(onCall, "idle", "idle")) == "On call", "a ring: on call, but nobody works")
+        #expect(icon(with(onCall, "busy", "waiting")) == "Waiting on you", "a prompt beats work")
+        #expect(icon(with(noServe, "busy")) == "Working")
+        #expect(icon(with(off, "busy")) == "Working", "off call, but someone works in its folder")
+        #expect(!SidebarViewController.isDimmed(with(off, "busy")), "working: not dimmed")
+        #expect(SidebarViewController.isDimmed(with(off, "idle")))
     }
 
     @Test func theSidebarListsTheDirectory() async throws {

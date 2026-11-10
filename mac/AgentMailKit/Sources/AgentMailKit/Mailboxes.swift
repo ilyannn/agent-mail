@@ -169,6 +169,27 @@ public struct AgentInfo: Hashable, Sendable {
 
     public var inDirectory: Bool { entry != nil }
 
+    /// Its running Claude Code sessions (DirectoryEntry.sessions); none for
+    /// a name outside the directory.
+    public var liveSessions: [AgentSession] { entry?.sessions ?? [] }
+
+    /// One of its sessions is in a turn: it is actually working.
+    public var isWorking: Bool { liveSessions.contains(where: \.isWorking) }
+
+    /// One of its sessions waits on the user (a permission prompt, a dialog).
+    public var needsUser: Bool { liveSessions.contains(where: \.isWaitingOnUser) }
+
+    /// What its sessions are doing, for the tooltip: "Waiting on you: docs ·
+    /// Working: 📫 infra #3 · Idle: 📫 infra #4"; nil when none runs.
+    public var activityText: String? {
+        let groups = [("Waiting on you", liveSessions.filter(\.isWaitingOnUser)),
+                      ("Working", liveSessions.filter(\.isWorking)),
+                      ("Idle", liveSessions.filter { !$0.isWorking && !$0.isWaitingOnUser })]
+        let parts = groups.filter { !$0.1.isEmpty }
+            .map { "\($0.0): " + $0.1.map(\.shownName).joined(separator: ", ") }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
     /// What it owns, from the directory (a borrowed summary says where from).
     public var summary: String? { entry?.shownSummary }
 
@@ -231,9 +252,11 @@ public struct AgentInfo: Hashable, Sendable {
     }
 
     /// The sidebar row's tooltip: who it is and who picks its mail up, what
-    /// it owns, what is wrong with it, then what the badge counts.
+    /// its sessions are doing, what it owns, what is wrong with it, then
+    /// what the badge counts.
     public var tooltip: String {
         var lines = [isMe ? "you (\(name)): every thread you take part in" : "\(name): \(stateText)"]
+        if !isMe, let activityText { lines.append(activityText) }
         if let summary { lines.append(summary) }
         lines += notices.map(\.text)
         lines.append(waitingText)
@@ -245,6 +268,7 @@ public struct AgentInfo: Hashable, Sendable {
     public var accessibilityLabel: String {
         var parts = isMe ? ["\(name) (you)"]
             : [name, onDuty ? "on duty" : onCall ? "on call" : inDirectory ? "off call" : "not on duty"]
+        if !isMe, needsUser { parts.append("waiting on you") } else if !isMe, isWorking { parts.append("working") }
         switch notices.count {
         case 0: break
         case 1: parts.append("1 warning")

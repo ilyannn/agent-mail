@@ -122,6 +122,7 @@
       "name" : "📫 website #2",
       "kind" : "background",
       "state" : "live",
+      "activity" : "waiting",
       "waiting-since" : "2026-11-09T22:39:04.453Z",
       "waiting-for" : "permission",
       "needs" : "approve Bash: npm run deploy"
@@ -151,7 +152,8 @@
       "id" : "1a2b3c4d",
       "name" : "📫 infra #1",
       "kind" : "background",
-      "state" : "live"
+      "state" : "live",
+      "activity" : "busy"
     }
   } ],
   "duty" : [ ],
@@ -164,7 +166,8 @@
     "summary" : "Owns the documentation site.",
     "borrowed" : null,
     "trusted" : false,
-    "dir-exists" : true
+    "dir-exists" : true,
+    "sessions" : [ ]
   }, {
     "name" : "gone",
     "dir" : "/x/gone",
@@ -173,7 +176,8 @@
     "summary" : "A folder that was removed.",
     "borrowed" : null,
     "trusted" : null,
-    "dir-exists" : false
+    "dir-exists" : false,
+    "sessions" : [ ]
   }, {
     "name" : "infra",
     "dir" : "/x/infra",
@@ -182,7 +186,17 @@
     "summary" : "Owns the servers, DNS and deploys.",
     "borrowed" : null,
     "trusted" : true,
-    "dir-exists" : true
+    "dir-exists" : true,
+    "sessions" : [ {
+      "id" : "1a2b3c4d",
+      "name" : "📫 infra #1",
+      "kind" : "background",
+      "activity" : "busy"
+    }, {
+      "id" : "77aa88bb",
+      "kind" : "interactive",
+      "activity" : "idle"
+    } ]
   }, {
     "name" : "notes",
     "dir" : "/x/notes",
@@ -191,7 +205,13 @@
     "summary" : "Keeps meeting notes.",
     "borrowed" : null,
     "trusted" : false,
-    "dir-exists" : true
+    "dir-exists" : true,
+    "sessions" : [ {
+      "id" : "99cc00dd",
+      "name" : "notes",
+      "kind" : "interactive",
+      "activity" : "busy"
+    } ]
   }, {
     "name" : "website",
     "dir" : "/x/website",
@@ -200,7 +220,13 @@
     "summary" : "The public website: its pages, build and hosting.",
     "borrowed" : "README.md",
     "trusted" : true,
-    "dir-exists" : true
+    "dir-exists" : true,
+    "sessions" : [ {
+      "id" : "5e6f7a8b",
+      "name" : "📫 website #2",
+      "kind" : "background",
+      "activity" : "waiting"
+    } ]
   } ],
   "postmaster" : [ ],
   "serve" : {

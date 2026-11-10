@@ -82,7 +82,16 @@ import Testing
         #expect(agents.map(\.trusted) == [false, nil, true, false, true])
         #expect(agents.map(\.dirExists) == [true, false, true, true, true])
         #expect(agents[2] == DirectoryEntry(name: "infra", dir: "/x/infra", summary: "Owns the servers, DNS and deploys.",
-                                            trusted: true))
+                                            trusted: true, sessions: [
+                                                AgentSession(id: "1a2b3c4d", name: "📫 infra #1", kind: "background",
+                                                             activity: "busy"),
+                                                AgentSession(id: "77aa88bb", kind: "interactive", activity: "idle"),
+                                            ]))
+        #expect(agents.map { $0.sessions.map(\.shownName) }
+            == [[], [], ["📫 infra #1", "77aa88bb"], ["notes"], ["📫 website #2"]], "unnamed: its short id")
+        #expect(agents[2].sessions.map(\.isWorking) == [true, false])
+        #expect(agents[4].sessions.map(\.isWaitingOnUser) == [true])
+        #expect(!agents[4].sessions[0].isWorking, "at a prompt: not working")
         #expect(agents[2].shownSummary == "Owns the servers, DNS and deploys.")
         #expect(agents[4].borrowed == "README.md")
         #expect(agents[4].shownSummary == "The public website: its pages, build and hosting. (from README.md)")
@@ -94,12 +103,18 @@ import Testing
              "undelivered": [], "agents": [{"name": "x", "summary": "  ", "borrowed": ""}]}
             """.utf8))
         #expect(empty.agents == [DirectoryEntry(name: "x", onCall: false)], "missing fields read defensively")
+        #expect(empty.agents?.first?.sessions == [], "a CLI from before sessions: none")
     }
 
     @Test func threadSessionsDecode() throws {
         let st = try AgentMailJSON.decodeStatus(Fixture.data("status-directory"))
         let rotate = try #require(st.threads.first { $0.number == 1 })
-        #expect(rotate.session == ThreadSession(id: "1a2b3c4d", name: "📫 infra #1", kind: "background", state: "live"))
+        #expect(rotate.session == ThreadSession(id: "1a2b3c4d", name: "📫 infra #1", kind: "background", state: "live",
+                                                activity: "busy"))
+        #expect(rotate.session?.shownState == "working")
+        #expect(ThreadSession(id: "a", state: "live", activity: "idle").shownState == "idle")
+        #expect(ThreadSession(id: "a", state: "stopped", activity: "stopped").shownState == "stopped")
+        #expect(ThreadSession(id: "a", state: "live").shownState == "live", "a CLI from before activity")
         #expect(rotate.session?.isWaitingOnUser == false)
         #expect(rotate.session?.attachCommand == "claude attach 1a2b3c4d")
         let deploy = try #require(st.threads.first { $0.number == 2 })

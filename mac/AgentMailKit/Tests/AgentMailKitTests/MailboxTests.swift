@@ -291,20 +291,40 @@ import Testing
         let infra = try #require(dir.participant("infra"))
         #expect(infra.summary == "Owns the servers, DNS and deploys.")
         #expect(infra.tooltip.hasPrefix("infra: on call — serve starts a session for each thread\n"
-            + "Owns the servers, DNS and deploys.\n"))
+            + "Working: 📫 infra #1 · Idle: 77aa88bb\n"
+            + "Owns the servers, DNS and deploys.\n"), "what its sessions are doing, after who picks its mail up")
         #expect(infra.tooltip.hasSuffix("\n1 thread waiting on infra"))
-        #expect(dir.participant("website")?.tooltip == """
+        #expect(infra.isWorking)
+        #expect(!infra.needsUser)
+        #expect(infra.accessibilityLabel == "infra, on call, working, 2 warnings, 1 thread waiting on infra")
+        let website = try #require(dir.participant("website"))
+        #expect(website.tooltip == """
             website: on call — serve starts a session for each thread
+            Waiting on you: 📫 website #2
             The public website: its pages, build and hosting. (from README.md)
             1 thread waiting on website
             """)
+        #expect(website.needsUser)
+        #expect(!website.isWorking, "at a prompt: not working")
+        #expect(website.accessibilityLabel == "website, on call, waiting on you, 1 thread waiting on website")
         let notes = try #require(dir.participant("notes"))
         #expect(notes.tooltip == """
             notes: off call — its mail waits until a session starts in its folder
+            Working: notes
             Keeps meeting notes.
             Nothing waiting on notes
             """)
-        #expect(notes.accessibilityLabel == "notes, off call")
+        #expect(notes.accessibilityLabel == "notes, off call, working", "off call, but a session works in its folder")
+        let docs = try #require(dir.participant("docs"))
+        #expect(docs.activityText == nil, "nothing running: no line")
+        #expect(!docs.isWorking)
+        #expect(dir.participant("old-repo")?.liveSessions == [], "outside the directory: no sessions known")
+        let both = AgentInfo(name: "x", entry: DirectoryEntry(name: "x", sessions: [
+            AgentSession(id: "a", name: "one", activity: "busy"), AgentSession(id: "b", activity: "waiting"),
+            AgentSession(id: "c", name: "three", activity: "busy"), AgentSession(id: "d", activity: "running"),
+        ]))
+        #expect(both.activityText == "Waiting on you: b · Working: one, three · Idle: d")
+        #expect(both.accessibilityLabel == "x, on call, waiting on you", "waiting on the user comes first")
         #expect(notes.notices.isEmpty, "untrusted, but off call: serve wouldn't go there anyway")
         #expect(dir.participant("old-repo")?.tooltip == "old-repo: not in the agent directory\n1 thread waiting on old-repo")
         #expect(dir.participant("old-repo")?.accessibilityLabel == "old-repo, not on duty, 1 thread waiting on old-repo")
@@ -343,9 +363,10 @@ import Testing
             AgentNotice(.unlanded, "Unlanded work of “📫 infra #0”: branch worktree-agent-9c0d, 2 commits; "
                 + "serve keeps the session until it is merged."),
         ])
-        #expect(infra.accessibilityLabel == "infra, on call, 2 warnings, 1 thread waiting on infra")
+        #expect(infra.accessibilityLabel == "infra, on call, working, 2 warnings, 1 thread waiting on infra")
         #expect(infra.tooltip == """
             infra: on call — serve starts a session for each thread
+            Working: 📫 infra #1 · Idle: 77aa88bb
             Owns the servers, DNS and deploys.
             \(infra.notices[0].text)
             \(infra.notices[1].text)

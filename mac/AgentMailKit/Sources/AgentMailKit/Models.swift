@@ -171,15 +171,18 @@ public struct DirectoryEntry: Sendable, Equatable, Hashable, Decodable {
     /// Whether Claude Code trusts the folder; nil when that is unknown.
     public var trusted: Bool?
     public var dirExists: Bool
+    /// Its running Claude Code sessions, in its folder or below, with what
+    /// each is doing; empty from a CLI that predates the field.
+    public var sessions: [AgentSession]
 
     enum CodingKeys: String, CodingKey {
-        case name, dir, kind, summary, borrowed, trusted
+        case name, dir, kind, summary, borrowed, trusted, sessions
         case onCall = "oncall"
         case dirExists = "dir-exists"
     }
 
     public init(name: String, dir: String? = nil, onCall: Bool = true, kind: String = "claude", summary: String? = nil,
-                borrowed: String? = nil, trusted: Bool? = nil, dirExists: Bool = true) {
+                borrowed: String? = nil, trusted: Bool? = nil, dirExists: Bool = true, sessions: [AgentSession] = []) {
         self.name = name
         self.dir = dir
         self.onCall = onCall
@@ -188,6 +191,7 @@ public struct DirectoryEntry: Sendable, Equatable, Hashable, Decodable {
         self.borrowed = borrowed
         self.trusted = trusted
         self.dirExists = dirExists
+        self.sessions = sessions
     }
 
     public init(from decoder: any Decoder) throws {
@@ -200,6 +204,7 @@ public struct DirectoryEntry: Sendable, Equatable, Hashable, Decodable {
         borrowed = try c.decodeIfPresent(String.self, forKey: .borrowed).flatMap(\.nonBlank)
         trusted = try c.decodeIfPresent(Bool.self, forKey: .trusted)
         dirExists = try c.decodeIfPresent(Bool.self, forKey: .dirExists) ?? true
+        sessions = try c.decodeIfPresent([AgentSession].self, forKey: .sessions) ?? []
     }
 
     /// The summary as `agent-mail agents` shows it: a borrowed one says
@@ -208,6 +213,35 @@ public struct DirectoryEntry: Sendable, Equatable, Hashable, Decodable {
         guard let summary else { return nil }
         return borrowed.map { "\(summary) (from \($0))" } ?? summary
     }
+}
+
+/// One of an agent's running Claude Code sessions, as `status` lists it
+/// (core/agent-sessions): one in its folder or below, serve's or not.
+public struct AgentSession: Sendable, Equatable, Hashable, Decodable {
+    /// The short id `claude attach` takes.
+    public var id: String
+    /// Its name in `claude agents`, e.g. `📫 infra #12`; nil when it has none.
+    public var name: String?
+    /// `background` or `interactive`.
+    public var kind: String?
+    /// `busy` (in a turn), `waiting` (on the user: a permission prompt or
+    /// another dialog) or `idle`.
+    public var activity: String?
+
+    public init(id: String, name: String? = nil, kind: String? = nil, activity: String? = nil) {
+        self.id = id
+        self.name = name
+        self.kind = kind
+        self.activity = activity
+    }
+
+    /// In a turn: actually working.
+    public var isWorking: Bool { activity == "busy" }
+    /// Blocked on the user, a permission prompt or another dialog.
+    public var isWaitingOnUser: Bool { activity == "waiting" }
+
+    /// Its name, else its short id.
+    public var shownName: String { name?.nonBlank ?? id }
 }
 
 /// The session serve handed a thread to, as it last saw it
@@ -221,6 +255,9 @@ public struct ThreadSession: Sendable, Equatable, Hashable, Decodable {
     public var kind: String?
     /// `starting`, `live`, `stopped` or `gone`.
     public var state: String?
+    /// What it is doing: `busy`, `idle` or `waiting` while it runs, else its
+    /// state; nil from a CLI that predates the field.
+    public var activity: String?
     /// Since when it has waited on the user (a permission prompt or another
     /// dialog), what for, and what it needs; nil unless it waits.
     public var waitingSince: Date?
@@ -228,23 +265,36 @@ public struct ThreadSession: Sendable, Equatable, Hashable, Decodable {
     public var needs: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, name, kind, state, needs
+        case id, name, kind, state, activity, needs
         case waitingSince = "waiting-since"
         case waitingFor = "waiting-for"
     }
 
-    public init(id: String, name: String? = nil, kind: String? = nil, state: String? = nil, waitingSince: Date? = nil,
-                waitingFor: String? = nil, needs: String? = nil) {
+    public init(id: String, name: String? = nil, kind: String? = nil, state: String? = nil, activity: String? = nil,
+                waitingSince: Date? = nil, waitingFor: String? = nil, needs: String? = nil) {
         self.id = id
         self.name = name
         self.kind = kind
         self.state = state
+        self.activity = activity
         self.waitingSince = waitingSince
         self.waitingFor = waitingFor
         self.needs = needs
     }
 
     public var isWaitingOnUser: Bool { waitingSince != nil }
+
+    /// What the thread's header says it is doing: working while in a turn,
+    /// idle between turns, waiting on you at a prompt, else its state
+    /// (starting, stopped, gone; live from a CLI without activity).
+    public var shownState: String? {
+        switch activity {
+        case "busy": "working"
+        case "idle": "idle"
+        case "waiting": "waiting on you"
+        default: state
+        }
+    }
 
     /// The name SendMessage and `claude agents` know it by, else its id.
     public var shownName: String { name?.nonBlank ?? id }

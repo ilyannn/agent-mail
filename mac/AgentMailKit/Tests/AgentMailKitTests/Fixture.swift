@@ -5,7 +5,9 @@
 // removed, notes off call, website's summary borrowed from its README) and
 // a hand-written serve state: infra's #1 and website's #2 held by sessions,
 // website's waiting on the user, infra unable to land and with an unlanded
-// session; old-repo, the owner of #4, was removed from the directory.
+// session; old-repo, the owner of #4, was removed from the directory. Its
+// agents' running sessions are hand-written too: infra's #1 busy beside an
+// idle interactive one, a busy one in notes (off call), website's waiting.
 import Foundation
 
 enum Fixture {

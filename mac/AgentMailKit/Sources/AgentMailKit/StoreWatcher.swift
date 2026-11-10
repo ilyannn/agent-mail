@@ -6,7 +6,10 @@
 // record every few seconds, and FSEvents flags every rewrite as Created, so
 // the watcher compares the set of record names and only a record appearing
 // or going away counts. Liveness changes without any file event (a stale
-// heartbeat, a dead session) are the periodic refresh's job.
+// heartbeat, a dead session) are the periodic refresh's job. Given Claude
+// Code's session registry (<config>/sessions), it watches that folder too:
+// a session's file there changes when it starts, ends or changes status
+// (busy, idle, waiting), which is what an agent's sessions in `status` say.
 import CoreServices
 import Foundation
 import Synchronization
@@ -48,6 +51,24 @@ public enum StoreEventFilter {
         }
     }
 
+    /// Whether an event at `path` is a session's registry file, `<pid>.json`
+    /// directly in `registry` (both absolute, symlinks resolved).
+    public static func isSessionChange(path: String, registry: String) -> Bool {
+        let dir = registry.hasSuffix("/") ? registry : registry + "/"
+        guard path.hasPrefix(dir) else { return false }
+        let name = path.dropFirst(dir.count)
+        return !name.contains("/") && !name.hasPrefix(".") && name.hasSuffix(".json")
+    }
+
+    /// Claude Code's session registry for `environment`: CLAUDE_CONFIG_DIR's
+    /// `sessions`, else ~/.claude/sessions, where the CLI the app runs looks.
+    public static func sessionRegistry(environment: [String: String] = ProcessInfo.processInfo.environment,
+                                       home: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {
+        let config = environment["CLAUDE_CONFIG_DIR"].flatMap(\.nonBlank)
+            .map { URL(filePath: ($0 as NSString).expandingTildeInPath) } ?? home.appending(path: ".claude")
+        return config.appending(path: "sessions")
+    }
+
     /// Names of the duty records in `dir`.
     public static func dutyRecords(in dir: String) -> Set<String> {
         Set(((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []).filter { $0.hasSuffix(".edn") })
@@ -57,6 +78,8 @@ public enum StoreEventFilter {
 public final class StoreWatcher: Sendable {
     /// The store root with symlinks resolved, as FSEvents reports paths.
     public let root: String
+    /// Claude Code's session registry, symlinks resolved; nil: not watched.
+    public let registry: String?
     private let latency: CFTimeInterval
     private let queue = DispatchQueue(label: "agent-mail.store-watcher")
     /// FSEventStreamRef is a plain pointer; it is only touched under the lock.
@@ -69,8 +92,11 @@ public final class StoreWatcher: Sendable {
     }
     private let state = Mutex(State())
 
-    public init(root: URL, latency: CFTimeInterval = 0.3) {
+    /// `registry`: Claude Code's session registry
+    /// (StoreEventFilter.sessionRegistry()), watched as well while it exists.
+    public init(root: URL, registry: URL? = nil, latency: CFTimeInterval = 0.3) {
         self.root = Self.realPath(root.path)
+        self.registry = registry.map { Self.realPath($0.path) }
         self.latency = latency
     }
 
@@ -78,7 +104,7 @@ public final class StoreWatcher: Sendable {
 
     /// Starts watching; the stream yields after each batch with a relevant
     /// event. Watches the nearest existing ancestor while the store doesn't
-    /// exist yet. Call once.
+    /// exist yet, and the registry only if it exists. Call once.
     public func events() -> AsyncStream<Void> {
         let (stream, continuation) = AsyncStream.makeStream(of: Void.self, bufferingPolicy: .bufferingNewest(1))
         state.withLock { $0.continuation = continuation }
@@ -105,8 +131,10 @@ public final class StoreWatcher: Sendable {
                                            retain: nil, release: nil, copyDescription: nil)
         let flags = FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagUseCFTypes
             | kFSEventStreamCreateFlagWatchRoot)
+        var paths = [watched]
+        if let registry, FileManager.default.fileExists(atPath: registry) { paths.append(registry) }
         guard let stream = FSEventStreamCreate(kCFAllocatorDefault, StoreWatcher.callback, &context,
-                                               [watched] as CFArray,
+                                               paths as CFArray,
                                                FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
                                                latency, flags) else { return }
         FSEventStreamSetDispatchQueue(stream, queue)
@@ -134,7 +162,12 @@ public final class StoreWatcher: Sendable {
     private var dutyDirectory: String { (root as NSString).appendingPathComponent("duty") }
 
     fileprivate func handle(paths: [String], flags: [FSEventStreamEventFlags]) {
-        let kinds = zip(paths, flags).map { StoreEventFilter.classify(path: $0, flags: $1, root: root) }
+        let kinds = zip(paths, flags).map { path, flag in
+            if let registry, StoreEventFilter.isSessionChange(path: path, registry: registry) {
+                return StoreEventFilter.Kind.relevant
+            }
+            return StoreEventFilter.classify(path: path, flags: flag, root: root)
+        }
         var relevant = kinds.contains(.relevant)
         if kinds.contains(.duty) {
             let now = StoreEventFilter.dutyRecords(in: dutyDirectory)

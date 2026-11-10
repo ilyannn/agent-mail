@@ -111,7 +111,7 @@ final class MailStore {
     func start() {
         guard scheduler == nil else { return }
         scheduler = RefreshScheduler { [weak self] in await self?.performRefresh() }
-        let watcher = StoreWatcher(root: location.url)
+        let watcher = StoreWatcher(root: location.url, registry: StoreEventFilter.sessionRegistry())
         self.watcher = watcher
         let events = watcher.events()
         loops.append(Task { [weak self] in

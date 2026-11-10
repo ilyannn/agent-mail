@@ -1,13 +1,15 @@
 // The sidebar: a source list with Mailboxes (Inbox, Undelivered, All Mail)
 // and Participants (the user first, then every agent in the directory and
 // every other name in a thread; each counts the open threads waiting on it).
-// A participant's dot says who picks its mail up: green on duty or on call,
-// hollow with the name dimmed otherwise; a warning symbol after its name
-// says something needs the user (a folder serve can't use), its tooltip
-// what. Driven by a diffable data source keyed by row identity; counts are
-// refreshed in place, never with reloadData(). A participant's context menu
-// starts a new message to it and puts a directory agent on or off call;
-// every row's offers Add Folder….
+// A participant's dot is filled while one of its sessions is in a turn
+// (green: working; orange: waiting on the user), a ring otherwise (green
+// when on duty or on call, grey with the name dimmed when nothing picks its
+// mail up); a warning symbol after its name says something needs the user
+// (a folder serve can't use), its tooltip what; the row's tooltip lists
+// what its sessions are doing. Driven by a diffable data source keyed by
+// row identity; counts are refreshed in place, never with reloadData(). A
+// participant's context menu starts a new message to it and puts a
+// directory agent on or off call; every row's offers Add Folder….
 import AgentMailKit
 import AppKit
 import Observation
@@ -131,27 +133,32 @@ final class SidebarViewController: NSViewController, NSTableViewDelegate, NSMenu
         }
     }
 
-    /// A participant's dot: the user's own figure; green and filled on duty,
-    /// or on call while serve runs (it starts a session when mail comes);
-    /// a green ring on call while serve doesn't run; hollow grey when nothing
-    /// picks its mail up, whose name is dimmed too (isDimmed(_:)).
+    /// A participant's dot: the user's own figure; filled while one of its
+    /// sessions is in a turn, orange when one waits on the user (a prompt),
+    /// else green: it is working. A ring otherwise: green on duty, or on call
+    /// while serve runs (it starts a session when mail comes); grey on call
+    /// while serve doesn't run; fainter grey when nothing picks its mail up,
+    /// whose name is dimmed too (isDimmed(_:)).
     static func icon(for who: AgentInfo) -> NSImage? {
         if who.isMe {
             return NSImage(systemSymbolName: "person.fill", accessibilityDescription: "You")?
                 .withSymbolConfiguration(.init(paletteColors: [.tertiaryLabelColor]))
         }
-        if who.onDuty { return NSImage.dot(.systemGreen, label: "On duty") }
+        if who.needsUser { return NSImage.dot(.systemOrange, label: "Waiting on you") }
+        if who.isWorking { return NSImage.dot(.systemGreen, label: "Working") }
+        if who.onDuty { return NSImage.dot(.systemGreen, filled: false, label: "On duty") }
         if who.onCall {
-            return who.serveRunning ? NSImage.dot(.systemGreen, label: "On call")
-                : NSImage.dot(.systemGreen, filled: false, label: "On call, serve isn’t running")
+            return who.serveRunning ? NSImage.dot(.systemGreen, filled: false, label: "On call")
+                : NSImage.dot(.secondaryLabelColor, filled: false, label: "On call, serve isn’t running")
         }
         return NSImage.dot(.tertiaryLabelColor, filled: false, label: who.inDirectory ? "Off call" : "Not on duty")
     }
 
     /// Whether a participant's name is dimmed: nothing picks its mail up
-    /// (off call, or not in the directory); never the user's own.
+    /// (off call, or not in the directory) and none of its sessions is in a
+    /// turn; never the user's own.
     static func isDimmed(_ who: AgentInfo) -> Bool {
-        !who.isMe && !who.onDuty && !who.onCall
+        !who.isMe && !who.onDuty && !who.onCall && !who.isWorking && !who.needsUser
     }
 
     private func symbol(_ name: String, _ label: String) -> NSImage? {

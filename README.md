@@ -277,12 +277,16 @@ unread count and a three-pane window:
   addressed to you (each thread's `unread-to-me` in `status --json`), not what
   agents sent each other in the threads waiting on you.
 - Participants are the agent directory, plus names that only appear in
-  mail: a green dot says one is on call (an off-call name is dimmed), the
-  tooltip what it owns, and a warning what needs you (a folder serve can't
-  use, a checkout it can't land in, unlanded sessions; its mailbox lists
-  them too). Its menu puts it on or off call; File › Add Folder… adds one.
-- Threads rendered as Markdown, with the session serve handed each to; one
-  waiting on you says what for, with `claude attach ID` to copy.
+  mail. A filled dot says one is working: a Claude Code session in its
+  folder is in a turn (orange when one waits on you at a prompt). A green
+  ring says it is on call but idle, a grey one that serve isn't running; an
+  off-call name is dimmed. The tooltip says what its sessions are doing and
+  what it owns, and a warning what needs you (a folder serve can't use, a
+  checkout it can't land in, unlanded sessions; its mailbox lists them
+  too). Its menu puts it on or off call; File › Add Folder… adds one.
+- Threads rendered as Markdown, with the session serve handed each to and
+  whether it is working or idle; one waiting on you says what for, with
+  `claude attach ID` to copy.
 - Reply, Forward and new mail written inline; To offers the directory's
   names and says when one isn't in it.
 - Notifications, each kind with a sound you pick in Settings › General: the
