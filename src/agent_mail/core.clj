@@ -139,10 +139,16 @@
                       (unread (:msgs th) who mark)))))
 
 (defn other-party
-  "Whom a reply from `me` goes to: the last writer that isn't me, else the owner."
+  "Whom a reply from `me` goes to: whoever last wrote to me, else the last
+   writer that isn't me, else the owner. A bystander's note to someone else
+   (an answer to the user's side question) doesn't take my reply away from
+   whoever I'm answering."
   [th me]
-  (or (some #(when (not= me (:from %)) (:from %)) (rseq (:msgs th)))
-      (when (not= me (:owner th)) (:owner th))))
+  (let [msgs (rseq (:msgs th))
+        from-other #(when (not= me (:from %)) (:from %))]
+    (or (some #(when (= me (:to %)) (from-other %)) msgs)
+        (some from-other msgs)
+        (when (not= me (:owner th)) (:owner th)))))
 
 (defn resolve-id
   "Exact id, a thread number (`7` or `#7`), or a unique fragment of an id.

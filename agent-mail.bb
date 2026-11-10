@@ -1175,8 +1175,9 @@
 
 (defn reply-to
   "The recipient of a reply from `me` to `th`: --to, which must be `user`
-   or in the directory, else whoever wrote last that isn't me (mail from
-   before the directory may name anyone). Never me."
+   or in the directory, else core/other-party: whoever last wrote to me,
+   else whoever wrote last that isn't me (mail from before the directory
+   may name anyone). Never me."
   [opts th me]
   (let [to (or (:to opts) (core/other-party th me) (fail "nobody to reply to; use --to NAME"))]
     (when-not (core/valid-name? to) (fail "bad recipient name:" (pr-str to)))

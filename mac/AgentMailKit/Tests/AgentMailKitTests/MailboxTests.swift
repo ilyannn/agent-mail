@@ -437,6 +437,18 @@ import Testing
         #expect(d.replyRecipient(me: "user") == "infra")
     }
 
+    @Test func replyRecipientIsWhoeverLastWroteToMe() {
+        // infra answers the user; then website writes to infra, not the user
+        let th = ThreadDetail(id: "t", subject: "s", owner: "infra", msgs: [
+            Message(file: "1.md", from: "user", to: "infra", date: nil, body: "a"),
+            Message(file: "2.md", from: "infra", to: "user", date: nil, body: "b"),
+            Message(file: "3.md", from: "website", to: "infra", date: nil, body: "c"),
+        ])
+        #expect(th.replyRecipient(me: "user") == "infra", "not website, who wrote last")
+        #expect(th.replyRecipient(me: "infra") == "website")
+        #expect(th.replyRecipient(me: "billing") == "website", "nothing to me: the last writer")
+    }
+
     @Test func fingerprintIgnoresReading() throws {
         var t = try #require(index.thread("2026-10-31-deploy-the-new-site"))
         let before = t.contentFingerprint

@@ -87,8 +87,8 @@ message, `--msg N`) and its files into a new thread that names its source.
 
 - Messages are never edited or deleted; a correction is a new message.
 - The tool stamps time; never pass `--date` except when importing old threads.
-- One recipient. `reply` defaults to whoever wrote last that isn't you; `--to`
-  overrides. There is no cc.
+- One recipient. `reply` defaults to whoever last wrote to you (else whoever
+  wrote last that isn't you); `--to` overrides. There is no cc.
 - Agents never read or write the store directly. `read` and `list` are the way in.
 
 ## After sending

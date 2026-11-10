@@ -232,6 +232,17 @@
       (let [th (core/thread-state meta "id" [(msg 0 "a" "b") (msg 1 "b" "c")])]
         (is (= "c" (:owner th)))
         (is (= "b" (core/other-party th "c")))))
+    (testing "a bystander's note to someone else doesn't take the reply: it goes to whoever last wrote to me"
+      ;; the user asks a, then asks c whether a is still working; c answers the user
+      (let [th (core/thread-state meta "id" [(msg 0 "user" "a") (msg 1 "a" "user") (msg 2 "user" "a")
+                                             (msg 3 "user" "c") (msg 4 "c" "user")])]
+        (is (= "user" (core/other-party th "a")) "not c, who wrote last")
+        (is (= "user" (core/other-party th "c")))
+        (is (= "c" (core/other-party th "user")) "the user answers whoever last wrote to them")))
+    (testing "nothing ever written to me: the last writer that isn't me"
+      (let [th (core/thread-state meta "id" [(msg 0 "a" "b") (msg 1 "b" "a") (msg 2 "a" "c")])]
+        (is (= "a" (core/other-party th "d")))
+        (is (= "a" (core/other-party th "b")))))
     (testing "each message keeps the session that wrote it"
       (is (= ["s-1" nil] (map :session (:msgs (core/thread-state meta "id" [(msg 0 "a" "b" :session "s-1") (msg 1 "b" "a")]))))))
     (testing "status is the last one set"

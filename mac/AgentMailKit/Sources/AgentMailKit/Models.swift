@@ -576,8 +576,10 @@ public struct ThreadDetail: Sendable, Equatable, Decodable {
         Array(Set(msgs.flatMap { [$0.from, $0.to].compactMap { $0 } })).sorted()
     }
 
-    /// Whom a reply from `me` goes to: the last writer that isn't me, else the owner.
+    /// Whom a reply from `me` goes to: whoever last wrote to me, else the last
+    /// writer that isn't me, else the owner (core/other-party).
     public func replyRecipient(me: String) -> String? {
+        if let m = msgs.last(where: { $0.to == me && $0.from != me }), let from = m.from { return from }
         if let m = msgs.last(where: { $0.from != me }), let from = m.from { return from }
         if let owner, owner != me { return owner }
         return nil
