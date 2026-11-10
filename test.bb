@@ -37,12 +37,15 @@
 ;; Nor may a test reach the real WezTerm (run from a WezTerm tab, the tests
 ;; inherit its pane), the real claude (serve and `who --here` run it) or the
 ;; real Claude Code registry and transcripts: all point at nothing next to
-;; the store unless a test sets its own.
+;; the store unless a test sets its own. Nor the real ~/.zshenv, which
+;; claude would be started through were the shell zsh: sh unless a test
+;; sets its own.
 (defn sandbox-env []
   {"WEZTERM_PANE" ""
    "AGENT_MAIL_WEZTERM" (str (fs/path (fs/parent *store*) "no-wezterm"))
    "AGENT_MAIL_CLAUDE" (str (fs/path (fs/parent *store*) "no-claude"))
-   "CLAUDE_CONFIG_DIR" (str (fs/path (fs/parent *store*) "no-claude-config"))})
+   "CLAUDE_CONFIG_DIR" (str (fs/path (fs/parent *store*) "no-claude-config"))
+   "SHELL" "/bin/sh"})
 ;; Nor may git reach the repo the tests run from: git exports GIT_DIR and
 ;; its kin to hooks and to `git rebase --exec`, and every git a test runs
 ;; (the store's, the test repos') would then commit into that repo.
@@ -2779,6 +2782,46 @@
             (is (str/includes? (serve) "rm \"📫 #1\" (deadbeef): stopped, holding no open thread, branch worktree-w landed"))
             (is (= [["rm" "deadbeef"]] (rms)))
             (is (= {} (:sessions (core/serve-memory (serve-state)))))))))))
+
+(deftest serve-starts-claude-through-zsh
+  (if-let [zsh (some-> (fs/which "zsh") str)]
+    (with-store
+      (with-dir [d]
+        (let [{:keys [env]} (serve-rig d)
+              zdot (str (fs/create-dirs (fs/path d "zdot")))
+              infra (str (fs/create-dirs (fs/path d "infra")))
+              ;; every directory the launcher would append is on it already
+              path (str/join ":" [(str (fs/path (fs/home) ".local" "bin")) "/opt/homebrew/bin" "/usr/local/bin"
+                                  (System/getenv "PATH")])
+              ;; in front of the fake claude: notes the environment that reached it
+              claude (script! zdot "claude"
+                              (str "printf '%s|%s\\n' \"${ZSHENV_MARK-}\" \"$PATH\" >> \"$(dirname \"$0\")/env.log\"\n"
+                                   "exec '" (get env "AGENT_MAIL_CLAUDE") "' \"$@\""))
+              env (assoc env "AGENT_MAIL_CLAUDE" claude "ZDOTDIR" zdot "PATH" path)
+              seen #(last (str/split-lines (slurp (str (fs/path zdot "env.log")))))
+              subject "Fix \"the\" $HOME `id` config"]
+          (spit (str (fs/path zdot ".zshenv")) "export ZSHENV_MARK=zshenv\nexport PATH=\"/from-zshenv/bin:$PATH\"\n")
+          (testing "another shell: claude runs directly with serve's PATH, which the launcher left as it was"
+            (let [r (am {:env (assoc env "SHELL" "/bin/sh")} "who" "--here")]
+              (is (zero? (:exit r)) (:err r))
+              (is (= (str "|" path) (seen)))))
+          (testing "zsh: claude is started through it, so .zshenv sets its environment"
+            (let [r (am {:env (assoc env "SHELL" zsh)} "who" "--here")]
+              (is (zero? (:exit r)) (:err r))
+              (is (= (str "zshenv|/from-zshenv/bin:" path) (seen)))))
+          (testing "serve starts a session through zsh, its arguments intact, and says so"
+            (out {:env user-shell} "oncall" "add" "infra" infra)
+            (out {:who "website"} "@infra" subject)
+            (let [r (am {:env (assoc env "SHELL" zsh)} "serve" "--once")
+                  [bg & more] (filter #(= "--bg" (first %)) (claude-calls d))]
+              (is (zero? (:exit r)) (:err r))
+              (is (str/includes? (:err r) (str ", started by " zsh " so .zshenv sets their environment")))
+              (is (nil? more))
+              (is (= ["--bg" "--name" "📫 infra #1"] (subvec bg 0 3)))
+              (is (str/includes? (nth bg 3) subject))
+              (is (= (str "cwd=" (fs/real-path infra)) (nth bg 4)))
+              (is (= (str "zshenv|/from-zshenv/bin:" path) (seen))))))))
+    (println "serve-starts-claude-through-zsh: skipped, no zsh")))
 
 ;; ================================================================ end to end: the postmaster
 

@@ -919,11 +919,32 @@
   (into {} (remove (fn [[k _]] (and (or (str/starts-with? k "CLAUDE_") (= k "CLAUDECODE")) (not= k "CLAUDE_CONFIG_DIR"))))
         (System/getenv)))
 
+(def ^:private zsh-found
+  (delay (let [sh (login-shell)]
+           (when (and (= "zsh" (str (fs/file-name sh))) (fs/executable? sh)) sh))))
+
+(defn claude-zsh
+  "The zsh that claude is started through: the account's shell when that is
+   zsh, else nil. zsh reads .zshenv on every start, interactive or not, so
+   claude gets the environment .zshenv defines rather than serve's own (under
+   launchd, the plist's PATH); a session's commands keep the PATH claude was
+   started with. Looked up once."
+  []
+  @zsh-found)
+
+(defn claude-command
+  "The command that runs claude `bin` with ARGS: through claude-zsh, which
+   execs claude so nothing stays in between, else claude itself."
+  [bin args]
+  (if-let [sh (claude-zsh)]
+    (into [sh "-c" "exec \"$@\"" "zsh" bin] args)
+    (into [bin] args)))
+
 (defn run-claude!
-  "Runs claude ARGS… in `dir`, {:exit :out :err}: output goes through files,
-   so a background service that inherits it cannot keep serve waiting; past
-   `timeout-ms` it is killed (exit 124). Exit 127 when there is no claude;
-   never throws."
+  "Runs claude ARGS… in `dir` (see claude-command), {:exit :out :err}:
+   output goes through files, so a background service that inherits it
+   cannot keep serve waiting; past `timeout-ms` it is killed (exit 124).
+   Exit 127 when there is no claude; never throws."
   [{:keys [dir timeout-ms] :or {timeout-ms 60000}} & args]
   (if-let [bin (claude-bin)]
     (let [out (fs/create-temp-file {:prefix "agent-mail-claude"})
@@ -931,7 +952,7 @@
       (try
         (let [proc (apply p/process {:dir (some-> dir str) :env (claude-env) :in ""
                                      :out :write :out-file (fs/file out) :err :write :err-file (fs/file err)}
-                          bin (map str args))
+                          (claude-command bin (map str args)))
               r (deref proc timeout-ms nil)]
           (when-not r (p/destroy proc))
           {:exit (if r (:exit r) 124) :out (slurp (str out))
@@ -2125,7 +2146,8 @@
     (claim-serve! interval)
     (.addShutdownHook (Runtime/getRuntime) (Thread. ^Runnable release-serve!))
     (log! (str "serve: pid " me ", a round every " interval "s, sessions through "
-               (or (claude-bin) "claude, which is not found (AGENT_MAIL_CLAUDE names it)")))
+               (or (claude-bin) "claude, which is not found (AGENT_MAIL_CLAUDE names it)")
+               (when-let [sh (claude-zsh)] (str ", started by " sh " so .zshenv sets their environment"))))
     (loop [memory (serve-memory)]
       (when-not (= me (serve-pid))
         (log! (str "serve: pid " (serve-pid) " took over; exiting"))
@@ -2313,8 +2335,11 @@ a timestamp when importing old threads; otherwise the tool stamps time.
 A message written in a Claude Code session records it (CLAUDE_CODE_SESSION_ID),
 so serve posts the thread's later messages into that session.
 serve runs AGENT_MAIL_CLAUDE, else claude on PATH, else the one the login
-shell finds, and reads Claude Code's registry (sessions/PID.json) and
-transcripts (projects/*/ID.jsonl) under CLAUDE_CONFIG_DIR, else ~/.claude.
+shell finds. When the account's shell ($SHELL) is zsh, claude is started
+through it (zsh -c 'exec claude …'), so ~/.zshenv sets the environment,
+PATH included, that a session's commands see. serve reads Claude Code's
+registry (sessions/PID.json) and transcripts (projects/*/ID.jsonl) under
+CLAUDE_CONFIG_DIR, else ~/.claude.
 A classic wait titles its WezTerm tab (AGENT_MAIL_WEZTERM, else wezterm on PATH).
 Store: $AGENT_MAIL_DIR, else ~/.local/share/agent-mail.")
 

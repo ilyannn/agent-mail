@@ -3,11 +3,17 @@
 # present, else `bb` on PATH), from the caller's directory so the caller's repo
 # is detected. ~/.local/bin/agent-mail is an absolute symlink to this file.
 # GUI apps start with a minimal PATH, so the usual install locations of mise
-# and bb are tried as well.
+# and bb are tried as well: appended when missing, never twice, since serve's
+# Claude Code sessions inherit this PATH.
 src="$0"
 while [ -L "$src" ]; do src="$(readlink "$src")"; done
 repo="$(cd "$(dirname "$src")/.." && pwd)"
-PATH="$PATH:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin"
+for dir in "$HOME/.local/bin" /opt/homebrew/bin /usr/local/bin; do
+  case ":$PATH:" in
+    *":$dir:"*) ;;
+    *) PATH="${PATH:+$PATH:}$dir" ;;
+  esac
+done
 if command -v mise >/dev/null 2>&1; then
   bb="$(mise -C "$repo" which bb 2>/dev/null)"
 fi

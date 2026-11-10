@@ -263,6 +263,13 @@ shows why. A git repo nested inside a trusted folder needs its own `claude`
 run: trust reaches plain folders below a trusted one, not repos.
 `agent-mail agents` marks such folders beforehand.
 
+**Environment.** A session's commands see the PATH its `claude` was started
+with. When your shell is zsh, serve starts `claude` through it
+(`zsh -c 'exec claude …'`), so `~/.zshenv` defines that environment, as it
+does for any zsh: put there what agents need on PATH. Under launchd that
+comes on top of the plist's PATH; with another shell, sessions get serve's
+own environment.
+
 **On duty.** A script or Codex can wait for mail with
 `agent-mail wait --timeout S`, which prints the ids of the threads waiting on
 the repo and exits. While it waits, serve leaves the repo's threads to it.
