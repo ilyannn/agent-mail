@@ -83,6 +83,25 @@ public enum AttachmentScheme {
     }
 }
 
+/// The app's own URL scheme, for other programs: `agent-mail:///thread/<id>`
+/// shows a thread. `agent-mail open` sends it, so a click on the CLI's
+/// notification lands here. A URL only ever shows a thread, never acts on one.
+public enum AppURL {
+    public static let scheme = "agent-mail"
+
+    /// The thread id `url` names, or nil: another scheme, a host, another
+    /// verb, not exactly one id, `.` or `..`.
+    public static func threadID(in url: URL) -> String? {
+        guard url.scheme?.lowercased() == scheme,
+              let c = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              (c.host ?? "").isEmpty else { return nil }
+        let parts = c.percentEncodedPath.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 3, parts[0].isEmpty, parts[1] == "thread",
+              let id = parts[2].removingPercentEncoding, AttachmentScheme.isPlainComponent(id) else { return nil }
+        return id
+    }
+}
+
 /// What a navigation in the thread view does.
 public enum ThreadLink: Equatable, Sendable {
     /// The document itself (`about:blank` from loadHTMLString).

@@ -437,6 +437,17 @@ import Testing
         #expect(AttachmentScheme.file(named: "link.png", in: dir) == nil)
     }
 
+    @Test func appURLsNameAThread() {
+        func id(_ s: String) -> String? { URL(string: s).flatMap(AppURL.threadID(in:)) }
+        #expect(id("agent-mail:///thread/2026-11-10-heya") == "2026-11-10-heya")
+        #expect(id("AGENT-MAIL:///thread/t1") == "t1")
+        for s in ["agent-mail:///thread/", "agent-mail:///thread/..", "agent-mail:///thread/t1/x",
+                  "agent-mail:///thread/a%2Fb", "agent-mail://thread/t1", "agent-mail:///reply/t1",
+                  "agent-mail:thread/t1", "agent-mail-action:///thread/t1"] {
+            #expect(id(s) == nil, "\(s)")
+        }
+    }
+
     @Test func kindsAndTypes() {
         #expect(AttachmentScheme.isImage("a.PNG") && AttachmentScheme.isImage("b.heic") && AttachmentScheme.isImage("c.svg"))
         #expect(!AttachmentScheme.isImage("notes.md") && !AttachmentScheme.isImage("png"))

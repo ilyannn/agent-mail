@@ -11,6 +11,19 @@
 	     Reply needs. -->
 	<key>NSUserNotificationAlertStyle</key>
 	<string>alert</string>
+	<!-- agent-mail:///thread/<id> shows a thread (AppURL): `agent-mail open`,
+	     and so a click on the CLI's notification, sends it. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>Agent Mail thread</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>agent-mail</string>
+			</array>
+		</dict>
+	</array>
 	<key>NSSupportsAutomaticTermination</key>
 	<false/>
 	<key>NSSupportsSuddenTermination</key>

@@ -54,7 +54,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MailActions, NSMenuIte
         Task { await notifications.refreshSettings() }
 
         let launchedByNotification = notification.userInfo?[NSApplication.launchUserNotificationUserInfoKey] != nil
-        if settings.mainWindowWasOpen || !settings.firstRunDone, !launchedByNotification {
+        launched = true
+        if let id = pendingThread {
+            pendingThread = nil
+            openThread(id)
+        } else if settings.mainWindowWasOpen || !settings.firstRunDone, !launchedByNotification {
             showMainWindow(nil)
         }
         dock.update()
@@ -62,6 +66,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MailActions, NSMenuIte
             settings.firstRunDone = true
             Task { await FirstRun.offerNotifications(over: mainWindow?.window, notifications: notifications) }
         }
+    }
+
+    private var launched = false
+    /// A thread a URL asked for while the app was still launching.
+    private var pendingThread: String?
+
+    /// `agent-mail:///thread/<id>` (AppURL), from `agent-mail open`: shows
+    /// the thread. A URL that launched the app arrives before launching
+    /// finishes, so the thread waits for it.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard !Self.isHostingTests, let id = urls.compactMap(AppURL.threadID(in:)).last else { return }
+        if launched { openThread(id) } else { pendingThread = id }
     }
 
     /// `just install` replaces a running copy with SIGTERM (no Apple Events,
