@@ -1745,12 +1745,27 @@
             (out {:who "a"} "reply" id "--attach" a "again")
             (is (= ["files/a.txt"] (:attachments (last (:msgs (thread-json id))))))
             (is (= 3 (count (files-of id)))))
+          (testing "binary files are told apart by their bytes, not as text"
+            ;; Both are invalid UTF-8, so read as text they are the same.
+            (let [img (str (fs/path d "img.bin")) img2 (str (fs/path other "img.bin"))]
+              (fs/write-bytes img (byte-array [-1 0]))
+              (fs/write-bytes img2 (byte-array [-2 0]))
+              (out {:who "a"} "reply" id "--attach" img "one")
+              (out {:who "b"} "reply" id "--attach" img2 "two")
+              (let [att (first (:attachments (last (:msgs (thread-json id)))))]
+                (is (re-matches #"files/[0-9a-f]{6}-img\.bin" att))
+                (is (= [-2 0] (vec (fs/read-all-bytes (fs/path *store* "threads" id att))))))
+              (is (= [-1 0] (vec (fs/read-all-bytes (fs/path *store* "threads" id "files" "img.bin"))))
+                  "the first file is untouched")
+              (out {:who "a"} "reply" id "--attach" img "same again")
+              (is (= ["files/img.bin"] (:attachments (last (:msgs (thread-json id))))))
+              (is (= 5 (count (files-of id))))))
           (testing "a reply with a missing attachment adds nothing"
             (let [before (thread-json id)
                   r (am {:who "b"} "reply" id "--attach" a "--attach" (str (fs/path d "gone.txt")) "half")]
               (is (= 1 (:exit r)))
               (is (= (:count before) (:count (thread-json id))))
-              (is (= 3 (count (files-of id))))
+              (is (= 5 (count (files-of id))))
               (is (str/blank? (store-git "status" "--porcelain")) "the store stays clean"))))))))
 
 (deftest forward-a-thread

@@ -14,7 +14,9 @@
   (:import (java.net StandardProtocolFamily UnixDomainSocketAddress)
            (java.nio ByteBuffer)
            (java.nio.channels SocketChannel)
-           (java.nio.charset StandardCharsets)))
+           (java.nio.charset StandardCharsets)
+           (java.nio.file Files)
+           (java.security MessageDigest)))
 
 (def repo-dir (fs/parent (fs/absolutize *file*)))
 (cp/add-classpath (str (fs/path repo-dir "src")))
@@ -226,19 +228,27 @@
   (doseq [p paths :when (not (fs/regular-file? p))]
     (fail "attachment not found:" (str p))))
 
+(defn- content-prefix
+  "Six hex digits of the file's SHA-256, which name it apart from another
+   file of the same name."
+  [path]
+  (let [digest (.digest (MessageDigest/getInstance "SHA-256") (fs/read-all-bytes path))]
+    (apply str (map #(format "%02x" (bit-and % 0xff)) (take 3 digest)))))
+
 (defn attach!
   "Copies the files into the thread; a name already taken by different content
-   gets a short content-hash prefix. Returns the `files/<name>` references."
+   gets a short content-hash prefix. Contents are compared as bytes, and only
+   when the name is taken, so a large or binary file is never read as text.
+   Returns the `files/<name>` references."
   [id paths]
   (let [dir (fs/path (thread-dir id) "files")]
     (fs/create-dirs dir)
     (vec (for [p paths]
            (let [p (fs/path p)
                  nm (str (fs/file-name p))
-                 content (slurp (str p))
-                 nm (if (and (fs/exists? (fs/path dir nm))
-                             (not= content (slurp (str (fs/path dir nm)))))
-                      (str (format "%06x" (bit-and (hash content) 0xffffff)) "-" nm)
+                 taken (fs/path dir nm)
+                 nm (if (and (fs/exists? taken) (not= -1 (Files/mismatch p taken)))
+                      (str (content-prefix p) "-" nm)
                       nm)]
              (fs/copy p (fs/path dir nm) {:replace-existing true})
              (str "files/" nm))))))
