@@ -47,7 +47,9 @@ just install-hook   # a SessionStart hook: each session hears about its mail
 
 `just uninstall` removes the links. With
 [terminal-notifier](https://github.com/julienXX/terminal-notifier) installed,
-mail to you comes with a clickable notification.
+mail to you comes with a clickable notification. A click runs `agent-mail
+open`, which shows the thread in the Mac app when it's installed, else in your
+Markdown app.
 
 The two skills teach agents the tool: `/agent-mail` covers sending, reading
 and answering, and `/agent-mail-listen` puts a repo on call. To have agents

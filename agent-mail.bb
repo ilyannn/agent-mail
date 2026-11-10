@@ -1272,9 +1272,24 @@
                    (fail "no editor: set AGENT_MAIL_EDITOR or EDITOR"))
                #"\s+")))
 
+(def app-bundle-id "The Mac app's bundle id (a Debug build has its own)." "dev.agent-mail.AgentMail")
+
+(defn show-in-app!
+  "Hands thread `id` to the Mac app as agent-mail:///thread/<id> through
+   `open -b`, which launches the app when it isn't running. False when this
+   isn't macOS or the app isn't installed."
+  [id]
+  (boolean
+   (and macos? (fs/which "open")
+        (zero? (:exit (p/shell {:continue true :out :string :err :string}
+                               "open" "-b" app-bundle-id (str "agent-mail:///thread/" id)))))))
+
 (defn cmd-open
-  "Renders the thread, unquoted, to <store>/view/<id>.md and opens it in the
-   default app for Markdown (AGENT_MAIL_VIEWER overrides). Does not wait."
+  "Renders the thread, unquoted, to <store>/view/<id>.md. For `user`, with
+   AGENT_MAIL_VIEWER unset, the Mac app shows the thread when it is
+   installed, and marks it seen as it reads it. Otherwise the file opens in
+   AGENT_MAIL_VIEWER, else the default app for Markdown, and the thread is
+   marked seen. Does not wait."
   [opts args]
   (ensure-store!)
   (let [me (caller opts)
@@ -1282,13 +1297,15 @@
         th (fold id)
         dir (fs/path store "view")
         f (str (fs/path dir (str id ".md")))
-        viewer (or (System/getenv "AGENT_MAIL_VIEWER") (when (and macos? (fs/which "open")) "open"))]
+        env-viewer (let [v (System/getenv "AGENT_MAIL_VIEWER")] (when-not (str/blank? v) v))
+        viewer (or env-viewer (when (and macos? (fs/which "open")) "open"))]
     (fs/create-dirs dir)
     (spit f (render-thread th (fresh-or-last th me)))
-    (mark-seen! me th)
-    (if viewer
-      (p/shell {:continue true} viewer f)
-      (binding [*out* *err*] (println "agent-mail: no viewer (set AGENT_MAIL_VIEWER); rendered to" f)))
+    (when-not (and (= "user" me) (not env-viewer) (show-in-app! id))
+      (mark-seen! me th)
+      (if viewer
+        (p/shell {:continue true} viewer f)
+        (binding [*out* *err*] (println "agent-mail: no viewer (set AGENT_MAIL_VIEWER); rendered to" f))))
     (when (:json opts) (println f))))
 
 (defn cmd-compose
@@ -2207,7 +2224,8 @@
                                               haven't read (read it and it drops off)
   agent-mail read ID [--json]                 the whole thread; ID is the number from `list`
                                               (7 or #7), the full id, or a unique fragment
-  agent-mail open ID                          open what's new to you in your Markdown app
+  agent-mail open ID                          show the thread in the Mac app when it's installed,
+                                              else what's new to you in your Markdown app
   agent-mail wait [--session NAME] [--timeout S] [--interval S] [--once]
                                               waits for what `list` shows, prints their ids
                                               and exits; exit 3 on timeout. For Codex and
@@ -2314,7 +2332,9 @@
   agent-mail hook                             SessionStart hook output
   agent-mail whoami                           who the caller is
 
-Viewer for open: AGENT_MAIL_VIEWER, else the macOS default app for .md.
+Viewer for open: AGENT_MAIL_VIEWER; else, for `user`, the Mac app when it's
+installed; else the macOS default app for .md. AGENT_MAIL_VIEWER=open keeps
+your Markdown app with the Mac app installed.
 Editor for reply: AGENT_MAIL_EDITOR, else $VISUAL, else $EDITOR, else `open -W`
 (your Markdown app, until you quit it). E.g. AGENT_MAIL_EDITOR='zed --wait'.
 A notification click runs `agent-mail open ID` (needs terminal-notifier).

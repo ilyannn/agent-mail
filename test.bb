@@ -3563,6 +3563,42 @@
           (am {:who "user" :env {"AGENT_MAIL_VIEWER" viewer}} "open" id)
           (is (str/includes? (slurp seen) "Then also this?") "nothing new: the last message again"))))))
 
+(deftest open-shows-the-thread-in-the-app
+  ;; A fake `open` on PATH logs its arguments; `open -b` exits with the code
+  ;; in the file `app`, 0 as if the Mac app were installed.
+  (when (str/includes? (System/getProperty "os.name") "Mac")
+    (with-store
+      (with-dir [d]
+        (let [bin (str (fs/path d "bin"))
+              log (str (fs/path d "open.log"))
+              app (str (fs/path d "app"))
+              _ (fs/create-dirs bin)
+              _ (script! bin "open" (str "echo \"$*\" >> " log "\n[ \"$1\" = -b ] && exit $(cat " app ")\nexit 0"))
+              env {"PATH" (str bin ":" (System/getenv "PATH"))}
+              opened #(if (fs/exists? log) (str/split-lines (slurp log)) [])
+              id (out {:who "infra"} "send" "--to" "user" "--subject" "Need your OK" "Details here.")
+              file (str (fs/path *store* "view" (str id ".md")))]
+          (testing "installed: the app shows it and marks it seen as it reads it"
+            (spit app "0")
+            (is (zero? (:exit (am {:who "user" :env env} "open" id))))
+            (is (= [(str "-b dev.agent-mail.AgentMail agent-mail:///thread/" id)] (opened)))
+            (is (str/includes? (out {:who "user"} "list") "new") "not marked seen by open"))
+          (testing "not installed: the Markdown app, marked seen"
+            (fs/delete log)
+            (spit app "1")
+            (is (zero? (:exit (am {:who "user" :env env} "open" id))))
+            (is (= [(str "-b dev.agent-mail.AgentMail agent-mail:///thread/" id) file] (opened)))
+            (is (not (str/includes? (out {:who "user"} "list") "new"))))
+          (testing "AGENT_MAIL_VIEWER wins over the app"
+            (fs/delete log)
+            (spit app "0")
+            (am {:who "user" :env (assoc env "AGENT_MAIL_VIEWER" "open")} "open" id)
+            (is (= [file] (opened))))
+          (testing "the app shows threads as user only"
+            (fs/delete log)
+            (am {:who "infra" :env env} "open" id)
+            (is (= [file] (opened)))))))))
+
 (deftest picker
   (with-store
     (testing "one candidate is picked without asking"
