@@ -143,15 +143,27 @@ asks for one: write it with `agent-mail agents describe < about.md`, saying
 what this folder owns and what to ask it for.
 
 In a git repo such a session works in a worktree of its own, and Claude
-Code refuses git commands from there aimed at the main checkout. Don't try
-to update the main checkout: once your turn ends, serve fast-forwards it to
-what you pushed (`@{u}`, never fetched), or, in a repo without a remote, to
-your worktree branch once the thread is closed; an answer alone, such as a
-question back, leaves your commits where they are. It leaves a main
-checkout with uncommitted changes or someone working in it, and `agent-mail
-oncall` says why. Once the thread is closed and the session stopped, serve
-removes the session and its worktree with `claude rm`, unless your branch
-has commits that never landed: then `agent-mail who` lists it as unlanded.
+Code refuses git commands from there aimed at the main checkout. You
+needn't update the main checkout: once your turn ends, serve fast-forwards
+it to what you pushed (`@{u}`, never fetched), or, in a repo without a
+remote, to your worktree branch once the thread is closed; an answer alone,
+such as a question back, leaves your commits where they are. It leaves a
+main checkout with uncommitted changes or someone working in it, and
+`agent-mail oncall` says why. Once the thread is closed and the session
+stopped, serve removes the session and its worktree with `claude rm`,
+unless your branch has commits that never landed: then `agent-mail who`
+lists it as unlanded.
+
+Serve does nothing but that fast-forward: no build, restart or other task.
+So when your work has to be live before you're done, such as a build or a
+service restart that runs from the main checkout, update it yourself:
+commit and push, leave your worktree with ExitWorktree (keep), which takes
+you to the main checkout, fast-forward there (`git pull --ff-only`, or `git
+merge --ff-only <your branch>` without a remote), then build. This is the
+case ExitWorktree is for here, though its own description reserves it for
+when the user asks. When the main checkout has uncommitted changes, leave
+it and say so in the thread; when another session works there, tell it by
+SendMessage what changed and let it update.
 
 Each message from serve ends by naming the other sessions working in the same
 folder, by the names SendMessage takes, with the thread number and subject of
