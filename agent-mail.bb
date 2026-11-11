@@ -1221,6 +1221,12 @@
          (commit! (str (if close? "✅ " "↩️ ") me " → " to ": " (:subject th)))
          (mark-seen! me (fold id))
          (println id)
+         ;; on stderr, so what scripts read from stdout (the id) stays as it was
+         (when (and (not close?) (= "done" (:status th)))
+           (binding [*out* *err*]
+             (println (if (= "user" me)
+                        (str "agent-mail: #" (:number th) " was closed; your message reopened it")
+                        (str "agent-mail: #" (:number th) " is closed and stays closed: only the user's message reopens a thread. Start a new thread or forward it to take it further")))))
          (when-not close? (delivered! me to id (:subject th))))))
     (when-not close? (auto-add! w false))))
 
@@ -2223,6 +2229,8 @@
   agent-mail reply ID [--edit]                no text on a terminal: what's new opens quoted in
                                               your editor; what you write (inline or at the end)
                                               is sent when you close it
+                                              A reply to a closed thread says on stderr what became of
+                                              it: the user's reopens it, an agent's leaves it closed.
   agent-mail close ID [text…] [< note.md]     marks the thread done; the note is optional and
                                               nothing is waited for on stdin
   agent-mail forward ID --to NAME [--msg N] [--subject S] [--attach FILE]… [text…] [< note.md]

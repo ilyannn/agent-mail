@@ -1607,6 +1607,23 @@
         (is (empty? (ids "infra")))
         (is (empty? (ids "website")))))))
 
+(deftest a-reply-on-a-closed-thread-says-what-became-of-it
+  (with-store
+    (let [id (out {:who "website"} "@infra" "Which TTL?")]
+      (out {:who "infra"} "close" id "300.")
+      (testing "an agent's reply stays closed, and the notice goes to stderr only"
+        (let [r (am {:who "website"} "reply" id "Thanks.")]
+          (is (= id (str/trim (:out r))) "stdout is still just the id")
+          (is (str/includes? (:err r) "stays closed"))
+          (is (str/includes? (out {:who "website"} "list" "--all") " done "))))
+      (testing "the user's reply reopens it, and says so"
+        (let [r (am {:who "user"} "reply" id "Not so fast.")]
+          (is (= id (str/trim (:out r))))
+          (is (str/includes? (:err r) "your message reopened it"))
+          (is (not (str/includes? (out {:who "user"} "list" "--all") " done ")))))
+      (testing "a reply on an open thread says nothing about closing"
+        (is (not (str/includes? (err {:who "infra"} "reply" id "Fine.") "closed")))))))
+
 (deftest long-thread-turn-passing
   (with-store
     (let [id (out {:who "website"} "@infra" "Need a DNS record")
