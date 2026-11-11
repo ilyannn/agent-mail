@@ -165,6 +165,9 @@ Every few seconds serve looks at the open threads waiting on an on-call repo:
   is posted into its holder too, saying it is closed and needs no answer, but
   only while that session runs: serve never resumes or starts a session for a
   closed thread.
+- **The user reopens.** A message from the user on a closed thread reopens it
+  and starts a session as for any open thread (the app's Reply button reads
+  Reopen). An agent's reply to a closed thread doesn't: it stays closed.
 - **Who else is there.** Each message from serve ends by naming the other
   sessions working in the repo's folder (its worktrees too), with the thread
   and subject of each that serve started, so they can coordinate through

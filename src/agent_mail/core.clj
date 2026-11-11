@@ -112,7 +112,9 @@
 
 (defn thread-state
   "A thread's state, derived from its messages (in file order): owner is the
-   `to` of the last message, status the last `status` set (default open).
+   `to` of the last message, status the last `status` set (default open); a
+   message from the user without one reopens a closed thread, any other
+   sender's reply does not.
    The messages are kept as read, :session (the Claude Code session that
    wrote one) included."
   [meta id msgs]
@@ -120,7 +122,7 @@
     (assoc meta :id id :msgs msgs :count (count msgs)
            :number (some-> (:number meta) str parse-long)
            :owner (:to last-m) :last-from (:from last-m) :updated (:date last-m)
-           :status (or (some :status (rseq msgs)) "open"))))
+           :status (or (some #(or (:status %) (when (= "user" (:from %)) "open")) (rseq msgs)) "open"))))
 
 (defn unread
   "Messages that `who` has not seen (`mark` is the last file read) and did not write."

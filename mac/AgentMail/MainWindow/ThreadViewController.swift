@@ -409,7 +409,8 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
         let hasThread = id != nil
         split.isHidden = !hasThread
         placeholder.isHidden = hasThread
-        configurePane(for: paneMode, forwardDraft: false)
+        configurePane(for: paneMode, forwardDraft: false,
+                      closed: id.map { !store.isOpen($0) } ?? false)
         if !hasThread {
             placeholder.stringValue = "No Thread Selected"
             rendered = nil
@@ -539,7 +540,7 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
     }
 
     /// Titles, symbols and which controls show, for each mode.
-    private func configurePane(for mode: PaneMode, forwardDraft: Bool) {
+    private func configurePane(for mode: PaneMode, forwardDraft: Bool, closed: Bool = false) {
         recipientLabel.isHidden = mode != .reply
         toField.isHidden = mode == .reply
         cancelButton.isHidden = mode != .forward
@@ -548,7 +549,12 @@ final class ThreadViewController: NSViewController, WKNavigationDelegate, NSSpli
         case .reply:
             setButton(closeButton, "Close Thread", "checkmark.circle",
                       "Close the thread (⌃⌘A). Text in the reply box becomes the closing note.")
-            setButton(sendButton, "Reply", "paperplane.fill", "Send the reply to \(replyRecipient ?? "the sender") (⌘↩ or ⇧⌘D)")
+            if closed {
+                setButton(sendButton, "Reopen", "arrow.uturn.backward",
+                          "Reopen the thread with your message, to \(replyRecipient ?? "the sender") (⌘↩ or ⇧⌘D)")
+            } else {
+                setButton(sendButton, "Reply", "paperplane.fill", "Send the reply to \(replyRecipient ?? "the sender") (⌘↩ or ⇧⌘D)")
+            }
             replyView.setAccessibilityLabel("Reply")
         case .forward:
             setButton(sendButton, "Forward", "arrowshape.turn.up.right.fill",

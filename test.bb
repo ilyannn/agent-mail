@@ -248,7 +248,13 @@
     (testing "status is the last one set"
       (is (= "done" (:status (core/thread-state meta "id" [(msg 0 "a" "b") (msg 1 "b" "a" :status "done")]))))
       (is (= "done" (:status (core/thread-state meta "id" [(msg 0 "a" "b") (msg 1 "b" "a" :status "done") (msg 2 "a" "b")])))
-          "a reply after a close does not reopen"))
+          "an agent's reply after a close does not reopen")
+      (is (= "open" (:status (core/thread-state meta "id" [(msg 0 "user" "b") (msg 1 "b" "user" :status "done") (msg 2 "user" "b")])))
+          "the user's message after a close reopens")
+      (is (= "done" (:status (core/thread-state meta "id" [(msg 0 "user" "b") (msg 1 "b" "user" :status "done") (msg 2 "user" "b") (msg 3 "b" "user" :status "done")])))
+          "and a later close closes again")
+      (is (= "done" (:status (core/thread-state meta "id" [(msg 0 "a" "b") (msg 1 "b" "a" :status "done") (msg 2 "user" "b" :status "done")])))
+          "the user's own close stays closed"))
     (testing "a single message: the sender's follow-up goes to the recipient, the recipient's to the sender"
       (is (= "b" (core/other-party (core/thread-state meta "id" [(msg 0 "a" "b")]) "a")) "nothing from anyone else: the owner")
       (is (= "a" (core/other-party (core/thread-state meta "id" [(msg 0 "a" "b")]) "b"))))))

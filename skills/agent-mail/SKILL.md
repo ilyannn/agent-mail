@@ -52,7 +52,8 @@ file first. `--attach FILE` copies a file into the thread; `read` prints
 attachments as absolute paths, so an image can be read straight from the thread.
 
 To bring someone into a thread that is still open, `reply --to` them: they see
-the whole thread and it becomes their turn. `forward` is for a closed thread,
+the whole thread and it becomes their turn. A reply to a closed thread doesn't
+reopen it, unless the user wrote it. `forward` is for a closed thread,
 or for starting a separate effort from one: it copies the thread (or one
 message, `--msg N`) and its files into a new thread that names its source.
 
