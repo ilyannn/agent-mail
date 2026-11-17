@@ -24,7 +24,9 @@ this session afterwards.
 2. **If serve isn't running** (the output says `serve: not running`), tell
    the user: nothing on call is delivered until it runs. `just install-serve`
    in the agent-mail repo keeps it running under launchd. If the output says
-   Claude Code hasn't trusted the folder, tell the user too.
+   Claude Code hasn't trusted the folder, or that it is a git repo with no
+   commits (serve starts no sessions there until its first commit), tell
+   the user too.
 3. **Describe the repo** if `agent-mail agents` shows no description for it
    (`(no description)`, or a paragraph borrowed from a file, marked like
    `(from CLAUDE.md)` or `(from README.md)`): write what

@@ -599,6 +599,28 @@
     (str "Claude Code hasn't trusted " (:dir e) " yet, so serve can't start sessions there:"
          " run `claude` in it once and accept the question")))
 
+(declare git-at)
+
+(defn no-commits?
+  "Whether folder `dir` is in a git work tree whose HEAD has no commit yet,
+   as after `git init`: a background session can't make its worktree
+   there. false outside git, for a folder that doesn't exist, or when git
+   can't be run; never throws."
+  [dir]
+  (boolean (and dir (fs/directory? dir)
+                (let [r (git-at dir 10000 "rev-parse" "--is-inside-work-tree")]
+                  (and (zero? (:exit r)) (= "true" (str/trim (:out r)))))
+                ;; 1: HEAD names no commit; anything else is git failing
+                (= 1 (:exit (git-at dir 10000 "rev-parse" "--verify" "--quiet" "HEAD"))))))
+
+(defn no-commits-line
+  "Why serve won't start sessions for on-call entry `e`, when its folder is
+   a git repo with no commits (no-commits?); nil otherwise."
+  [e]
+  (when (and (:oncall e) (no-commits? (:dir e)))
+    (str (:dir e) " is a git repo with no commits, so serve won't start sessions there"
+         " (a background session can't make its worktree): make a first commit")))
+
 (defn borrowed-summary
   "[paragraph file] for folder `dir` without a description (see
    core/borrowed-summary): the first paragraph of its CLAUDE.md, or of the
@@ -1618,9 +1640,11 @@
 
 (defn oncall-said
   "What `oncall add` prints after the name and folder: why serve can't
-   start sessions there, and whether serve runs."
+   start sessions there (trust-line, no-commits-line), and whether serve
+   runs."
   [e]
   (when-let [l (trust-line e (trust-of))] (println l))
+  (when-let [l (no-commits-line e)] (println l))
   (when-not (:alive (serve-info)) (println (serve-line))))
 
 (defn cmd-oncall
@@ -1776,7 +1800,8 @@
                         nm)]
              (when-let [s @said] (note s))
              (println (str nm " is now at " folder))
-             (when-let [l (trust-line e (trust-of))] (println l)))
+             (when-let [l (trust-line e (trust-of))] (println l))
+             (when-let [l (no-commits-line e)] (println l)))
     "remove" (let [nm (or (first args) (fail "agents remove takes NAME"))
                    _ (own-or-user! (caller opts) ["removes" "remove"] nm)]
                (directory! (fn [d]
@@ -1955,9 +1980,11 @@
 (defn carry-out!
   "Carries out one of core/serve-actions, logs it, and returns serve's
    memory after it. A start or resume that fails backs its agent off with
-   what claude said (an untrusted folder, a missing claude); a post that
-   fails leaves the thread to go out again next round, past that session;
-   a stop that fails is tried again next round. A landing that can't be
+   what claude said (an untrusted folder, a missing claude), and so does a
+   start in a git repo with no commits, where claude isn't run (see
+   no-commits?); a post that fails leaves the thread to go out again next
+   round, past that session; a stop that fails is tried again next round.
+   A landing that can't be
    done is logged when its reason changes, and remembered for `oncall`.
    The postmaster's actions (core/postmaster-actions) too: a bounce or a
    notice's update is written only while the thread is as decided (else
@@ -1984,16 +2011,22 @@
                       (remember [:resumed t sid info]))
                   (backed-off (core/back-off agent (agent-m agent) now (core/claude-failure "`claude --bg --resume`" r)))))
       :start (let [[agent t text {:keys [dir number name] :as info}] args
-                   r (if (and dir (fs/directory? dir)) (run-claude! {:dir dir} "--bg" "--name" name text) (gone-dir dir))
-                   id (when (zero? (:exit r)) (core/backgrounded-id (:out r)))]
+                   here? (and dir (fs/directory? dir))
+                   ;; not run: its session couldn't make its worktree
+                   unborn? (and here? (no-commits? dir))
+                   r (cond unborn? nil
+                           here? (run-claude! {:dir dir} "--bg" "--name" name text)
+                           :else (gone-dir dir))
+                   id (when (and r (zero? (:exit r))) (core/backgrounded-id (:out r)))]
                (if id
                  (let [sid (some #(when (= id (:id %)) (:session-id %)) (:sessions (claude-agents false)))]
                    (log! (str "start " (named name id) " for #" number " in " dir))
                    (remember [:started agent t id sid info]))
                  (backed-off (core/back-off agent (agent-m agent) now
-                                            (if (zero? (:exit r))
-                                              (str "`claude --bg` printed no session id: " (core/first-line (str (:out r))))
-                                              (core/claude-failure "`claude --bg`" r))))))
+                                            (cond unborn? (core/no-commits-reason dir)
+                                                  (zero? (:exit r))
+                                                  (str "`claude --bg` printed no session id: " (core/first-line (str (:out r))))
+                                                  :else (core/claude-failure "`claude --bg`" r))))))
       :stop (let [[sid {:keys [id name idle-since]}] args
                   r (run-claude! {} "stop" (or id sid))]
               (if (zero? (:exit r))
@@ -2078,9 +2111,10 @@
   "The postmaster's part of a round (core/postmaster-actions), after
    serve's own: carried out on `memory`, serve's, which it returns. What
    is known of the folders of the on-call agents serve backs off from
-   (whether each exists and Claude Code trusts it) tells a notice the fix.
-   An action that fails is logged and left to a later round; never
-   throws, so serve's own actions this round are never forgotten."
+   (whether each exists, Claude Code trusts it, and it has commits, see
+   no-commits?) tells a notice the fix. An action that fails is logged
+   and left to a later round; never throws, so serve's own actions this
+   round are never forgotten."
   [memory {:keys [now threads d oncall on-duty]}]
   (try
     (let [backed (filter #(pos? (or (get-in memory [:agents % :failures]) 0)) (keys oncall))
@@ -2089,7 +2123,8 @@
                                :let [dir (get-in d [a :dir])]
                                :when dir
                                :let [exists (fs/directory? dir)]]
-                           [a {:exists exists :trusted (when exists (trust dir))}]))
+                           [a {:exists exists :trusted (when exists (trust dir))
+                               :commits (when exists (not (no-commits? dir)))}]))
           actions (core/postmaster-actions {:now now :threads threads :names (keys d) :dirs (update-vals d :dir)
                                             :oncall oncall :on-duty on-duty :memory memory :facts facts})]
       (reduce (fn [m a]
@@ -2302,7 +2337,8 @@
                                               prompt cache is warm; else a new background
                                               session, `claude --bg --name \"📫 REPO #N\"` in the
                                               repo, one per thread (the folder must be trusted:
-                                              run `claude` there once), at most 3 a round. A
+                                              run `claude` there once; a git repo needs a
+                                              first commit), at most 3 a round. A
                                               thread closed with news for the repo is posted
                                               only into a running holder, and says it is
                                               closed. Sessions it started are

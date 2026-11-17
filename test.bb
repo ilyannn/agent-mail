@@ -1302,7 +1302,20 @@
     (is (= :gone (core/backoff-fix "`claude --bg` failed (exit 1): its directory is gone (/x)" {})))
     (is (= :log (core/backoff-fix "session \"📫 infra #1\" did not show up in `claude agents`" {:exists true :trusted true})))
     (is (= "Claude Code hasn't trusted /x/infra yet: run `claude` there once and accept the question." (core/fix-text "infra" "/x/infra" :trust)))
-    (is (= "/x/infra is gone: if infra's folder moved, `agent-mail agents move infra DIR` says where." (core/fix-text "infra" "/x/infra" :gone)))))
+    (is (= "/x/infra is gone: if infra's folder moved, `agent-mail agents move infra DIR` says where." (core/fix-text "infra" "/x/infra" :gone))))
+  (testing "a git repo with no commits: serve gives its own reason, and the fix is a first commit"
+    (let [why (core/no-commits-reason "/x/infra")]
+      (is (= "`claude --bg` not run: /x/infra is a git repo with no commits, where a background session can't make its worktree" why))
+      (is (= :commit (core/backoff-fix "x" {:exists true :trusted true :commits false})))
+      (is (= :commit (core/backoff-fix why {})))
+      (is (= :commit (core/backoff-fix why {:exists true :trusted false :commits false}))
+          "untrusted too: the fix for the reason serve gives first; trust is next once there is a commit")
+      (is (= :trust (core/backoff-fix "`claude --bg` failed (exit 1): Workspace not trusted." {:exists true :trusted false :commits true})))
+      (is (= :gone (core/backoff-fix why {:exists false})) "a folder that is gone comes first")
+      (is (= :log (core/backoff-fix "`claude --bg` failed (exit 1): boom" {:exists true :trusted true :commits true}))))
+    (is (= (str "/x/infra is a git repo with no commits, so a background session can't make its worktree there:"
+                " make a first commit, e.g. `git -C /x/infra commit --allow-empty -m \"🎉 init\"`.")
+           (core/fix-text "infra" "/x/infra" :commit)))))
 
 ;; ================================================================ unit: drafts
 
@@ -3032,6 +3045,52 @@
               (is (= "done" (:status n)))
               (is (= "Delivered now: #1 no longer waits on infra." (:body (last (:msgs (thread-json (:id n))))))))))))))
 
+(deftest serve-starts-no-session-in-a-repo-with-no-commits
+  (with-store
+    (with-dir [d]
+      (let [{:keys [env serve notices]} (postmaster-rig d)
+            infra (str (fs/create-dirs (fs/path d "infra")))
+            real (str (fs/real-path infra))
+            again! #(spit (str (serve-file "state.edn")) (pr-str (assoc-in (serve-state) [:agents "infra" :until] 0)))
+            starts #(filter (fn [c] (= "--bg" (first c))) (claude-calls d))
+            oncall-text #(:text (first (filter (comp #{"infra"} :repo) (json/parse-string (out {:env env} "oncall" "--json") true))))
+            reason (str "`claude --bg` not run: " real " is a git repo with no commits, where a background session can't make its worktree")]
+        (git-in infra "init" "-q")
+        (out {:env user-shell} "oncall" "add" "infra" infra)
+        (let [id (out {:who "website"} "@infra" "Rotate the key")]
+          (testing "no session started: claude isn't run, and serve backs off with why"
+            (let [log (serve)]
+              (is (re-find #"back off infra until \d\d:\d\d: " log))
+              (is (str/includes? log reason)))
+            (is (empty? (starts)))
+            (is (= [1 reason] ((juxt :failures :reason) (get-in (serve-state) [:agents "infra"]))))
+            (is (re-matches #"backing off until \d\d:\d\d: .*" (oncall-text)))
+            (is (str/ends-with? (oncall-text) reason))
+            (is (= [id] (:undelivered (status-json {:env env})))))
+          (testing "the third failure: a notice with the reason and the fix, a first commit"
+            (again!)
+            (serve)
+            (again!)
+            (let [log (serve)
+                  [n :as ns] (notices)
+                  body (:body (first (:msgs (thread-json (:id n)))))]
+              (is (= 1 (count ns)))
+              (is (str/includes? log "postmaster: notice #2 to user: 1 thread waits on infra, where serve can't start sessions"))
+              (is (str/includes? body (str ": " reason "\n\n")))
+              (is (str/includes? body (str "To fix it: " real " is a git repo with no commits, so a background session can't make"
+                                           " its worktree there: make a first commit, e.g. `git -C " real
+                                           " commit --allow-empty -m \"🎉 init\"`."))))
+            (is (empty? (starts)) "claude was never run"))
+          (testing "after a first commit: the session starts, and the notice closes"
+            (git-in infra "commit" "-q" "--allow-empty" "-m" "init")
+            (again!)
+            (let [log (serve)
+                  [n] (notices)]
+              (is (str/includes? log "start \"📫 infra #1\" (deadbeef) for #1"))
+              (is (= (str "cwd=" real) (nth (first (starts)) 4)))
+              (is (= "done" (:status n)))
+              (is (= "Delivered now: #1 no longer waits on infra." (:body (last (:msgs (thread-json (:id n))))))))))))))
+
 (deftest mail-to-the-postmaster
   (with-store
     (with-dir [d]
@@ -3360,6 +3419,34 @@
           (let [r (run {:env user-shell} "agents" "move" "outer" (mk "parent"))]
             (is (zero? (:exit r)) (:err r))
             (is (str/includes? (:err r) (str (real (fs/path d "parent")) " encloses the folders of plain and repo;")))))))))
+
+(deftest agents-add-says-a-repo-has-no-commits
+  (with-bare-store
+    (with-dir [d]
+      (let [real #(str (fs/real-path %))
+            mk #(str (fs/create-dirs (fs/path d %)))
+            said #(str (real %) " is a git repo with no commits, so serve won't start sessions there"
+                       " (a background session can't make its worktree): make a first commit")
+            run (fn [& args] (let [r (apply am {:env user-shell} args)] (is (zero? (:exit r)) (:err r)) (:out r)))
+            fresh (mk "fresh") done (mk "done") plain (mk "plain") empty-1 (mk "empty-1") empty-2 (mk "empty-2")]
+        (doseq [r [fresh done empty-1 empty-2]] (git-in r "init" "-q"))
+        (git-in done "commit" "-q" "--allow-empty" "-m" "i")
+        (testing "agents add: said of a repo with no commits, not of one with a commit or of a plain folder"
+          (let [o (run "agents" "add" fresh)]
+            (is (str/includes? o (str "\n" (said fresh) "\n")) "a line of its own")
+            (is (str/includes? o "serve: not running") "and then whether serve runs"))
+          (is (not (str/includes? (run "agents" "add" done) "no commits")))
+          (is (not (str/includes? (run "agents" "add" plain) "no commits"))))
+        (testing "oncall add says it too"
+          (run "oncall" "remove" "fresh")
+          (is (str/includes? (run "oncall" "add" "fresh") (said fresh))))
+        (testing "agents move: said of an on-call agent moved into one, not of one off call"
+          (is (str/includes? (run "agents" "move" "done" empty-1) (said empty-1)))
+          (run "oncall" "remove" "plain")
+          (is (not (str/includes? (run "agents" "move" "plain" empty-2) "no commits"))))
+        (testing "after a first commit, nothing is said"
+          (git-in fresh "commit" "-q" "--allow-empty" "-m" "i")
+          (is (not (str/includes? (run "oncall" "add" "fresh") "no commits"))))))))
 
 (deftest identity-from-the-directory
   (with-bare-store

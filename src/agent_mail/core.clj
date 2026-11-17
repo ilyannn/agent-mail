@@ -794,6 +794,13 @@
                   (remove #(str/starts-with? % "Starting background service")) first)]
     (str what " failed (exit " exit ")" (when line (str ": " line)))))
 
+(defn no-commits-reason
+  "Why serve backs off from an agent whose folder `dir` is a git repo with
+   no commits, where it doesn't run `claude --bg`: a session there couldn't
+   make its worktree (see backoff-fix)."
+  [dir]
+  (str "`claude --bg` not run: " dir " is a git repo with no commits, where a background session can't make its worktree"))
+
 (defn cache-expiry
   "When a session's prompt cache expires, in epoch ms, from its transcript's
    entries (parsed with keyword keys, in file order; the tail is enough):
@@ -1712,12 +1719,17 @@
 
 (defn backoff-fix
   "What would end serve's back-off from an agent: :gone (its folder is),
-   :trust (Claude Code hasn't trusted it) or :log (serve's log is all
-   there is to go on). From `facts` about its folder, {:exists :trusted},
-   each nil when unknown; else from the back-off's `reason`."
-  [reason {:keys [exists trusted]}]
+   :commit (it is a git repo with no commits), :trust (Claude Code hasn't
+   trusted it) or :log (serve's log is all there is to go on). From
+   `facts` about its folder, {:exists :trusted :commits}, each nil when
+   unknown; else from the back-off's `reason`. A repo with no commits
+   comes before trust, as serve doesn't run claude there (see
+   no-commits-reason): the fix goes with the reason it gives."
+  [reason {:keys [exists trusted commits]}]
   (cond (false? exists) :gone
+        (false? commits) :commit
         (false? trusted) :trust
+        (str/includes? (str reason) "git repo with no commits") :commit
         (re-find #"(?i)\bnot trusted\b|\buntrusted\b" (str reason)) :trust
         (str/includes? (str reason) "directory is gone") :gone
         :else :log))
@@ -1729,6 +1741,8 @@
     (case fix
       :trust (str "Claude Code hasn't trusted " dir " yet: run `claude` there once and accept the question.")
       :gone (str dir " is gone: if " agent "'s folder moved, `agent-mail agents move " agent " DIR` says where.")
+      :commit (str dir " is a git repo with no commits, so a background session can't make its worktree there:"
+                   " make a first commit, e.g. `git -C " dir " commit --allow-empty -m \"🎉 init\"`.")
       (str "serve's log says why: " serve-log " on macOS."))))
 
 (def notice-trailer
@@ -1803,9 +1817,9 @@
    directory's names and `dirs` their folders; `oncall` the agents serve
    delivers for, `on-duty` those a listener covers (as for serve-actions);
    `memory` serve's after its own actions this round; `facts` maps an agent
-   serve backs off from to what is known of its folder, {:exists :trusted}
-   (see backoff-fix). Threads that wait on the user, or on an agent on
-   duty, are left alone. In this order:
+   serve backs off from to what is known of its folder, {:exists :trusted
+   :commits} (see backoff-fix). Threads that wait on the user, or on an
+   agent on duty, are left alone. In this order:
    [:pm-unwait T]           T's owner was not in the directory last round,
                             and that no longer holds
    [:pm-wait T owner]       it is not, seen for the first time: a round of

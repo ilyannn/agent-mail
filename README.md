@@ -120,7 +120,9 @@ and every folder below it without an entry of its own is the new agent.
   file it imports that has one (relative to the folder, following imports
   there too). A session serve starts for it is asked to write one.
 - **Trust.** `agents` marks an on-call folder that Claude Code hasn't trusted
-  yet, which serve can't start sessions in.
+  yet, which serve can't start sessions in. Nor does serve start any in a
+  git repo with no commits, where a background session can't make its
+  worktree; `agents add` and `oncall add` say so.
 - **From on-call registrations.** The first time the store is written or
   serve runs, the older on-call registrations (`duty/oncall/`) become
   entries. They stay where they were, and the directory decides from then on.
@@ -241,8 +243,9 @@ wait on an agent, not on you, and that nothing delivers:
 - **An agent on call that serve backs off from** for more than 15
   minutes, or after 3 failures in a row. The notice gives serve's reason
   and the fix where one is known: run `claude` once in a folder Claude
-  Code hasn't trusted; `agent-mail agents move NAME DIR` for a folder
-  that is gone; otherwise serve's log.
+  Code hasn't trusted; make a first commit in a git repo with none;
+  `agent-mail agents move NAME DIR` for a folder that is gone; otherwise
+  serve's log.
 
 A notice is mail from `postmaster` to you, with the usual notification:
 one thread per agent and kind, e.g. `postmaster: 2 threads wait on infra,
