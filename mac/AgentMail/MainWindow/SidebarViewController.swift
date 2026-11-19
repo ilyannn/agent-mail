@@ -1,5 +1,5 @@
-// The sidebar: a source list with Mailboxes (Inbox, Undelivered, All Mail)
-// and Participants (the user first, then every agent in the directory and
+// The sidebar: a source list with Mailboxes (Inbox, Open, Undelivered, All
+// Mail) and Participants (the user first, then every agent in the directory and
 // every other name in a thread; each counts the open threads waiting on it).
 // A participant's dot is filled while one of its sessions is in a turn
 // (green: working; orange: waiting on the user), a ring otherwise (green
@@ -73,7 +73,8 @@ final class SidebarViewController: NSViewController, NSTableViewDelegate, NSMenu
     private func apply() {
         var snapshot = NSDiffableDataSourceSnapshot<Int, SidebarRow>()
         snapshot.appendSections([0])
-        snapshot.appendItems([.header("Mailboxes"), .mailbox(.inbox), .mailbox(.undelivered), .mailbox(.allMail)])
+        snapshot.appendItems([.header("Mailboxes"), .mailbox(.inbox), .mailbox(.open), .mailbox(.undelivered),
+                              .mailbox(.allMail)])
         // Never empty: the user's own row is always first.
         let participants = store.index.participants
         snapshot.appendItems([.header("Participants")] + participants.map { .mailbox(.agent($0.name)) })
@@ -114,6 +115,9 @@ final class SidebarViewController: NSViewController, NSTableViewDelegate, NSMenu
                 cell.show(title: "Inbox", image: symbol("tray", "Inbox"), count: count,
                           tip: "Open threads waiting on you; the count is unread messages to you.",
                           accessibility: count > 0 ? "Inbox, \(count) unread message\(count == 1 ? "" : "s")" : "Inbox")
+            case .open:
+                cell.show(title: "Open", image: symbol("envelope.open", "Open"), count: 0,
+                          tip: "Every open thread, whoever’s turn it is, newest first.")
             case .undelivered:
                 cell.show(title: "Undelivered", image: symbol("paperplane", "Undelivered"), count: count,
                           tip: "Open threads whose recipient has nobody on duty.",

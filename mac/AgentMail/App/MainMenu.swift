@@ -1,6 +1,6 @@
 // The menu bar, with Mail's shortcuts where Mail has the command: New ⌘N,
 // Reply ⌘R, Forward ⇧⌘F, Send ⇧⌘D, Close Thread ⌃⌘A (Mail's Archive), Get
-// New Mail ⇧⌘N, Attach Files ⇧⌘A; mailboxes ⌘1–3 and the sidebar ⌃⌘S. Text size has Safari's:
+// New Mail ⇧⌘N, Attach Files ⇧⌘A; mailboxes ⌘1–4 and the sidebar ⌃⌘S. Text size has Safari's:
 // Actual Size ⌘0, Make Text Bigger ⌘+ (and ⌘=), Make Text Smaller ⌘−, so the
 // main window is ⌥⌘0. ⌘↩ also sends from the reply box
 // (ThreadViewController). Every command is here, so it can be rebound in
@@ -18,6 +18,8 @@ import AppKit
     func refresh(_ sender: Any?)
     func showHelp(_ sender: Any?)
     func showInbox(_ sender: Any?)
+    /// View › Open: the Open mailbox, every open thread (not opening a thread).
+    func showOpenThreads(_ sender: Any?)
     func showUndelivered(_ sender: Any?)
     func showAllMail(_ sender: Any?)
     /// Sort By: the sender is a menu item whose tag is a ThreadOrder's menuTag.
@@ -179,8 +181,9 @@ enum MainMenu {
         m.addItem(item("Make Text Smaller", #selector(MailActions.decreaseTextSize(_:)), "-"))
         m.addItem(.separator())
         m.addItem(item("Inbox", #selector(MailActions.showInbox(_:)), "1"))
-        m.addItem(item("Undelivered", #selector(MailActions.showUndelivered(_:)), "2"))
-        m.addItem(item("All Mail", #selector(MailActions.showAllMail(_:)), "3"))
+        m.addItem(item("Open", #selector(MailActions.showOpenThreads(_:)), "2"))
+        m.addItem(item("Undelivered", #selector(MailActions.showUndelivered(_:)), "3"))
+        m.addItem(item("All Mail", #selector(MailActions.showAllMail(_:)), "4"))
         m.addItem(.separator())
         m.addItem(withSubmenu(sortMenu()))
         m.addItem(.separator())

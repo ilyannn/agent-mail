@@ -269,6 +269,7 @@ final class ThreadListViewController: NSViewController, NSTableViewDelegate, NSM
         } else {
             emptyLabel.stringValue = switch store.mailbox {
             case .inbox: "Nothing waiting on you"
+            case .open: "No open threads"
             case .undelivered: "Everything is being listened for"
             case .allMail: "No threads yet"
             case let .agent(name): store.participantFilter.emptyText(for: name, isMe: name == store.index.me)

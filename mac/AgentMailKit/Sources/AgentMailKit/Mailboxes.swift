@@ -6,6 +6,8 @@ import Foundation
 public enum Mailbox: Hashable, Sendable, Codable {
     /// Open threads waiting on the user.
     case inbox
+    /// Every open thread, whoever's turn it is.
+    case open
     /// Open threads nobody is listening for.
     case undelivered
     /// Every thread, in the chosen ThreadOrder.
@@ -17,6 +19,7 @@ public enum Mailbox: Hashable, Sendable, Codable {
     public var title: String {
         switch self {
         case .inbox: "Inbox"
+        case .open: "Open"
         case .undelivered: "Undelivered"
         case .allMail: "All Mail"
         case let .agent(name): name
@@ -24,8 +27,9 @@ public enum Mailbox: Hashable, Sendable, Codable {
     }
 }
 
-/// How All Mail and a participant's mailbox are sorted. The Inbox is newest
-/// first and Undelivered keeps the CLI's order, whatever this says.
+/// How All Mail and a participant's mailbox are sorted. The Inbox and Open
+/// are newest first (open threads only, so both orders agree) and
+/// Undelivered keeps the CLI's order, whatever this says.
 public enum ThreadOrder: String, CaseIterable, Codable, Sendable {
     /// Latest activity first, open and closed threads mixed.
     case newestFirst
@@ -282,6 +286,8 @@ public struct AgentInfo: Hashable, Sendable {
 public struct MailboxIndex: Sendable, Equatable {
     public let me: String
     public let inbox: [ThreadSummary]
+    /// Every open thread, whoever's turn it is, newest first.
+    public let open: [ThreadSummary]
     public let undelivered: [ThreadSummary]
     /// Every thread, newest first (ThreadOrder.newestFirst).
     public let allMail: [ThreadSummary]
@@ -304,9 +310,11 @@ public struct MailboxIndex: Sendable, Equatable {
         self.byID = byID
         let newestFirst = threads.sorted(by: Self.newerFirst)
         inbox = newestFirst.filter { $0.isWaiting(on: me) }
+        let open = newestFirst.filter(\.isOpen)
+        self.open = open
         undelivered = (status?.undelivered ?? []).compactMap { byID[$0] }
         allMail = newestFirst
-        allMailOpenFirst = newestFirst.filter(\.isOpen) + newestFirst.filter { !$0.isOpen }
+        allMailOpenFirst = open + newestFirst.filter { !$0.isOpen }
         directory = status?.agents
 
         let duty = status?.duty ?? []
@@ -341,12 +349,14 @@ public struct MailboxIndex: Sendable, Equatable {
     public func thread(_ id: String) -> ThreadSummary? { byID[id] }
 
     /// A mailbox's threads; `order` sorts All Mail and participant mailboxes
-    /// only, and `filter` applies to participant mailboxes only. The user's
-    /// own row is `.agent(me)`: every thread with `me` in it.
+    /// only (the Inbox and Open hold open threads, which both orders put
+    /// newest first), and `filter` applies to participant mailboxes only.
+    /// The user's own row is `.agent(me)`: every thread with `me` in it.
     public func threads(in mailbox: Mailbox, order: ThreadOrder = .newestFirst,
                         filter: ParticipantFilter = .all) -> [ThreadSummary] {
         switch mailbox {
         case .inbox: inbox
+        case .open: open
         case .undelivered: undelivered
         case .allMail: everything(order)
         case let .agent(name):
@@ -355,12 +365,13 @@ public struct MailboxIndex: Sendable, Equatable {
     }
 
     /// Whether the new-thread draft's row shows in `mailbox`: wherever the
-    /// thread it starts will be once sent. So All Mail, the user's own
-    /// mailbox, and the recipient's once To names one, as `filter` allows
-    /// (the user's own is Sent, the recipient's Received and Waiting); never
-    /// the Inbox (it will wait on the recipient) or Undelivered.
+    /// thread it starts will be once sent. So All Mail and Open (it will be
+    /// open), the user's own mailbox, and the recipient's once To names one,
+    /// as `filter` allows (the user's own is Sent, the recipient's Received
+    /// and Waiting); never the Inbox (it will wait on the recipient) or
+    /// Undelivered.
     public func showsDraft(_ draft: NewThreadDraft, in mailbox: Mailbox, filter: ParticipantFilter = .all) -> Bool {
-        guard case let .agent(name) = mailbox else { return mailbox == .allMail }
+        guard case let .agent(name) = mailbox else { return mailbox == .allMail || mailbox == .open }
         let to = Formatting.isValidName(draft.recipient) && draft.recipient != me ? draft.recipient : nil
         let thread = ThreadSummary(id: "", subject: draft.rowTitle, from: me, owner: to,
                                    participants: [me] + (to.map { [$0] } ?? []))
@@ -386,17 +397,17 @@ public struct MailboxIndex: Sendable, Equatable {
         }
     }
 
-    /// The count shown next to a mailbox, 0 for none. The units differ on
-    /// purpose: the Inbox counts unread messages addressed to the user (the
-    /// menu bar's number), Undelivered counts threads, and a participant
-    /// counts the open threads waiting on it. So the user's row shows as many
-    /// threads as the Inbox holds, while the Inbox badge counts the messages
-    /// in them that came to the user.
+    /// The count shown next to a mailbox, 0 for none (Open and All Mail
+    /// never have one). The units differ on purpose: the Inbox counts unread
+    /// messages addressed to the user (the menu bar's number), Undelivered
+    /// counts threads, and a participant counts the open threads waiting on
+    /// it. So the user's row shows as many threads as the Inbox holds, while
+    /// the Inbox badge counts the messages in them that came to the user.
     public func badge(for mailbox: Mailbox) -> Int {
         switch mailbox {
         case .inbox: unreadInInbox
         case .undelivered: undelivered.count
-        case .allMail: 0
+        case .open, .allMail: 0
         case let .agent(name): participant(name)?.waiting ?? 0
         }
     }

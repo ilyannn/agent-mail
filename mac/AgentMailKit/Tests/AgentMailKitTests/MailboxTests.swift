@@ -69,6 +69,18 @@ import Testing
         }
     }
 
+    @Test func openHoldsEveryOpenThreadWhoeversTurnItIs() {
+        #expect(Mailbox.open.title == "Open")
+        #expect(index.open.map(\.number) == [4, 2, 1], "#4 waits on infra, #2 and #1 on the user; #3 is closed")
+        #expect(index.open == index.allMail.filter(\.isOpen))
+        for order in ThreadOrder.allCases {
+            #expect(index.threads(in: .open, order: order).map(\.number) == [4, 2, 1], "newest first either way")
+        }
+        #expect(index.badge(for: .open) == 0, "no count, like All Mail")
+        #expect(index.preferredMailbox(for: "2026-10-31-please-rotate-the-tls-certificate") == .undelivered,
+                "a thread's preferred mailbox is never Open")
+    }
+
     @Test func ordersBreakTiesByNumber() {
         let early = Date(timeIntervalSince1970: 1000), late = Date(timeIntervalSince1970: 2000)
         let st = MailStatus(now: late, me: "user", threads: [
@@ -80,6 +92,7 @@ import Testing
         let index = MailboxIndex(status: st)
         #expect(index.threads(in: .allMail).map(\.id) == ["d", "b", "c", "a"], "no updated: its created date")
         #expect(index.threads(in: .allMail, order: .openFirst).map(\.id) == ["d", "c", "a", "b"])
+        #expect(index.threads(in: .open).map(\.id) == ["d", "c", "a"], "b is closed")
         #expect(index.threads(in: .agent("y")).map(\.id) == ["d", "b"])
         #expect(index.threads(in: .agent("y"), order: .openFirst).map(\.id) == ["d", "b"])
     }
@@ -153,6 +166,7 @@ import Testing
     @Test func filtersApplyToParticipantMailboxesOnly() {
         for filter in ParticipantFilter.allCases {
             #expect(index.threads(in: .inbox, filter: filter) == index.inbox)
+            #expect(index.threads(in: .open, filter: filter) == index.open)
             #expect(index.threads(in: .undelivered, filter: filter) == index.undelivered)
             #expect(index.threads(in: .allMail, filter: filter) == index.allMail)
         }

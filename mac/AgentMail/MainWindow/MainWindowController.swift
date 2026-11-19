@@ -125,8 +125,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     }
 
     /// Undelivered keeps the CLI's order (longest waiting first), so the
-    /// sort choice doesn't apply there. In the Inbox, open only, both orders
-    /// agree.
+    /// sort choice doesn't apply there. In the Inbox and Open, open only,
+    /// both orders agree.
     private var canSort: Bool { store.mailbox != .undelivered }
 
     /// The participant filter applies to a participant's mailbox only.
@@ -197,6 +197,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
 
     func debugSelectMailbox(_ raw: String) {
         let mailbox: Mailbox = switch raw {
+        case "open": .open
         case "undelivered": .undelivered
         case "allMail": .allMail
         case _ where raw.hasPrefix("agent:"): .agent(String(raw.dropFirst(6)))
@@ -226,6 +227,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     // MARK: Commands
 
     @objc func showInbox(_ sender: Any?) { store.mailbox = .inbox }
+    @objc func showOpenThreads(_ sender: Any?) { store.mailbox = .open }
     @objc func showUndelivered(_ sender: Any?) { store.mailbox = .undelivered }
     @objc func showAllMail(_ sender: Any?) { store.mailbox = .allMail }
     @objc func setThreadOrder(_ sender: Any?) {
@@ -285,6 +287,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolba
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         let mailbox: Mailbox? = switch menuItem.action {
         case #selector(showInbox(_:)): .inbox
+        case #selector(showOpenThreads(_:)): .open
         case #selector(showUndelivered(_:)): .undelivered
         case #selector(showAllMail(_:)): .allMail
         default: nil

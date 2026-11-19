@@ -99,7 +99,7 @@ import Testing
     @Test func mailboxRoundTrips() {
         withSettings { s in
             // The user's own row under Participants is .agent(me).
-            for m: Mailbox in [.inbox, .undelivered, .allMail, .agent("infra"), .agent("user")] {
+            for m: Mailbox in [.inbox, .open, .undelivered, .allMail, .agent("infra"), .agent("user"), .agent("open")] {
                 s.mailbox = m
                 #expect(s.mailbox == m)
             }
@@ -120,7 +120,7 @@ import Testing
             window.layoutIfNeeded()
             let rows = sidebar.debugRows()
             #expect(rows.map { $0.components(separatedBy: " | ")[0] } == [
-                "sidebar  Mailboxes", "sidebar* Inbox", "sidebar  Undelivered", "sidebar  All Mail",
+                "sidebar  Mailboxes", "sidebar* Inbox", "sidebar  Open", "sidebar  Undelivered", "sidebar  All Mail",
                 "sidebar  Participants", "sidebar  user (you)",
             ])
             #expect(rows.last == "sidebar  user (you) | tip: you (user): every thread you take part in / Nothing waiting on you"

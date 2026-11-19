@@ -9,7 +9,7 @@
 //                    (the sidebar, drawn offscreen that wide: a window
 //                    snapshot leaves the glass sidebar out)
 //   {"cmd": "select", "arg": "<thread id>"}         (clicks the row)
-//   {"cmd": "mailbox", "arg": "inbox|undelivered|allMail|agent:NAME"}
+//   {"cmd": "mailbox", "arg": "inbox|open|undelivered|allMail|agent:NAME"}
 //   {"cmd": "sort", "arg": "newestFirst|openFirst"}  (View › Sort By)
 //   {"cmd": "filter", "arg": "all|sent|received|waiting"} (the scope bar)
 //   {"cmd": "key", "arg": "r", "mods": "cmd,shift"} (through the menus)
@@ -172,11 +172,12 @@ final class DebugHooks: NSObject {
         }
     }
 
-    /// A mailbox as the hooks name it: inbox, undelivered, allMail or
+    /// A mailbox as the hooks name it: inbox, open, undelivered, allMail or
     /// agent:NAME; nil for anything else (the space below the rows).
     static func mailbox(_ raw: String) -> Mailbox? {
         switch raw {
         case "inbox": .inbox
+        case "open": .open
         case "undelivered": .undelivered
         case "allMail": .allMail
         case _ where raw.hasPrefix("agent:"): .agent(String(raw.dropFirst(6)))
@@ -214,7 +215,7 @@ final class DebugHooks: NSObject {
         }
         let window = NSApp.keyWindow ?? NSApp.mainWindow
         let codes: [String: UInt16] = ["\r": 36, " ": 49, "r": 15, "d": 2, "a": 0, "n": 45, "1": 18, "2": 19, "3": 20,
-                                       "0": 29, "w": 13, ",": 43, "\u{1b}": 53, "\t": 48, "=": 24, "+": 24, "-": 27,
+                                       "4": 21, "0": 29, "w": 13, ",": 43, "\u{1b}": 53, "\t": 48, "=": 24, "+": 24, "-": 27,
                                        "f": 3]
         // A known key goes through CGEvent, so its characters come from the
         // key code and the keyboard layout, as when typed: menus match

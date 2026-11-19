@@ -187,6 +187,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MailActions, NSMenuIte
     }
 
     @objc func showInbox(_ sender: Any?) { open(mailbox: .inbox) }
+    @objc func showOpenThreads(_ sender: Any?) { open(mailbox: .open) }
     @objc func showUndelivered(_ sender: Any?) { open(mailbox: .undelivered) }
     @objc func showAllMail(_ sender: Any?) { open(mailbox: .allMail) }
 

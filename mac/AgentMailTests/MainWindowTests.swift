@@ -120,7 +120,7 @@ import Testing
             let sidebar = SidebarViewController(store: store)
             let window = show(sidebar, size: NSSize(width: 260, height: 500))
             defer { window.close() }
-            let rows = sidebar.debugRows().filter { $0.hasPrefix("sidebar") }.dropFirst(5)
+            let rows = sidebar.debugRows().filter { $0.hasPrefix("sidebar") }.dropFirst(6)
             #expect(rows.map { $0.components(separatedBy: " | ")[0] } == [
                 "sidebar  user (you), 1 thread waiting on you", "sidebar  docs, on call, 1 warning",
                 "sidebar  infra, on call, 1 thread waiting on infra",
@@ -240,6 +240,40 @@ import Testing
         #expect(attach.keyEquivalent == "a")
         #expect(attach.keyEquivalentModifierMask == [.command, .shift], "Mail's shortcut")
         #expect(attach.action == #selector(MailActions.attachFiles(_:)))
+    }
+
+    @Test func viewMenuListsTheMailboxesInTheSidebarsOrder() {
+        let actions = [#selector(MailActions.showInbox(_:)), #selector(MailActions.showOpenThreads(_:)),
+                       #selector(MailActions.showUndelivered(_:)), #selector(MailActions.showAllMail(_:))]
+        let items = MainMenu.viewMenu().items.filter { item in item.action.map { actions.contains($0) } ?? false }
+        #expect(items.map(\.title) == ["Inbox", "Open", "Undelivered", "All Mail"])
+        #expect(items.map(\.keyEquivalent) == ["1", "2", "3", "4"])
+        #expect(items.allSatisfy { $0.keyEquivalentModifierMask == .command })
+    }
+
+    @Test func theOpenMailboxListsEveryOpenThreadWhoeversTurnItIs() async {
+        await withStore { store in
+            let list = ThreadListViewController(store: store)
+            let window = show(list, size: NSSize(width: 300, height: 400))
+            defer { window.close() }
+            store.mailbox = .open
+            await settle { rowIDs(list).count == 2 }
+            #expect(rowIDs(list) == ["row  a", "row  b"], "a waits on me, b on infra; c is closed")
+            #expect(list.debugScopeBar() == "scope: hidden", "no participant filter")
+            store.participantFilter = .sent
+            store.threadOrder = .openFirst
+            #expect(store.shownThreads.map(\.id) == ["a", "b"], "neither the filter nor the order changes it")
+
+            // The thread a new message starts will be open.
+            store.startNewMessage(to: "infra")
+            await settle { rowIDs(list).count == 3 }
+            #expect(rowIDs(list) == ["row* /draft", "row  a", "row  b"])
+            store.discardDraft()
+
+            store.debugShow(MailStatus(now: Self.status.now, me: "user", threads: [Self.status.threads[2]]))
+            await settle { rowIDs(list).isEmpty }
+            #expect(list.debugRows().last == "emptyLabel: No open threads")
+        }
     }
 
     @Test func scopeBarShowsForParticipantsAndFilters() async {

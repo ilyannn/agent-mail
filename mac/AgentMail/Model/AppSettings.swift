@@ -113,6 +113,7 @@ final class AppSettings {
         get {
             let raw = defaults.string(forKey: Key.mailbox) ?? ""
             switch raw {
+            case "open": return .open
             case "undelivered": return .undelivered
             case "allMail": return .allMail
             case _ where raw.hasPrefix("agent:"): return .agent(String(raw.dropFirst(6)))
@@ -122,6 +123,7 @@ final class AppSettings {
         set {
             let raw = switch newValue {
             case .inbox: "inbox"
+            case .open: "open"
             case .undelivered: "undelivered"
             case .allMail: "allMail"
             case let .agent(name): "agent:\(name)"
