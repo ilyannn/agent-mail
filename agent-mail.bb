@@ -1386,10 +1386,15 @@
       (println (json/generate-string th {:pretty true}))
       (print (render-thread th)))))
 
-(defn cmd-list [opts]
+(defn cmd-list
+  "My mail (mail-for); `--open` every open thread, whoever's turn it is;
+   `--all` every thread, closed ones too (it wins over `--open`)."
+  [opts]
   (ensure-numbers!)
   (let [me (caller opts)
-        ths (if (:all opts) (all-threads) (mail-for me))
+        ths (cond (:all opts) (all-threads)
+                  (:open opts) (filter #(= "open" (:status %)) (all-threads))
+                  :else (mail-for me))
         ths (map #(assoc % :unread (count (unread % me))) (sort-by :updated ths))]
     (if (:json opts)
       (println (json/generate-string (map core/summary ths) {:pretty true}))
@@ -2273,9 +2278,11 @@
                                               the whole thread, or only its message N (a
                                               position or file name), with its attachments
   (open, reply, read and close without ID offer a picker: fzf when installed)
-  agent-mail list [--all] [--json]            open threads whose turn is mine, then closed
+  agent-mail list [--open | --all] [--json]   open threads whose turn is mine, then closed
                                               ones with news for me: a reply or a close I
-                                              haven't read (read it and it drops off)
+                                              haven't read (read it and it drops off);
+                                              --open: every open thread, whoever's turn;
+                                              --all: every thread, closed ones too
   agent-mail read ID [--json]                 the whole thread; ID is the number from `list`
                                               (7 or #7), the full id, or a unique fragment
   agent-mail open ID                          show the thread in the Mac app when it's installed,

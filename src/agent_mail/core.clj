@@ -1972,7 +1972,7 @@
 ;; ---------------------------------------------------------------- argv
 
 (def value-opts #{"to" "subject" "as" "session" "date" "id" "timeout" "interval" "msg" "name"})
-(def flag-opts #{"json" "all" "edit" "once" "standby" "here"})
+(def flag-opts #{"json" "all" "open" "edit" "once" "standby" "here"})
 (def ^:private number-opts {:timeout "seconds" :interval "seconds"})
 
 (defn- finish-opts [opts]

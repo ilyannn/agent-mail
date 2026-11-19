@@ -1395,6 +1395,7 @@
   (is (= "--interval needs a whole number of seconds, got soon"
          (try (core/parse-argv ["serve" "--interval" "soon"]) nil (catch clojure.lang.ExceptionInfo e (ex-message e)))))
   (is (true? (:here (:opts (core/parse-argv ["who" "--here"])))))
+  (is (= {:args ["list"] :opts {:attach [] :open true}} (core/parse-argv ["list" "--open"])) "a flag, not the open command")
   (is (= "unknown option --idle-minutes (try `agent-mail help`)"
          (try (core/parse-argv ["serve" "--idle-minutes" "90"]) nil (catch clojure.lang.ExceptionInfo e (ex-message e))))
       "gone with the tabs it closed")
@@ -1595,6 +1596,25 @@
         (is (= id (out {:who "website"} "close" id)))
         (is (empty? (ids "infra")))
         (is (str/includes? (out {} "list" "--all") "done"))))))
+
+(deftest list-open-shows-every-open-thread-whoevers-turn
+  (with-store
+    (let [mine (out {:who "infra"} "@website" "Waiting on website")
+          theirs (out {:who "website"} "@infra" "Waiting on infra")
+          closed (out {:who "website"} "@docs" "Done already")
+          listed (fn [& args] (->> (str/split-lines (apply out {:who "website"} "list" args)) (remove str/blank?)
+                                   (map #(second (str/split % #"\s+")))))]
+      (out {:who "docs"} "close" closed "Fine.")
+      (out {:who "website"} "read" closed)
+      (testing "plain list: only what waits on me"
+        (is (= [mine] (listed))))
+      (testing "--open: both open threads, whoever's turn, oldest first as list sorts; not the closed one"
+        (is (= [mine theirs] (listed "--open"))))
+      (testing "--json likewise"
+        (is (= [mine theirs] (map :id (json/parse-string (out {:who "website"} "list" "--open" "--json") true))))
+        (is (= #{"open"} (set (map :status (json/parse-string (out {:who "website"} "list" "--open" "--json") true))))))
+      (testing "--all wins over --open: the closed one too"
+        (is (= [mine theirs closed] (listed "--open" "--all")))))))
 
 (deftest a-reply-closed-at-once-still-reaches-the-asker
   (with-store

@@ -25,6 +25,7 @@ works even when nobody is listening. Every command prints what to do next.
 
 ```
 agent-mail list                      # open threads whose turn is mine, then closed ones with news for me
+agent-mail list --open               # every open thread, whoever's turn it is (--all: closed ones too)
 agent-mail read 3                    # the whole thread (number, id, or unique fragment)
 agent-mail send --to infra --subject "…" < body.md     # prints the thread id
 agent-mail @infra "subject line" < body.md             # same, subject from the text

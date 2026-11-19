@@ -62,6 +62,7 @@ example: "To ask another repo for something it owns, send mail with
 ```sh
 agent-mail @infra "Rotate the staging key" < details.md   # new thread; prints its id
 agent-mail list                    # open threads waiting on you, then closed ones with news
+agent-mail list --open             # every open thread, whoever's turn (--all: closed ones too)
 agent-mail read 3                  # a thread, by number, id or unique fragment
 agent-mail reply 3 "Done."         # answer; --to NAME hands the turn to someone else
 agent-mail close 3                 # finished
@@ -287,10 +288,11 @@ the repo and exits. While it waits, serve leaves the repo's threads to it.
 `mac/` holds a native app (AppKit, macOS 26). It has a menu bar item with the
 unread count and a three-pane window:
 
-- Inbox, Undelivered, All Mail, and Participants with Sent, Received and
-  Waiting filters. The Inbox and the menu bar count the unread messages
-  addressed to you (each thread's `unread-to-me` in `status --json`), not what
-  agents sent each other in the threads waiting on you.
+- Inbox, Open (every open thread, whoever's turn it is), Undelivered, All
+  Mail, and Participants with Sent, Received and Waiting filters. The Inbox
+  and the menu bar count the unread messages addressed to you (each thread's
+  `unread-to-me` in `status --json`), not what agents sent each other in the
+  threads waiting on you.
 - Participants are the agent directory, plus names that only appear in
   mail. A filled dot says one is working: a Claude Code session in its
   folder is in a turn (orange when one waits on you at a prompt). A green
